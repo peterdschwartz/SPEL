@@ -1,0 +1,113 @@
+@startuml
+!theme plain
+hide circle
+
+
+' Database Schema Diagram
+
+entity "Modules" as modules {
+  *module_id : int <#gold:key:>
+  --
+  module_name : varchar(100)
+}
+
+entity "ModuleDependency" as module_dependency {
+  *dependency_id : int <#gold:key:>
+  --
+  module_id : int <:link:>
+  dep_module_id : int <:link:>
+  object_used : varchar(100)
+}
+
+entity "UserTypes" as user_types {
+  *user_type_id : int <#gold:key:>
+  --
+  module_id : int <:link:>
+  user_type_name : varchar(100)
+}
+
+entity "TypeDefinitions" as type_definitions {
+  *define_id : int <#gold:key:>
+  --
+  type_module_id : int <:link:>
+  user_type_id : int <:link:>
+  member_type : varchar(100)
+  member_name : varchar(100)
+  dim : int
+  bounds : varchar(100)
+}
+
+entity "UserTypeInstances" as user_type_instances {
+  *instance_id : int <#gold:key:>
+  --
+  inst_module_id : int <:link:>
+  instance_type_id : int <:link:>
+  instance_name : varchar(100)
+}
+
+entity "Subroutines" as subroutines {
+  *subroutine_id : int <#gold:key:>
+  --
+  subroutine_name : varchar(100)
+  module_id : int <:link:>
+}
+
+entity "Args" as args {
+  *arg_id : int <#gold:key:>
+  --
+  subroutine_id : int <:link:>
+  arg_type : varchar(100)
+  arg_name : varchar(100)
+  dim : int
+}
+
+entity "Calltree" as calltree {
+  *parent_id : int <#gold:key:>
+  --
+  parent_subroutine_id : int <:link:>
+  child_subroutine_id : int <:link:>
+}
+
+entity "LocalArrays" as local_arrays {
+  *local_array_id : int <#gold:key:>
+  --
+  subroutine_id : int <:link:>
+  array_name : varchar(100)
+  dim : int
+}
+
+entity "GlobalVars" as global_vars {
+  *variable_id : int <#gold:key:>
+  --
+  subroutine_id : int <:link:>
+  instance_id : int <:link:>
+  member_id : int <:link:>
+  status : varchar(2)
+}
+
+class "Legend: Table Name" as L {
+  *Primary Key : int <#gold:key:>
+  --
+  Foreign Key : int <:link:>
+  Field : Type
+}
+' Relationships
+modules ||--o{ module_dependency : "module"
+modules ||--o{ module_dependency : "dep_module"
+modules ||--o{ user_types : "module"
+modules ||--o{ type_definitions : "type_module"
+modules ||--o{ user_type_instances : "inst_module"
+modules ||--o{ subroutines : "module"
+
+user_types ||--o{ type_definitions : "user_type"
+user_types ||--o{ user_type_instances : "instance_type"
+
+subroutines ||--o{ args : "subroutine"
+subroutines ||--o{ calltree : "parent_subroutine"
+subroutines ||--o{ calltree : "child_subroutine"
+subroutines ||--o{ local_arrays : "subroutine"
+subroutines ||--o{ global_vars : "subroutine"
+
+user_type_instances ||--o{ global_vars : "instance"
+type_definitions ||--o{ global_vars : "member"
+@enduml

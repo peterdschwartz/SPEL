@@ -15,7 +15,7 @@ from scripts.types import PointerAlias
 from scripts.utilityFunctions import Variable
 
 
-def match_input_arguments(l_args, sub, special, verbose=False):
+def match_input_arguments(l_args, sub: Subroutine, special, verbose=False):
     """
     function that matches the args to the corresponding dummy args
     of the subroutine.
@@ -26,7 +26,7 @@ def match_input_arguments(l_args, sub, special, verbose=False):
     """
     func_name = "match_input_arguments"
 
-    test_args = [v for v in sub.Arguments.values()]
+    test_args = [v for v in sub.arguments.values()]
 
     num_input_args = len(l_args)
 
@@ -57,7 +57,7 @@ def match_input_arguments(l_args, sub, special, verbose=False):
         return matched  # not enough arguments
 
     # get list of arg names for keyword comparsions
-    test_arg_names = [k for k in sub.Arguments.keys()]
+    test_arg_names = [k for k in sub.arguments.keys()]
 
     argn = 0  # argument number
     skip = 0  # keep track of skipped optional arguments
@@ -161,13 +161,13 @@ def determine_arg_name(
             keyword, m_var_name = matched_arg.split("=")
             keyword = keyword.strip()
             m_var_name = m_var_name.strip()
-            actual_arg = child_sub.Arguments[keyword]
+            actual_arg = child_sub.arguments[keyword]
         else:
             # if not keyword we need to match by position.
             # Get argument position by converting to list of keys
-            arg_key_list = [arg for arg in child_sub.Arguments.keys()]
+            arg_key_list = [arg for arg in child_sub.arguments.keys()]
             arg_key = arg_key_list[locs]
-            actual_arg = child_sub.Arguments[arg_key]
+            actual_arg = child_sub.arguments[arg_key]
             m_var_name = matched_arg
 
         arg_to_dtype = PointerAlias(actual_arg.name, m_var_name)
@@ -199,7 +199,7 @@ def compare_args(
     sub: Subroutine,
 ) -> bool:
 
-    test_arg_list = list(sub.Arguments.values())
+    test_arg_list = list(sub.arguments.values())
     num_args = len(args_desc)
     argn = 0
     keyword = args_desc[0].keyword
@@ -217,9 +217,9 @@ def compare_args(
     if keyword:
         for i in range(argn, num_args):
             key_ident = args_desc[i].key_ident
-            if key_ident not in sub.Arguments:
+            if key_ident not in sub.arguments:
                 return False
-            test_arg = sub.Arguments[key_ident]
+            test_arg = sub.arguments[key_ident]
             neqv = bool(
                 args_desc[i].argtype
                 != ArgType(datatype=test_arg.type, dim=test_arg.dim)

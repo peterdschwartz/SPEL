@@ -72,7 +72,7 @@ def check_field_access(
 
     return [m for m in matches]
 
-def check_allocate_stmt(line: str,varname: str,ln:int)-> ReadWrite:
+def check_allocate_stmt(line: str,varname: str,lpair: LineTuple)-> ReadWrite:
     """
     determines if varname is var being allocated (output) or dimension var (input)
     Note: line has already subsituted out the allocate\\s* string
@@ -86,9 +86,9 @@ def check_allocate_stmt(line: str,varname: str,ln:int)-> ReadWrite:
         dim_str = m_dim.group()
         temp = temp.replace(dim_str,"")
     if varname in temp:
-        return ReadWrite('w',ln)
+        return ReadWrite('w',lpair.ln,line=lpair)
     elif varname in dim_str:
-        return ReadWrite('r',ln)
+        return ReadWrite('r',lpair.ln,line=lpair)
     else:
         print(f"Error -- couldn't assign status to {varname}\n",line)
         sys.exit(1)
@@ -160,7 +160,7 @@ def determine_variable_status(
     Function that loops through each var in match_variables and
     determines the ReadWrite status.
     """
-    func_name = "determine_variable_status::"
+    func_name = "( determine_variable_status )"
     line = lpair.line
     ln = lpair.ln
     match_assignment = regex_assignment.search(line)
@@ -204,18 +204,18 @@ def determine_variable_status(
             while m_bounds:
                 is_bounds = re.search(rf"\b{var_name}\b",m_bounds.group())
                 if is_bounds:
-                    rw_status = ReadWrite("r", ln)
+                    rw_status = ReadWrite("r", ln, lpair)
                     vars_access.setdefault(var_name, []).append(rw_status)
                 temp_line = temp_line.replace(m_bounds.group(), "")
                 m_bounds = regex_bounds.search(temp_line)
 
         # if the variables are in an if or do statement, they are read
         if match_doif:
-            rw_status = ReadWrite("r", ln)
+            rw_status = ReadWrite("r", ln, lpair)
             vars_access.setdefault(var_name, []).append(rw_status)
         elif match_alloc:
             temp = regex_alloc.sub("",line)
-            rw_status = check_allocate_stmt(line=temp,ln=ln,varname=var_name)
+            rw_status = check_allocate_stmt(line=temp,lpair=lpair,varname=var_name)
             vars_access.setdefault(var_name,[]).append(rw_status)
         elif match_assignment:
             m_start = match_assignment.start()
@@ -236,18 +236,18 @@ def determine_variable_status(
 
             if match_lhs and not match_rhs:
                 if match_index:
-                    rw_status = ReadWrite("r", ln)
+                    rw_status = ReadWrite("r", ln, lpair)
                 else:
-                    rw_status = ReadWrite("w", ln)
+                    rw_status = ReadWrite("w", ln, lpair)
                 vars_access.setdefault(var_name, []).append(rw_status)
             elif match_rhs and not match_lhs:
-                rw_status = ReadWrite("r", ln)
+                rw_status = ReadWrite("r", ln, lpair)
                 vars_access.setdefault(var_name, []).append(rw_status)
             elif match_lhs and match_rhs:
-                rw_status = ReadWrite("rw", ln)
+                rw_status = ReadWrite("rw", ln, lpair)
                 vars_access.setdefault(var_name, []).append(rw_status)
         elif match_case:
-            rw_status = ReadWrite('r',ln)
+            rw_status = ReadWrite('r',ln, lpair)
             vars_access.setdefault(var_name, []).append(rw_status)
 
         if not rw_status and not is_decl and not ignore:
@@ -282,7 +282,7 @@ def check_arguments(
             dummy argument for the child subroutine
     """
     var_status: dict[str, ReadWrite] = {}
-    call_ln = call_desc.ln
+    call_ln = call_desc.lpair.ln
     if child_sub.library:
         return var_status
 
@@ -296,7 +296,7 @@ def check_arguments(
 
     for argvar in vars_in_arguments.values():
         if argvar.node.nested_level > 0:
-            var_status[argvar.var.name] = ReadWrite(status="r", ln=call_ln)
+            var_status[argvar.var.name] = ReadWrite(status="r", ln=call_ln, line=call_desc.lpair)
         else:
             keyword = check_keyword(argvar.node)
             if keyword:
@@ -305,7 +305,7 @@ def check_arguments(
                 argn = argvar.node.argn
                 dummy_arg = child_sub.dummy_args_list[argn]
             dummy_status = child_sub.arguments_read_write[dummy_arg]
-            var_status[argvar.var.name] = ReadWrite(dummy_status.status, ln=call_ln)
+            var_status[argvar.var.name] = ReadWrite(dummy_status.status, ln=call_ln, line=call_desc.lpair)
 
     return var_status
 
@@ -407,7 +407,7 @@ def determine_argvar_status(
     }
     # Update the line number to be line child_sub is called in parent.
     updated_var_status = {
-        gv: [ReadWrite(status=val.status, ln=linenum)]
+        gv: [ReadWrite(status=val.status, ln=linenum,line=val.ltuple)]
         for gv, val in updated_var_status.items()
     }
 
@@ -454,7 +454,7 @@ def trace_derived_type_arguments(
 
     for call_desc in parent_sub.sub_call_desc.values():
         child_sub = sub_dict[call_desc.fn]
-        call_ln = call_desc.ln
+        call_ln = call_desc.lpair.ln
         unnested_vars = [ argvar for argvar in call_desc.globals
             if argvar.var.name in inst_set and argvar.node.nested_level == 0]
 
@@ -565,7 +565,7 @@ def find_child_subroutines(
         )
         if call_desc:
             call_desc.aggregate_vars()
-            sub.sub_call_desc[call_desc.ln] = call_desc
+            sub.sub_call_desc[call_desc.lpair.ln] = call_desc
 
     return
 

@@ -262,11 +262,11 @@ def parse_subroutine_call(
 
     return CallDesc(alias=sub_name,
                     fn=fn,
-                    ln=input.ln,
                     args=arg_desc_list,
                     globals=[],
                     locals=[],
-                    dummy_args=[])
+                    dummy_args=[],
+                    lpair=input)
 
 def resolve_class_method(
     subname: str,
@@ -322,7 +322,7 @@ def create_environment(
     variables are categorized as local, dummy argument, or "global"
     """
     intrinsic_types = { "real", "integer", "character", "logical" }
-    local_vars: dict[str,Variable] = sub.LocalVariables["scalars"] | sub.LocalVariables["arrays"]
+    local_vars: dict[str,Variable] = sub.local_variables
 
     for ptr, gv_key in sub.associate_vars.items():
         if gv_key in sub.dtype_vars:
@@ -347,7 +347,7 @@ def create_environment(
 
     # Argument Variables
     dtype_args: list[Variable] = [
-        var for var in sub.Arguments.values() if var.type not in intrinsic_types
+        var for var in sub.arguments.values() if var.type not in intrinsic_types
     ]
     expanded_dtypes = expand_dtype(dtype_args, type_dict)
 
@@ -358,9 +358,9 @@ def create_environment(
             expanded_dtypes[ptr] = expanded_dtypes[gv_key]
 
     variables.update(expanded_dtypes)
-    variables.update(sub.Arguments)
+    variables.update(sub.arguments)
 
-    dummy_dict: dict[str,Variable] = expanded_dtypes | sub.Arguments
+    dummy_dict: dict[str,Variable] = expanded_dtypes | sub.arguments
 
     instance_dict: Dict[str,DerivedType] = {}
     inst_var_dict: Dict[str, Variable] = {}
@@ -375,7 +375,7 @@ def create_environment(
 
     variables.update(inst_var_dict)
 
-    for argname, arg in sub.Arguments.items():
+    for argname, arg in sub.arguments.items():
         if arg.type in type_dict.keys():
             instance_dict[argname] = type_dict[arg.type]
 
@@ -636,7 +636,6 @@ def evaluate_field_access(branch: ArgTree, env: Environment) -> ArgType:
 
 
 def get_ident(node: dict[str,Any])->str:
-
     if node["Node"] == "FuncExpression":
         return node["Func"]
     elif node["Node"] == "Ident":

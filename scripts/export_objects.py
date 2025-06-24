@@ -284,7 +284,7 @@ def export_subroutine_args(sub_dict: dict[str, Subroutine], prefix):
     for sub in sub_dict.values():
         sub_name = sub.name
         module = sub.module
-        for arg in sub.Arguments.values():
+        for arg in sub.arguments.values():
             add_row(module, sub_name, arg)
 
     write_dict_to_csv(export_dict, field_names, csv_file)

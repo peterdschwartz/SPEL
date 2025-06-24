@@ -5,6 +5,7 @@ from collections import namedtuple
 import numpy as np
 import xarray
 from tabulate import tabulate
+from xarray.core.dataset import Dataset
 
 # namedtuple for summary of errors
 Tally = namedtuple("Tally", ["name", "total", "rmse", "max"])
@@ -35,14 +36,14 @@ def progressbar(it, prefix="", size=60, out=sys.stdout):
     print("\n", flush=True, file=out)
 
 
-def rel_error(refdata, compdata, var, error_log):
+def rel_error(refdata: Dataset, compdata: Dataset, var: str, error_log):
     """
     Function to find any differences between history files
         - refdata : xarray Dataset presumed to have the correct values
         - compdata : xr Dataset values to test.
         - var : name of history variable
     The array dimensions for each variable are of the form:
-        'time': 1, 'levdcmp': 15, 'lndgrid': 21
+        'time': UNLIM, 'levdcmp': 15, 'lndgrid': 21
     it will be assumed that time is always the leftmost, and
     the gridcell is always the rightmost dimension.
     """
@@ -53,6 +54,19 @@ def rel_error(refdata, compdata, var, error_log):
     dims = refdata[var].dims
     dtype = refdata[var].dtype
     sizes = refdata[var].sizes
+    # Handle time mismatch by slicing to shortest available
+    if "time" in dims:
+        time_axis = dims.index("time")
+        time_len_ref = original_vals.shape[time_axis]
+        time_len_comp = comp_vals.shape[time_axis]
+        min_time_len = min(time_len_ref, time_len_comp)
+
+        # Slice both arrays along time dimension
+        slicer = [slice(None)] * original_vals.ndim
+        slicer[time_axis] = slice(0, min_time_len)
+        original_vals = original_vals[tuple(slicer)]
+        comp_vals = comp_vals[tuple(slicer)]
+
     if comp_vals.shape != original_vals.shape:
         print(f"Error {var} dimensions do not match between files")
         print(f"OG : {original_vals.shape}\n TEST : {comp_vals.shape}")

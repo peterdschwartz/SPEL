@@ -1,247 +1,188 @@
 """
-Module that holds the Loop Class 
+Module that holds the Loop Class
 that is used to parse subroutines
 """
 
+from __future__ import annotations
+
 import re
 import sys
+from dataclasses import asdict, dataclass
+from enum import Enum, auto
+from typing import TYPE_CHECKING, Optional
 
-from scripts.analyze_subroutines import Subroutine
+from scripts.fortran_parser.spel_ast import (DoLoop, ExpressionStatement,
+                                             FuncExpression, InfixExpression)
+from scripts.fortran_parser.spel_parser import Parser
+from scripts.types import LineTuple, LogicalLineIterator, ReadWrite
+
+if TYPE_CHECKING:
+    from scripts.analyze_subroutines import Subroutine
+
+from scripts.fortran_parser.lexer import Lexer
+from scripts.logging_configs import get_logger
 from scripts.mod_config import _bc
-from scripts.utilityFunctions import lineContinuationAdjustment
+from scripts.utilityFunctions import Variable, lineContinuationAdjustment
 
-regex_do_start = re.compile(r"^\s*(\w+:)?\s*do\b", re.IGNORECASE)
+regex_do_start = re.compile(r"^\s*(\w+\s*:)?\s*do\b", re.IGNORECASE)
+regex_do_while = re.compile(r"do\s+while\b")
 regex_do_end = re.compile(r"^\s*(end\s*do(\s+\w+)?)", re.IGNORECASE)
 
-def exportVariableDependency(
-    subname, var_list, global_vars, local_vars, DoLoops, mode="LaTex"
-):
+ReadWriteDict = dict[str, list[ReadWrite]]
+
+Kind = Enum("Kind", ["doloop", "dowhile"])
+
+
+@dataclass
+class LoopStart:
+    ln: int
+    kind: Kind
+
+
+def is_within_any_loop(line_no: int, loops: list[Loop]) -> bool:
     """
-    This function takes list of all collected DoLoops of a
-    subroutine (parent) and creates a readable table with
-    the variables.
+    Return True if `line_no` falls within any loop's start–end range
     """
-
-    # Initialize dictionary for variables across all Loops
-    num_loops = len(DoLoops)
-    varsForAllLoops = {v: [" - "] * num_loops for v in var_list}
-    current_name = subname
-    old_name = subname
-    if mode == "LaTex":
-        # store subroutine name and how many columns they occupy
-        header_tex = []
-
-    header = []
-    count = 0
-    for n, loop in enumerate(DoLoops):
-        current_name = loop.subcall.name
-        if current_name is old_name:
-            count += 1
-            for v in var_list:
-                varsForAllLoops[v][n] = f"{'-':4}"
-        else:  # New subroutine
-            for v in var_list:
-                varsForAllLoops[v][n] = f"{'|-':4}"
-            width = 4 * count
-            if count == 0:
-                continue
-            x = "|" + old_name[0 : width - 2]
-            string = f"{x:{width}}"
-            header.append(string)
-
-            #
-            if mode == "LaTex":
-                header_tex.append([old_name, count])
-
-            old_name = loop.subcall.name
-            count = 1
-        # end of Loops
-        if n == len(DoLoops) - 1:
-            width = 4 * count
-            x = "|" + current_name[0 : width - 2]
-            string = f"{x:{width}}"
-            header.append(string)
-            if mode == "LaTex":
-                header_tex.append([current_name, int(width / 4)])
-
-    header_string = "".join(header)
-    print(f'{" ":<20} {header_string}')
-
-    ofile = open(f"./script-output/{subname}AllLoopVariables.txt", "w")
-    ofile.write(f'{" ":<20} {header_string}' + "\n")
-    #
-    # Update formatted status for each var
-    #
-    current_name = subname
-    old_name = subname
-    for n, loop in enumerate(DoLoops):
-        current_name = loop.subcall.name
-        if current_name is not old_name:
-            # Loops are in a different subroutine
-            for v, status in loop.vars.items():
-                if v not in var_list:
-                    continue
-                status = "|" + status
-                varsForAllLoops[v][n] = f"{status:4}"
-            old_name = loop.subcall.name
-        else:
-            for v, status in loop.vars.items():
-                if v not in var_list:
-                    continue
-                varsForAllLoops[v][n] = f"{status:4}"
-
-    for key in varsForAllLoops:
-        string = "".join(varsForAllLoops[key])
-        if key in local_vars:
-            skey = _bc.WARNING + key + _bc.ENDC
-        elif key in global_vars:
-            skey = _bc.OKBLUE + key + _bc.ENDC
-
-        print(f"{skey: <28} {string}")
-        ofile.write(f"{key: <28} {string}" + "\n")
-    ofile.close()
-
-    if mode == "LaTex":
-        create_latex_table(header_tex, varsForAllLoops, DoLoops, subname)
-    return
+    for loop in loops:
+        if loop.start < line_no < loop.end:
+            return True
+    return False
 
 
-def create_latex_table(header, varsForAllLoops, doloops, subname):
-    """
-    Take dependency data and generate a LaTeX table
-    """
-
-    ofile = open(rf"./script-output/{subname}Table.tex", "w")
-    ofile.write(r"\\begin{table*}[]\n")
-    ofile.write(r"\centering\n")
-    ofile.write(r"\caption{}\n")
-    ofile.write(r"\label{tab:my-table}\n")
-    # create string for number of columns:
-    individual = True
-    compressed_vars_loops = {v: [] for v in varsForAllLoops}
-
-    num_sections = len(header)
-    num_loops = 0
-    running_loop_tally = []
-    for section in header:
-        num_loops += section[1]
-        running_loop_tally.append(num_loops - 1)
-
-    print(running_loop_tally)
-    num_removed = 0
-    for l in range(0, num_loops):
-        count = 0
-        for var in varsForAllLoops:
-            status = varsForAllLoops[var][l].strip()
-            if status != "-":
-                count += 1
-        if count >= 2:  # add to the new dict
-            for var in varsForAllLoops:
-                status = varsForAllLoops[var][l]
-                compressed_vars_loops[var].append(status)
-        else:
-
-            # skipping this loop -- need to decrement section count as well
-            print(f"Skipping loop {l}")
-            section = 0
-            found = False
-            while not found:
-                if l <= running_loop_tally[section]:
-                    found = True
-                    header[section][1] -= 1  # decrement this section
-                else:
-                    section += 1
-            # recalculate num_loops and running loop tally:
-            num_loops = 0
-            # running_loop_tally = []
-            for section in header:
-                num_loops += section[1]
-                # running_loop_tally.append(num_loops-1)
-            print("New num_loops,tally,header:", num_loops, header)
-
-    # cols = "|p{1cm}|"
-    cols = "|p{0.1\\textwidth}|"
-    const = 0.0
-    for section in header:
-        count = section[1]
-        width = 0.08 / num_loops
-        width = round(width, 3)
-        if individual:
-            temp = "p{" + f"{width}" + r"\\textwidth}"
-            cols += temp * count
-        cols += "|"
-
-    ofile.write(r"\\begin{tabular}{" + cols + "}\n")
-    ofile.write(r"\hline\n")
-    # create string for headers
-    hstring = " &"
-    num_sections = len(header)
-    for section in header[:-1]:
-        sname = section[0]
-        if "_" in sname:
-            sname = sname.replace("_", r"\_")
-        count = section[1]
-        if individual:
-            hstring += r"\multicolumn{" + f"{count}" + "}{c|}{" + f"{sname}" + "}&"
-        else:
-            hstring += sname + "&"
-
-    section = header[num_sections - 1]
-    sname, count = section
-    if "_" in sname:
-        sname = sname.replace("_", r"\_")
-    if individual:
-        hstring += r"\multicolumn{" + f"{count}" + "}{c|}{" + f"{sname}" + "}\\\\ \n"
-    else:
-        hstring += sname + "\\\\ \n"
-
-    ofile.write(hstring)
-    ofile.write(r"\hline\n")
-
-    # Make string for each table row:
-    rows = []
-    print(header)
-    for var in compressed_vars_loops:
-        loop_status = compressed_vars_loops[var]
-        row = var.replace("_", r"\_") + "&"
-
-        # Add '&' after each section
-        section_num = 0
-        count = header[section_num][1]
-
-        for n, loop in enumerate(loop_status):
-            loop = loop.replace("|", " ")
-            if individual:
-                loop = loop.strip()
-                row += loop
-                if n == len(loop_status) - 1:
-                    row += " \\\\ [0.5ex]"
-                else:
-                    row += "&"
-            else:
-                row += f"{loop}"
-                if n + 1 == count:
-                    section_num += 1
-                    count += header[section_num][1]
-                if n == len(loop_status) - 1:
-                    row += " \\\\"
-                else:
-                    row += "&"
-
-        rows.append(row)
-
-    for row in rows:
-        ofile.write(row + "\n")
-
-    ofile.write(r"\hline\n")
-    ofile.write(r"\end{tabular}\n\end{table*}\n")
-    ofile.close()
+def in_loop(line_no: int, loop: Loop) -> bool:
+    return loop.start < line_no < loop.end
 
 
 def get_loops(sub: Subroutine):
+    """
+    Function
+    """
     lines = sub.sub_lines
-    do_lines = [ lpair for lpair in filter(lambda x: regex_do_start.search(x.line),lines) ]
-    end_do_lines = [lpair for lpair in filter(lambda x: regex_do_end.search(x.line), lines) ]
+
+    loops: list[Loop] = []
+    line_it = LogicalLineIterator(lines, "LoopIter")
+    nested: int = 0
+    start_lns: list[LoopStart] = []
+    end_lns: list[int] = []
+    for full_line, _ in line_it:
+        start_index = line_it.start_index
+        orig_ln = line_it.lines[start_index].ln
+        m_start = regex_do_start.search(full_line)
+        m_dowhile = regex_do_while.search(full_line)
+        if m_start:
+            kind = Kind.dowhile if m_dowhile else Kind.doloop
+            start_lns.append(LoopStart(ln=orig_ln, kind=kind))
+            do_line = full_line
+            nested += 1
+        m_enddo = regex_do_end.search(full_line)
+        if m_enddo:
+            nested -= 1
+            end_lns.append(orig_ln)
+
+            end_ln = end_lns.pop()
+            start_ln = start_lns.pop()
+            loops.append(Loop(do_line, start_ln.ln, end_ln, start_ln.kind, sub, nested))
+
+    input: list[str] = [l.line for l in loops]
+    input_str = "\n".join(input)
+
+    lex = Lexer(input=input_str)
+    parser = Parser(lex=lex)
+    program = parser.parse_program()
+    for i, stmt in enumerate(program.statements):
+        loop = loops[i]
+        loop.node = stmt
+        loop.index = loop.node.index
+
+    aliases = check_filter_aliases(sub, loops)
+    sub.logger.info(f"ALIASES: {aliases}")
+    for loop in loops:
+        if loop.kind == Kind.doloop:
+            loop.get_loop_vars(aliases)
+
+    sub.loops = loops
+    return
+
+
+def check_filter_aliases(sub: Subroutine, loops: list[Loop]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    regex_filter = re.compile(r"filter")
+    filter_args = {
+        var: rw for var, rw in sub.arg_access_by_ln.items() if regex_filter.match(var)
+    }
+
+    lines_to_parse: list[str] = []
+
+    for f in filter_args.values():
+        lines = [x.ltuple.line for x in f if not is_within_any_loop(x.ltuple.ln, loops)]
+        lines_to_parse.extend(lines)
+
+    input_str = "\n".join(lines_to_parse)
+    lexer = Lexer(input_str)
+    parser = Parser(lexer)
+    program = parser.parse_program()
+
+    for stmt in program.statements:
+        assert isinstance(stmt, ExpressionStatement)
+        expr = stmt.expression
+        assert isinstance(expr, InfixExpression)
+        left, op, right = expr.decompose()
+        if op != "=":
+            continue
+        assert isinstance(left, FuncExpression)
+        # we are looking for statements of the form:  ftemp(:) = filter_x(:)
+        if not isinstance(right, FuncExpression):
+            continue
+        alias = str(left.function)
+        filter_ = str(right.function)
+        aliases[alias] = filter_
+
+    return aliases
+
+
+def print_tree(loops, indent=0):
+    for loop in loops:
+        parent = (
+            f" ← {loop.outer_loop.start}-{loop.outer_loop.end}L"
+            if loop.outer_loop
+            else ""
+        )
+        print("  " * indent + f"{repr(loop)}{parent}")
+        print_tree(loop.inner_loops, indent + 1)
+
+
+def build_loop_hierarchy(loops: list[Loop]) -> list[Loop]:
+    """ """
+    loops = sorted(loops, key=lambda x: (x.nested, x.start))
+
+    root_loops = []
+    by_level = {0: []}  # nesting level → list of loops
+
+    for loop in loops:
+        level = loop.nested
+        if level == 0:
+            root_loops.append(loop)
+            by_level.setdefault(0, []).append(loop)
+        else:
+            # Find most recent enclosing loop at level - 1
+            for candidate in reversed(by_level.get(level - 1, [])):
+                if candidate.start < loop.start and candidate.end > loop.end:
+                    candidate.inner_loops.append(loop)
+                    loop.outer_loop = candidate
+                    break
+            by_level.setdefault(level, []).append(loop)
+
+    return root_loops
+
+
+def accesses_in_range(
+    lstart: int, lend: int, access_dict: ReadWriteDict
+) -> ReadWriteDict:
+    return {
+        var: [rw for rw in accesses if lstart < rw.ln < lend]
+        for var, accesses in access_dict.items()
+        if any(lstart < rw.ln < lend for rw in accesses)
+    }
 
 
 class Loop(object):
@@ -249,19 +190,16 @@ class Loop(object):
     Represents a loop construct in a program.
 
     Attributes:
-        start (list): The starting line number of the loop.
-        end (list): The ending line number of the loop.
-        index (list): The loop indices.
+        start : The starting line number of the loop.
+        end : The ending line number of the loop.
+        index : The loop indices.
         nested (int): The number of times the loop is nested.
         innerloops (list): The inner loops contained within this loop.
         vars (dict): A dictionary that holds the array variables modified by this loop.
         reduction (bool): Indicates if the loop contains reduction operations.
         reduce_vars (list): The variables involved in reduction operations.
-        subcall [(Subroutines)]: The subroutine or function called within the loop.
         scalar_vars (dict): A dictionary that holds the scalar variables used in the loop.
-        lines (list): The lines of code within the loop.
-        file (str): The file path of the script containing the loop.
-        filter (list): A list of filters applied to the loop -- Currently ELM specific.
+        filter : A list of filters applied to the loop -- Currently ELM specific.
 
     Methods:
         printLoop(substartline=0, long=True): Prints information about the loop.
@@ -270,42 +208,114 @@ class Loop(object):
         addOpenACCFlags(lines_adjusted, subline_adjust, id, verbose=False): Adds OpenACC directives to the loop.
     """
 
-    def __init__(self, start, index, ifile, sub):
-        self.start = [start]
-        self.end = [0]
-        self.index = [index]
-        self.nested = 0
-        self.innerloops = []
-        self.vars = {}
-        self.reduction = False
-        self.reduce_vars = []
-        self.subcall = sub
-        self.scalar_vars = {}
-        self.lines = []
-        self.file = ifile
-        self.filter = []
+    def __init__(
+        self,
+        line: str,
+        start: int,
+        end: int,
+        kind: Kind,
+        sub: Subroutine,
+        nested: int,
+    ):
+        self.line: str = line
+        self.start: int = start
+        self.end: int = end
+        self.kind: Kind = kind
+        self.index: str = ""
+        self.nested: int = nested
+        self.inner_loops: list[Loop] = []
+        self.outer_loop: Optional[Loop] = None
+        self.node: DoLoop = None
+        self.vars: dict[str, Variable] = {}
+        self.reduction: bool = False
+        self.reduce_vars: list[Variable] = []
+        self.sub: Subroutine = sub
+        self.local_vars: ReadWriteDict = {}
+        self.global_vars: ReadWriteDict = {}
+        self.arg_vars: ReadWriteDict = {}
+        self.filter: list[str] = []
+        self.index_map: dict[str, str] = {}
+        self.index_remaps: dict[str, str] = {}
+        self.new_indices: set[str] = set()
+        self.new_mappings: set[str] = set()
 
-    def printLoop(self, substartline=0, long=True):
-        """
-        Function to print a Loop instance
-        """
-
-        lstart = self.start[0]
-        lend = self.end[0]
-        if not self.reduction:
-            print(f"Loop at {lstart}-{lend} of {self.file}::{self.subcall.name}")
+    def __str__(self):
+        if self.kind == Kind.doloop:
+            return f"Loop({self.start}-{self.end}L nested={self.nested})"
         else:
-            print(
-                _bc.WARNING
-                + f"Loop at {lstart}-{lend} of {self.file}::{self.subcall.name}"
-                + _bc.ENDC
-            )
+            return f"While({self.start}-{self.end}L nested={self.nested})"
 
-        slice = self.lines[:]
-        if long:
-            print(f"It is nested {self.nested} times with indices {self.index}")
-            for ln, line in enumerate(slice):
-                print(lstart + ln, line.strip("\n"))
+    def __repr__(self):
+        if self.kind == Kind.doloop:
+            return f"Loop({self.start}-{self.end}L nested={self.nested})"
+        else:
+            return f"While({self.start}-{self.end}L nested={self.nested})"
+
+    def get_loop_vars(self, aliases: dict[str, str]):
+        """
+        Function that looks at variable usage of a looop and attempts
+        to identify a filter
+        """
+
+        sub = self.sub
+        logger = sub.logger
+        self.local_vars = accesses_in_range(
+            self.start,
+            self.end,
+            sub.local_vars_access_by_ln,
+        )
+
+        arg_vars = accesses_in_range(self.start, self.end, sub.arg_access_by_ln)
+        self.local_vars.update(arg_vars)
+
+        maybe_filters = ["filter"]
+        maybe_filters.extend(aliases.keys())
+        str_ = "|".join(maybe_filters)
+        regex_filter = re.compile(rf"({str_})")
+        self.filter = [x for x in self.local_vars if regex_filter.match(x)]
+
+        filter_accesses: list[ReadWrite] = []
+        for pfilter in self.filter:
+            access = self.local_vars[pfilter]
+            for rw in access:
+                filter_accesses.append(rw)
+        inputs = [x.ltuple.line for x in filter_accesses]
+        input_str = "\n".join(inputs)
+        self.infer_filter_index_map(input_str, regex_filter)
+
+        self.filter = [aliases.get(f, f) for f in self.filter]
+
+        return
+
+    def infer_filter_index_map(self, input: str, pattern: re.Pattern):
+        """
+        Function to find global index mapped to loop index.
+        """
+
+        logger = self.sub.logger
+        lexer = Lexer(input)
+        parser = Parser(lexer)
+        program = parser.parse_program()
+        for stmt in program.statements:
+            assert isinstance(stmt, ExpressionStatement)
+            expr = stmt.expression
+            # Only interested in assignments
+            if not isinstance(expr, InfixExpression):
+                continue
+            left, op, right = expr.decompose()
+            if op != "=":
+                continue
+            if isinstance(right, FuncExpression) and pattern.search(
+                str(right.function)
+            ):
+                lhs_var = left.value
+                rhs_array = str(right.function)
+                arg = right.args[0]
+                if len(right.args) > 1:
+                    continue
+                if arg.value == self.index:
+                    self.index_map[lhs_var] = rhs_array
+        return
 
     def parseVariablesinLoop(self, verbose=False):
         """
@@ -457,10 +467,10 @@ class Loop(object):
         lines_adjusted is a dictionary to keep track of line insertions into a subroutine
         to appropriately adjust where the loops start.
         """
-        from mod_config import _bc, elm_files
+        from mod_config import _bc
 
         total_loops = self.nested + 1
-        ifile = open(f"{elm_files}{self.file}", "r")
+        ifile = open(f"{self.file}", "r")
         mod_lines = ifile.readlines()
         ifile.close()
 

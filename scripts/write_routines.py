@@ -109,25 +109,33 @@ def generate_cmake(files: list[str], case_dir: str):
     option(DBG "Enable Debug mode" OFF)
     option(GPU "Enable OpenACC (GPU) support" OFF)
 
+    enable_testing()
     set(CMAKE_VERBOSE_MAKEFILE ON)
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
     set(CMAKE_Fortran_FLAGS "" CACHE STRING "Fortran Compiler Flags" FORCE)
-    message(STATUS "DBG is ${{DBG}}")
-    if (DBG)
-        message(STATUS "Debug build")
-        set(CMAKE_Fortran_FLAGS "${{CMAKE_Fortran_FLAGS}} -g -O0 -Mchkptr -Mchkstk" CACHE STRING "Fortran Compiler Flags" FORCE)
+    if (CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+        message(STATUS "Using gfortran as the Fortran compiler")
+        string(APPEND CMAKE_Fortran_FLAGS " -fconvert=big-endian -ffree-line-length-none -ffixed-line-length-none")
+        string(APPEND CMAKE_Fortran_FLAGS " -fallow-argument-mismatch")
+        if (DBG)
+            message(STATUS "Debug + Coverage build enabled")
+            string(APPEND CMAKE_Fortran_FLAGS " -g -O0 -fprofile-arcs -ftest-coverage")
+        endif()
     else()
-        message(STATUS "Release build")
-        set(CMAKE_Fortran_FLAGS "${{CMAKE_Fortran_FLAGS}} -fast")
-    endif()
-    if (GPU)
-        message(STATUS "Enabling OpenACC GPU support")
-        set(OPENACC_FLAGS "-gpu -Minfo=accel -cuda")
-        # Append to existing flags for each build type
-        set(CMAKE_Fortran_FLAGS "${{CMAKE_Fortran_FLAGS}} ${{OPENACC_FLAGS}}" CACHE STRING "Fortran Compiler Flags" FORCE)
-    endif()
+        if (DBG)
+            set(CMAKE_Fortran_FLAGS "${{CMAKE_Fortran_FLAGS}} -g -O0 -Mchkptr -Mchkstk" CACHE STRING "Fortran Compiler Flags" FORCE)
+        else()
+            set(CMAKE_Fortran_FLAGS "${{CMAKE_Fortran_FLAGS}} -fast")
+        endif()
 
+        if (GPU)
+            message(STATUS "Enabling OpenACC GPU support")
+            set(OPENACC_FLAGS "-gpu -Minfo=accel -cuda")
+            # Append to existing flags for each build type
+            set(CMAKE_Fortran_FLAGS "${{CMAKE_Fortran_FLAGS}} ${{OPENACC_FLAGS}}" CACHE STRING "Fortran Compiler Flags" FORCE)
+        endif()
+    endif()
 
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(NetCDFF REQUIRED netcdf-fortran)
@@ -138,14 +146,48 @@ def generate_cmake(files: list[str], case_dir: str):
     target_link_directories({exe_name} PRIVATE ${{NetCDFF_LIBRARY_DIRS}})
     target_link_libraries({exe_name} PRIVATE ${{NetCDFF_LIBRARIES}})
 
-    find_package(MPI REQUIRED)
-    if (MPI_FOUND)
-        include_directories(${{MPI_Fortran_INCLUDE_PATH}})
-        target_link_libraries({exe_name} PRIVATE MPI::MPI_Fortran)
+    find_package(LAPACK REQUIRED)
+
+    if (LAPACK_FOUND)
+        message(STATUS "LAPACK found: ${{LAPACK_LIBRARIES}}")
+        target_link_libraries(elmtest PRIVATE ${{LAPACK_LIBRARIES}})
     endif()
+
 
     target_compile_definitions({exe_name} PRIVATE {" ".join(macros)})
     message(STATUS "Final Fortran flags: ${{CMAKE_Fortran_FLAGS}}")
+
+    # Add test
+    add_test(NAME run_elmtest COMMAND elmtest)
+    # === Coverage Helper Targets ===
+    # Object directory
+    set(OBJECT_DIR "${{CMAKE_BINARY_DIR}}/CMakeFiles/elmtest.dir")
+    message(STATUS "Object directory: ${{OBJECT_DIR}}")
+
+    # Create coverage directory
+    file(MAKE_DIRECTORY "${{CMAKE_BINARY_DIR}}/coverage")
+    # gcov target
+    add_custom_target(gcov
+        COMMENT "Generating GCOV report..."
+        COMMAND ${{CMAKE_CTEST_COMMAND}} --output-on-failure
+        COMMAND echo "=================== GCOV ===================="
+        COMMAND ${{CMAKE_COMMAND}} -E make_directory coverage
+        COMMAND gcov -abcf ${{OBJECT_DIR}}/*.o > coverage/gcov.log
+        COMMAND grep -H "Lines executed" coverage/gcov.log || true
+        WORKING_DIRECTORY ${{CMAKE_BINARY_DIR}}
+        DEPENDS elmtest
+    )
+
+    # scrub target: cleans .gcda/.gcno and object files
+    add_custom_target(scrub
+        COMMAND ${{CMAKE_COMMAND}} --build . --target clean
+        COMMAND find ${{OBJECT_DIR}} -name '*.gcda' -delete
+        COMMAND find ${{OBJECT_DIR}} -name '*.gcno' -delete
+        COMMAND rm -rf ${{CMAKE_BINARY_DIR}}/coverage
+        COMMENT "Scrubbing coverage and build artifacts"
+        WORKING_DIRECTORY ${{CMAKE_BINARY_DIR}}
+    )
+
     """)
 
     with open(f"{case_dir}/CMakeLists.txt", "w") as cmake_file:
@@ -251,44 +293,6 @@ def write_elminstMod(typedict, case_dir):
     file.close()
 
 
-def clean_use_statements(mod_list, file, case_dir):
-    """
-    function that will clean both initializeParameters
-    and readConstants
-    """
-    ifile = open(f"{spel_mods_dir}{file}.F90", "r")
-    lines = ifile.readlines()
-    ifile.close()
-
-    noF90 = [f.split("/")[-1] for f in mod_list]
-    noF90 = [f.split("/")[-1] for f in noF90]
-
-    # Doesn't account for module names not being the same as file names
-    noF90 = [f.replace(".F90", "") for f in noF90]
-
-    start = "!#USE_START"
-    end = "!#USE_END"
-    analyze = False
-    ct = 0
-    while ct < len(lines):
-        line = lines[ct]
-        if line.strip() == start:
-            analyze = True
-            ct += 1
-            continue
-        if line.strip() == end:
-            analyze = False
-            break
-        if analyze:
-            l = line.split("!")[0]
-            mod = l.split()[1]
-            if mod not in noF90:
-                lines, ct = comment_line(lines=lines, ct=ct, verbose=False)
-        ct += 1
-    with open(f"{case_dir}/{file}.F90", "w") as ofile:
-        ofile.writelines(lines)
-
-
 def insert_at_token(lines: list[str], token: str, lines_to_add: Iterable[str]):
     regex_token = re.compile(rf"^\s*({token})")
     ln = 0
@@ -308,8 +312,8 @@ def insert_at_token(lines: list[str], token: str, lines_to_add: Iterable[str]):
         print(f"Error: could find {token} in main.F90")
         sys.exit(1)
 
-    for line_add in lines_to_add:
-        lines.insert(token_line + 1, line_add)
+    for i, line_add in enumerate(lines_to_add):
+        lines.insert(token_line + 1 + i, line_add)
 
     return lines
 
@@ -402,18 +406,16 @@ def find_parent_subroutine_call(
         args_to_search = args_not_found.copy()
 
         for arg in args_to_search:
-            if arg in parent_sub.Arguments:
-                argvar = parent_sub.Arguments[arg]
+            if arg in parent_sub.arguments:
+                argvar = parent_sub.arguments[arg]
                 if argvar.type in type_dict:
                     dtype = type_dict[argvar.type]
                     inst_var: Variable = list(dtype.instances.values())[0]
                     args_as_instances[inst_var.name] = inst_var
                 else:
-                    args_as_vars[arg] = parent_sub.Arguments[arg]
-            elif arg in parent_sub.LocalVariables["arrays"]:
-                args_as_vars[arg] = parent_sub.LocalVariables["arrays"][arg]
-            elif arg in parent_sub.LocalVariables["scalars"]:
-                args_as_vars[arg] = parent_sub.LocalVariables["scalars"][arg]
+                    args_as_vars[arg] = parent_sub.arguments[arg]
+            elif arg in parent_sub.local_variables:
+                args_as_vars[arg] = parent_sub.local_variables[arg]
             else:
                 # Assume it's a derived type removed for fut purposes (ie, alm_fates)
                 logger.info(
@@ -612,8 +614,9 @@ def prep_elm_init(type_dict: TypeDict,case_dir: str):
     tabs = hio.indent(hio.Tab.reset)
     use_statements: set[str] = set()
     for inst_var in active_instances.values():
-        stmt = f"{tabs}use {inst_var.declaration}, only: {inst_var.name}\n"
-        use_statements.add(stmt)
+        if inst_var.type != "bounds_type":
+            stmt = f"{tabs}use {inst_var.declaration}, only: {inst_var.name}\n"
+            use_statements.add(stmt)
 
     lines = insert_at_token(lines=lines,
                             token="!#USE_START",
@@ -1512,4 +1515,22 @@ def create_write_read_functions(dtype: DerivedType, rw, ofile, gpu=False):
                 str2 = "if (errcode .ne. 0) stop\n"
                 ofile.write(tab + str1)
                 ofile.write(tab + str2)
+    return
+
+def create_fortls(case_dir:str):
+    """
+    Function that creates placeholder .fortls for lsp
+    """
+
+    lines = textwrap.dedent("""
+    {
+    "nthreads" : 4,
+       "sort_keywords": false,
+       "debug_log": false,
+       "lowercase_intrinsics": true,
+    }
+    """)
+
+    with open(f"{case_dir}/.fortls.json",'w') as ofile:
+        ofile.writelines(lines)
     return

@@ -8,7 +8,9 @@ def set_logger_level(logger: logging.Logger, level: int):
 
 
 def get_logger(name: str, level=logging.INFO) -> logging.Logger:
-
+    """
+    Function to return logger.
+    """
     logger = logging.getLogger(name)
 
     # Only add a handler if none exist

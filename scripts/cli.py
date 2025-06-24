@@ -2,13 +2,16 @@ import argparse
 import os
 import subprocess
 
+from scripts.profiler_context import profile_ctx
+
 SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def create(args):
     from scripts.UnitTestforELM import create_unit_test
 
-    create_unit_test(sub_names=args.subs, casename=args.case, keep=args.keep)
+    with profile_ctx(enabled=True, section="create") as pr:
+        create_unit_test(sub_names=args.subs, casename=args.case, keep=args.keep)
 
 
 def export(args):
@@ -38,6 +41,18 @@ def run(args):
 
     # Run the test executable with extra args
     subprocess.run(["./build/elmtest", *args.exe_args], check=True, cwd=unit_test)
+
+
+def upload(args):
+    SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    mach = args.machine
+    dest = args.dest
+    subprocess.run(
+        [f"{SPEL_ROOT}/scripts/upload.sh", mach, dest],
+        check=True,
+        cwd=".",
+    )
+    return
 
 
 def main():
@@ -121,6 +136,13 @@ def main():
         help="Arguments for the unit test executable",
     )
     run_parser.set_defaults(func=run)
+
+    upload_parser = subparsers.add_parser(
+        "upload", help="rsync netCDF-Interface files <mach> <dest>"
+    )
+    upload_parser.add_argument("machine", help="remote machine")
+    upload_parser.add_argument("dest", help="path")
+    upload_parser.set_defaults(func=upload)
 
     args = parser.parse_args()
     args.func(args)

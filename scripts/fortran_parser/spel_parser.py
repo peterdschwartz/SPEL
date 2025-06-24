@@ -1,26 +1,20 @@
 from enum import Enum
+from logging import Logger
 from typing import Callable, Dict, List, Optional
 
 import scripts.fortran_parser.lexer as lexer
-from scripts.fortran_parser.spel_ast import (
-    BoundsExpression,
-    Expression,
-    ExpressionStatement,
-    FieldAccessExpression,
-    FloatLiteral,
-    FuncExpression,
-    Identifier,
-    InfixExpression,
-    IntegerLiteral,
-    LogicalLiteral,
-    PrefixExpression,
-    Program,
-    Statement,
-    StringLiteral,
-    SubCallStatement,
-)
+from scripts.fortran_parser.spel_ast import (BoundsExpression, DoLoop, DoWhile,
+                                             Expression, ExpressionStatement,
+                                             FieldAccessExpression,
+                                             FloatLiteral, FuncExpression,
+                                             Identifier, InfixExpression,
+                                             IntegerLiteral, LogicalLiteral,
+                                             PrefixExpression, Program,
+                                             Statement, StringLiteral,
+                                             SubCallStatement)
 from scripts.fortran_parser.tokens import Token, TokenTypes
 from scripts.fortran_parser.tracing import Trace
+from scripts.logging_configs import get_logger
 
 
 class Precedence(Enum):
@@ -64,6 +58,7 @@ class Parser:
         self.peek_token: Token = Token(token=TokenTypes.ILLEGAL, literal="")
         self.prefix_parse_fns: Dict[TokenTypes, PrefixParseFn] = {}
         self.infix_parse_fns: Dict[TokenTypes, InfixParseFn] = {}
+        self.logger: Logger = get_logger("Parser")
 
         self.register_prefix_fns(TokenTypes.IDENT, self.parse_identifier)
         self.register_prefix_fns(TokenTypes.INT, self.parseIntegerLiteral)
@@ -185,22 +180,97 @@ class Parser:
             self.next_token()
         return program
 
+    def check_label(self) -> Optional[Token]:
+        """
+        If the current token is an identifier followed by a colon,
+        treat it as a named block label.
+        This function should only be called on the first Token of a Statement
+        """
+        label = None
+        if self.cur_token.token == TokenTypes.IDENT and self.peek_token.token == TokenTypes.COLON:
+            label = self.cur_token
+            self.next_token()  # skip IDENT
+            self.next_token()  # skip COLON
+        return label
+
     @Trace.trace_decorator("parse_statement")
     def parse_statement(self) -> Statement:
+        label = self.check_label()
+
+        if self.curTokenIs(TokenTypes.DO) and self.peekTokenIs(TokenTypes.DOWHILE):
+            self.next_token() # skip DO token
+
         match self.cur_token.token:
             case TokenTypes.CALL:
                 stmt = self.parse_subcall_statement()
+            case TokenTypes.DO:
+                stmt = self.parse_do_block(label)
+            case TokenTypes.DOWHILE:
+                stmt = self.parse_dowhile_block(label)
             case _:
                 stmt = self.parse_expression_statement()
         return stmt
 
     @Trace.trace_decorator("parse_subcall_statement")
-    def parse_subcall_statement(self):
+    def parse_subcall_statement(self)->Statement:
         stmt = SubCallStatement(tok=self.cur_token)
         self.next_token()
         # Parse identifier expression:
         stmt.function = self.parse_expression(Precedence.LOWEST)
         return stmt
+
+    @Trace.trace_decorator("parse_do_block")
+    def parse_do_block(self, label: Optional[Token]) -> Statement:
+        """
+        Upon function call, cur_token = 'DO'
+        """
+        tok = self.cur_token
+        self.next_token() # cur_token is the loop index identifier
+        index = self.cur_token
+        assert index.token == TokenTypes.IDENT
+
+        if not self.expect_peek(TokenTypes.ASSIGN): # expect_peek advances token
+            self.errors.append(f"failed to parse DO LOOP {self.peek_token}")
+            raise ParseError("Couldn't Parse Do LOOP")
+
+        self.next_token() 
+        start_expr, end_expr, step = self.parse_do_bounds()
+
+        # advance to end of statement
+        self.next_token()
+        return DoLoop(tok,index,start_expr,end_expr, step)
+
+    @Trace.trace_decorator("parse_do_bounds")
+    def parse_do_bounds(self) -> tuple[Expression, Expression, Optional[Expression]]:
+        """
+        Parse the bounds expression: start, end [, step]
+        Assumes current token is just past '='
+        """
+        start_expr = self.parse_expression(Precedence.LOWEST)
+
+        self.expect_peek(TokenTypes.COMMA)
+        self.next_token()  # skip the comma
+
+        end_expr = self.parse_expression(Precedence.LOWEST)
+
+        step_expr = None
+        if self.peekTokenIs(TokenTypes.COMMA):
+            self.next_token()  # skip comma
+            self.next_token()
+            step_expr = self.parse_expression(Precedence.LOWEST)
+
+        return start_expr, end_expr, step_expr
+
+    def parse_dowhile_block(self, label: Token)->Statement:
+        """
+        Parse do while block. cur_token is expected to be WHILE
+        """
+        assert self.curTokenIs(TokenTypes.DOWHILE), "(parse_dowhile_block) expects DOWHILE"
+        tok = self.cur_token
+        self.next_token() # token should be RPAREN
+        cond = self.parse_expression(Precedence.LOWEST)
+        self.next_token()
+        return DoWhile(tok,cond)
 
     @Trace.trace_decorator("parse_expression_statement")
     def parse_expression_statement(self) -> ExpressionStatement:

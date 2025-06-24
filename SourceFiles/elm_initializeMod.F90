@@ -9,7 +9,7 @@ module elm_initializeMod
 
 contains
 
-   subroutine elm_init(nsets, pproc_input, dt, yr, bounds)
+   subroutine elm_init(const_fn, var_fn, nsets, pproc_input, dt, yr, bounds)
 
       !use elm_varsur, only: wt_lunit, urban_valid, wt_glc_mec
       use duplicateMod, only: duplicate_clumps, duplicate_weights
@@ -29,6 +29,7 @@ contains
 
       implicit none
 
+      character(len=*), intent(in) :: const_fn, var_fn
       integer, intent(in)  :: nsets, pproc_input
       real*8, intent(in) :: dt
       integer, intent(in) :: yr
@@ -51,11 +52,10 @@ contains
       ni = nsets*number_of_sites
       clump_pproc = pproc_input
 
-      print *, "Reading Constants"
-      ! call elm_varpar_init()
-      call read_constants(nsets, "spel-constants.nc")
-      print *, "Reading elmTypes"
-      call read_elmtypes(nsets, "spel-elmtypes.nc", bounds)
+      print *, "Reading Constants from ",trim(const_fn)
+      call read_constants(nsets, 1, trim(const_fn))
+      print *, "Reading elmTypes from :",trim(var_fn)
+      call read_elmtypes(nsets, 1, trim(var_fn), bounds)
       begp = bounds%begp; endp = bounds%endp
       begc = bounds%begc; endc = bounds%endc
       begg = bounds%begg; endg = bounds%endg

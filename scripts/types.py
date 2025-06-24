@@ -124,8 +124,8 @@ class ArgDesc:
 class CallDesc:
     alias: str  # Interface name, class method alias, or actual name
     fn: str  # real Name of called subroutine
-    ln: int  # line number of Subroutine Call
     args: list[ArgDesc]
+    lpair: LineTuple
     # summary of the ArgDesc fields
     globals: list[ArgVar]
     locals: list[ArgVar]
@@ -286,17 +286,26 @@ class LineTuple:
 
     line: str
     ln: int
+    # num_cont: int
     commented: bool = False
 
 
 class ReadWrite(object):
     """
-    Declare namedtuple for readwrite status of variables:
+    - status
+    - ln
+    - line
     """
 
-    def __init__(self, status, ln):
+    def __init__(
+        self,
+        status: str,
+        ln: int,
+        line: LineTuple,
+    ):
         self.status = status
         self.ln = ln
+        self.ltuple: LineTuple = line
 
     def __eq__(self, other):
         return self.status == other.status and self.ln == other.ln
@@ -388,11 +397,14 @@ class CallTree:
 
 
 class LogicalLineIterator:
-    def __init__(self, lines: list[LineTuple], logger: Logger):
+    def __init__(self, lines: list[LineTuple], log_name: str = ""):
         self.lines = lines
         self.i = 0
         self.start_index = 0
-        self.logger: Logger = get_logger("LineIter", level=logging.DEBUG)
+        if not log_name:
+            self.logger: Logger = get_logger("LineIter", level=logging.DEBUG)
+        else:
+            self.logger: Logger = get_logger(log_name, level=logging.DEBUG)
 
     def __iter__(self):
         return self
@@ -433,14 +445,16 @@ class LogicalLineIterator:
 
         full_line = self.strip_comment()
         full_line = full_line.rstrip("\n").strip()
+        num_continuations: int = 1
         while full_line.rstrip().endswith("&"):
+            num_continuations += 1
             full_line = full_line.rstrip()[:-1].strip()
             self.i += 1
             if self.i >= len(self.lines):
                 self.logger.error("Error-- line incomplete!")
                 raise StopIteration
             new_line = self.lines[self.i].line.split("!")[0].strip()
-            # test if line is just a comment
+            # test if line is just a comment or otherwise empty
             if not new_line:
                 full_line += " &"  # re append & so loop goes to next line
             else:
@@ -460,7 +474,19 @@ class LogicalLineIterator:
                 break
         return results
 
-    def peek(self):
+    def insert_after(self,stmt: str):
+        """
+        Inserts after current line and increments subsequent lns
+        """
+        cur_ln = self.i
+        self.lines.insert(cur_ln+1, LineTuple(line=stmt,ln=cur_ln+1))
+        self.i += 1
+        for i in range(cur_ln+2,len(self.lines)):
+            self.lines[i].ln += 1
+
+        return
+
+    def get_curr_line(self):
         if self.i >= len(self.lines):
             return None
         return self.lines[self.i].line
@@ -498,6 +524,31 @@ class LogicalLineIterator:
                     nesting -= 1
 
         return results, ln
+
+    def replace_in_line(
+        self,
+        lns: list[int],
+        pattern: re.Pattern,
+        repl_str: str,
+        logger: Optional[Logger] = None,
+    ):
+        if not logger:
+            logger = self.logger
+        for ln in lns:
+            self.i = ln
+            full_line, adj_ln = next(self)
+            delta_ln = adj_ln - ln
+            m_ = pattern.search(full_line)
+            if m_:
+                for i in range(0, delta_ln + 1):
+                    curr_line = self.lines[ln + i].line
+                    self.lines[ln + i].line = pattern.sub(repl_str, curr_line)
+            else:
+                self.logger.error(
+                    f"(replace_in_line) FAILED to match {pattern} in \n {full_line}"
+                )
+
+        return
 
 
 @dataclass

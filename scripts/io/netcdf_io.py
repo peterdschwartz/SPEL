@@ -1,14 +1,16 @@
 import sys
 import textwrap
+from collections.abc import Callable
 
 import scripts.io.helper as hio
+from scripts import logging_configs
 from scripts.DerivedType import DerivedType
 from scripts.mod_config import spel_mods_dir
 from scripts.utilityFunctions import Variable
 
 Tab = hio.Tab
 
-def create_nc_define_vars(vars: dict[str, Variable],bounds: bool=False) -> list[str]:
+def create_nc_define_vars(vars: dict[str, Variable], time: bool, bounds: bool=False,) -> list[str]:
     """
     Create Subroutine for defining netcdf variables
     """
@@ -19,9 +21,11 @@ def create_nc_define_vars(vars: dict[str, Variable],bounds: bool=False) -> list[
     lines.append(f"{tabs}integer, intent(in) :: ncid\n")
     if bounds:
         lines.append(f"{tabs}type(bounds_type), intent(in) :: bounds\n")
-    lines.append(f"{tabs}integer :: varid\n")
-    lines.append(f"{tabs}character(len=32), dimension(4) :: dim_names\n")
-    nc_defns = create_nc_def(vars)
+    lines.append(f"{tabs}integer :: varid, time_id\n")
+    lines.append(f"{tabs}character(len=32), dimension(5) :: dim_names\n")
+    if time:
+        lines.append(f"{tabs}call check(nf90_def_dim(ncid, 'time', NF90_UNLIMITED, time_id))\n")
+    nc_defns = create_nc_def(vars, time)
     lines.extend(nc_defns)
     tabs = hio.indent(hio.Tab.unshift)
     lines.append(f"{tabs}end subroutine define_vars\n")
@@ -38,6 +42,7 @@ def generate_elmtypes_io_netcdf(
     filename = "ReadWriteMod.F90"
     mod_name = filename.replace(".F90", "")
 
+    logger = logging_configs.get_logger("genNetCDF")
 
     lines: list[str] = []
     lines.extend(
@@ -77,13 +82,14 @@ def generate_elmtypes_io_netcdf(
                 new_var.name = f"{inst_var.name}%{field_var.name.split('%')[-1]}"
                 dtype_vars[new_var.name] = new_var
 
-    sub_lines = create_nc_define_vars(dtype_vars,bounds=True)
+    sub_lines = create_nc_define_vars(dtype_vars,time=True, bounds=True)
     lines.extend(sub_lines)
 
     sub_lines = create_netcdf_io_routine(
         mode=hio.IOMode.read,
         sub_name="read_elmtypes",
         vars=dtype_vars,
+        time=True,
         bounds=True,
     )
     lines.extend(sub_lines)
@@ -91,12 +97,14 @@ def generate_elmtypes_io_netcdf(
         mode=hio.IOMode.write,
         sub_name="write_elmtypes",
         vars=dtype_vars,
+        time=True,
         bounds=True,
     )
     lines.extend(sub_lines)
 
     lines.append(f"end module {mod_name}\n")
 
+    logger.info(f"Writing {filename}")
     with open(f"{casedir}/{filename}", "w") as ofile:
         ofile.writelines(lines)
 
@@ -129,13 +137,14 @@ def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: str):
             "contains\n",
         ]
     )
-    sub_lines = create_nc_define_vars(vars)
+    sub_lines = create_nc_define_vars(vars,time=False)
     lines.extend(sub_lines)
 
     sub_lines = create_netcdf_io_routine(
         hio.IOMode.read,
         "read_constants",
         vars,
+        time=False,
     )
 
     lines.extend(sub_lines)
@@ -144,6 +153,7 @@ def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: str):
         hio.IOMode.write,
         "write_constants",
         vars,
+        time=False,
     )
     lines.extend(sub_lines)
 
@@ -166,71 +176,80 @@ def create_netcdf_io_routine(
     tabs = hio.indent()
     arg_str = ",bounds" if bounds else ''
 
-    lines: list[str] = [f"{tabs}subroutine {sub_name}(nsets,fn{arg_str})\n"]
+    lines: list[str] = [f"{tabs}subroutine {sub_name}(nsets,nstep,fn{arg_str})\n"]
     tabs = hio.indent(hio.Tab.shift)
 
-    mode_str = "create_file" if mode == hio.IOMode.write else "open_file"
+    mode_str = "create_file" if mode == hio.IOMode.write else "read_file"
     if mode == hio.IOMode.write:
         stmt = f"{tabs}type(bounds_type), intent(in) :: bounds\n" if bounds else ''
     else:
         stmt = f"{tabs}type(bounds_type), intent(inout) :: bounds\n" if bounds else ''
 
+
     # Arguments + Locals:
     lines.extend(
         [
-            f"{tabs}integer, intent(in) :: nsets\n{stmt}\n",
+            f"{tabs}integer, intent(in) :: nsets\n",
+            f"{tabs}integer, intent(in) :: nstep\n{stmt}\n",
             f"{tabs}character(len=*), intent(in) :: fn \n\n",
             f"{tabs}integer :: ncid\n",
-            f"{tabs}ncid = nc_create_or_open_file(trim(fn), {mode_str})\n",
         ]
     )
     if mode == hio.IOMode.write:
         lines.extend([
-                f"{tabs}call define_vars(ncid{arg_str})\n",
-                f"{tabs}call check(nf90_enddef(ncid))\n",  # exit define mode:
-            ]
-        )
+            f"{tabs}if(nstep == 1) then\n{tabs}{tabs}ncid = nc_create_or_open_file(trim(fn), create_file)\n",
+                f"{tabs}{tabs}call define_vars(ncid{arg_str})\n",
+                f"{tabs}{tabs}call check(nf90_enddef(ncid))\n",  # exit define mode:
+            f"{tabs}else\n{tabs}{tabs}ncid = nc_create_or_open_file(trim(fn), append_file)\n",
+            f"{tabs}end if\n",
+        ])
+
     if mode == hio.IOMode.read:
-        sub_lines = create_nc_read(vars)
+        lines.append( f"{tabs}ncid = nc_create_or_open_file(trim(fn), {mode_str})\n")
+        sub_lines = create_nc_read(vars,time)
     else:
-        sub_lines = create_nc_write(vars)
+        sub_lines = create_nc_write(vars, time=time)
     lines.extend(sub_lines)
+    lines.append(f"{tabs}call check(nf90_close(ncid))\n")
     tabs = hio.indent(hio.Tab.unshift)
     lines.append(f"{tabs}end subroutine {sub_name}\n")
 
     return lines
 
 
-def create_nc_def(vars: dict[str, Variable]) -> list[str]:
+def create_nc_def(vars: dict[str, Variable], time: bool) -> list[str]:
+    """
+    Function generates calls to 'nc_define_vars' calls for defining variables prior to writing
+    """
     lines: list[str] = []
     tabs = hio.indent()
 
     for var in vars.values():
-        dim_names_str = get_dim_names(var)
+        dim_names_str = get_dim_names(var, time)
         varname = var.name.replace('%','__')
         nc_type = match_nc_type(var.type)
+        time_str = ".true." if time and var.dim>0 else '.false.'
         if nc_type == "nf90_char":
-            # Ex: call nc_define_var(ncid, 1,[len(nu_com)], ["nu_com"//"_str"], "nu_com",NF90_char, varid)
             dim_str = f"[len({var.name})]"
-            dim=1
+            dim=1 + time
+            stmt = f"call nc_define_var(ncid, 1, {dim_str}, dim_names, '{varname}', {nc_type}, varid, {time_str})\n"
         else:
             dim_str = f"shape({var.name})" if var.dim>0 else "[0]"
-            dim=var.dim
-        if var.dim>0 or nc_type == "nf90_char":
+            dim = var.dim + time
+            stmt = f"call nc_define_var(ncid, {var.dim}, {dim_str}, dim_names, '{varname}', {nc_type}, varid, {time_str})\n"
+
+        if var.dim > 0 or nc_type =="nf90_char":
             lines.append(f"{tabs}dim_names(1:{dim}) = {dim_names_str}\n")
-        #                            file,   ndims,  shape    ,   [dim names]  ,  var name,    ncf type , varid
-        stmt = f"call nc_define_var(ncid, {dim}, {dim_str}, dim_names, '{varname}', {nc_type}, varid)\n"
         lines.append(f"{tabs}{stmt}")
         # if array store lbounds and ubounds:
         if var.dim > 0:
             stmt = f"call check(nf90_put_att(ncid, varid, 'lbounds', lbound({var.name}))); call check(nf90_put_att(ncid, varid, 'ubounds', ubound({var.name})));"
             lines.append(f"{tabs}{stmt}\n")
 
-
     return lines
 
 
-def get_dim_names(var: Variable) -> str:
+def get_dim_names(var: Variable, time: bool) -> str:
     if var.dim == 0 and var.type != "character":
         return "['']"  # empty list
     elif var.type == "character":
@@ -239,6 +258,8 @@ def get_dim_names(var: Variable) -> str:
     dim_names = var.bounds.split(",")
     assert len(dim_names) == var.dim, f"(get_dim_names) Inconsistent dimensions\n name: {var.name}bounds: {var.bounds} dim: {var.dim}"
     dim_names = [f"'{hio.get_subgrid(dim)}'" for dim in dim_names]
+    if time:
+        dim_names.append("'time'")
 
     dim_str = ",".join(dim_names)
     return f"[character(len=32) :: {dim_str}]"
@@ -259,7 +280,7 @@ def match_nc_type(var_type: str) -> str:
             sys.exit(1)
 
 
-def create_nc_write(vars: dict[str, Variable], unlim: bool) -> list[str]:
+def create_nc_write(vars: dict[str, Variable], time: bool) -> list[str]:
     """
     Function to create the
         call nc_write_var(ncid, dim, shape, dim_names, var, varname)
@@ -272,7 +293,7 @@ def create_nc_write(vars: dict[str, Variable], unlim: bool) -> list[str]:
     scalars = [var for var in vars.values() if var.dim == 0]
     arrays = [var for var in vars.values() if var.dim > 0 ]
 
-    timestep = ', timestep' if unlim else ''
+    timestep = ', nstep' if time else ', -1'
 
     for var in scalars:
         varname = var.name.replace('%','__')
@@ -283,7 +304,7 @@ def create_nc_write(vars: dict[str, Variable], unlim: bool) -> list[str]:
         lines.append(f"{tabs}{stmt}")
 
     for var in arrays:
-        dim_names_str = get_dim_names(var)
+        dim_names_str = get_dim_names(var,time)
         reshape_str = f"reshape({var.name}, [product(shape({var.name}))])"
         varname = var.name.replace('%','__')
         stmt = f"call nc_write_var_array(ncid,{var.dim}, shape({var.name}), {dim_names_str}, {reshape_str}, '{varname}'{timestep})\n"
@@ -293,17 +314,19 @@ def create_nc_write(vars: dict[str, Variable], unlim: bool) -> list[str]:
     return lines
 
 
-def create_nc_read(vars: dict[str, Variable]) -> list[str]:
+def create_nc_read(vars: dict[str, Variable], time: bool) -> list[str]:
     """
     Function to create the
-        call nc_write_var(ncid, dim, shape, dim_names, var, varname)
+        call nc_read_var(ncid, dim, shape, dim_names, var, varname)
     or for characters:
-        call nc_write_var(ncid, var, varname)
+        call nc_read_var(ncid, var, varname)
     """
     lines: list[str] = []
     tabs = hio.indent()
     scalars = [var for var in vars.values() if var.dim == 0]
     arrays = [var for var in vars.values() if var.dim > 0]
+
+    time_str = ", nstep" if time else ", -1"
 
     for var in scalars:
         varname = var.name.replace('%','__')
@@ -312,7 +335,7 @@ def create_nc_read(vars: dict[str, Variable]) -> list[str]:
         if var.type == "character":
             stmt = f"call nc_read_var(ncid, '{varname}', '{var.name}_str', {var.name})\n"
         else:
-            stmt = f"call nc_read_var(ncid, '{varname}', {var.name})\n"
+            stmt = f"call nc_read_var(ncid, '{varname}', {var.name}{time_str})\n"
         lines.append(f"{tabs}{stmt}")
 
     for var in arrays:
@@ -323,7 +346,7 @@ def create_nc_read(vars: dict[str, Variable]) -> list[str]:
         varname = var.name.replace('%','__')
         # lines.append(f"{tabs}print *, 'Reading {var.name}'\n")
         lines.append( f'{tabs}call nc_alloc(ncid, "{varname}", {var.dim}, {var.name})\n')
-        stmt = f"call nc_read_var(ncid,'{varname}', {var.dim}, {var.name})\n"
+        stmt = f"call nc_read_var(ncid,'{varname}', {var.dim}, {var.name}{time_str})\n"
         lines.append(f"{tabs}{stmt}")
 
     return lines
@@ -360,11 +383,10 @@ def generate_nc_io():
     {tabs}implicit none
 
     {tabs}public
-    {tabs}integer, parameter :: open_file = 0
-    {tabs}integer, parameter :: create_file = 1
+    {tabs}integer, parameter :: read_file = 0, append_file = 1
+    {tabs}integer, parameter :: create_file = 2
     {tabs}real(8), parameter :: fill_double = 1.d+36
     {tabs}integer, parameter :: fill_int = -9999
-
     """)
     lines.append(header)
     lines.append(f"{tabs}interface nc_write_var_array\n")
@@ -400,9 +422,12 @@ def generate_nc_io():
                 lines.append(f"{tabs}module procedure {name}\n")
     tabs = hio.indent(hio.Tab.unshift)
     lines.append(f"{tabs}end interface\n")
+    lines.append(f"{tabs}public :: nc_read_timeslices\n")
 
     lines.append("contains\n")
 
+    nc_check = gen_check()
+    lines.append(nc_check)
     # nc_create_or_open_file
     nc_file = gen_nc_file()
     lines.append(nc_file)
@@ -425,13 +450,84 @@ def generate_nc_io():
     lines.append(gen_nc_write_string())
     lines.append(gen_nc_write_logical())
 
+    lines.append(gen_nc_read_timeslices())
+
+    lines.append("end module nc_io\n")
+
     with open(f'{spel_mods_dir}/new_nc_io.F90', 'w') as ofile:
         ofile.writelines(lines)
 
 def gen_nc_read_type(dim: int, t: str)->str:
     tabs = hio.indent(Tab.reset)
     if t == 'string':
+        return gen_read_str()
+    if t == 'logical':
+        return gen_read_logical(dim)
+    else:
+        return gen_read_numeric(dim,t)
+
+def gen_read_numeric(dim: int, t: str)->str:
+    tabs = hio.indent(Tab.reset)
+    if t == 'double':
+        t_str = 'real(8)'
+    else:
+        t_str = t
+    subname = f"nc_read_{t}_{dim}"
+    if dim > 0:
+        dim_str = make_dim_str(dim, lambda i: ":")
+
         return textwrap.dedent(f"""
+    {tabs}subroutine {subname}(ncid, varname, ndim, var, timestep)
+    {tabs}   integer, intent(in) :: ncid
+    {tabs}   character(len=*), intent(in) :: varname
+    {tabs}   integer, intent(in) :: ndim 
+    {tabs}   {t_str}, intent(out) :: var({dim_str})
+    {tabs}   integer, intent(in) :: timestep
+    {tabs}   integer :: var_id
+    {tabs}   integer, allocatable :: start(:), count(:)
+
+    {tabs}   if (timestep > 0) then
+    {tabs}     allocate(start(ndim+1), count(ndim+1))
+    {tabs}     start(1:ndim) = 1
+    {tabs}     start(ndim+1) = timestep
+    {tabs}     count(1:ndim) = shape(var)
+    {tabs}     count(ndim+1) = 1
+    {tabs}  else
+    {tabs}     allocate(start(ndim), count(ndim))
+    {tabs}     start(1:ndim) = 1
+    {tabs}     count(1:ndim) = shape(var)
+    {tabs}  end if
+
+    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+    {tabs}   call check(nf90_get_var(ncid, var_id, var,start=start, count=count))
+    {tabs}end subroutine {subname}
+
+        """)
+    else: # dim == 0
+        return textwrap.dedent(f"""
+    {tabs}subroutine {subname}(ncid, varname, var, timestep)
+    {tabs}   integer, intent(in) :: ncid
+    {tabs}   character(len=*), intent(in) :: varname
+    {tabs}   {t_str}, intent(out) :: var
+    {tabs}   integer, intent(in) :: timestep
+    {tabs}   {t_str} :: tmp(1)
+    {tabs}   integer :: var_id, start(1), count(1)
+
+    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+    {tabs}   if (timestep > 0) then 
+    {tabs}       start = [timestep]
+    {tabs}       call check(nf90_get_var(ncid, var_id, tmp, start=[timestep],count=[1]))
+    {tabs}       var = tmp(1)
+    {tabs}    else 
+    {tabs}       call check(nf90_get_var(ncid, var_id, var))
+    {tabs}    endif 
+    {tabs}end subroutine {subname}
+
+    """)
+
+def gen_read_str()->str:
+    tabs = hio.indent(Tab.reset)
+    return textwrap.dedent(f"""
     {tabs}subroutine nc_read_string(ncid, varname, dim_name, var)
     {tabs}   integer, intent(in) :: ncid
     {tabs}   character(len=*), intent(in) :: varname
@@ -452,39 +548,70 @@ def gen_nc_read_type(dim: int, t: str)->str:
     {tabs}end subroutine
 
         """)
-    else:
-        shape = [':' for i in range(0,dim)]
-        dim_str = '' if dim == 0 else f"({shape})"
-        if t == 'double':
-            t_str = 'real(r8)'
-        else:
-            t_str = t
+
+def make_dim_str(dim: int, f: Callable[[int],str])->str:
+    dims = [f(i) for i in range(0,dim)]
+    return ",".join(dims)
+
+def gen_read_logical(dim: int)->str:
+    tabs = hio.indent(Tab.reset)
+    subname = f"nc_read_logical_{dim}"
+    if dim > 0:
+        dim_str = make_dim_str(dim, lambda i: ":")
+        temp_decl = f"integer, allocatable :: temp({dim_str})"
+        bounds_str = make_dim_str(dim, lambda i: f"lbs({i+1}):ubs({i+1})")
+        alloc_temp = f"allocate(temp({bounds_str}))"
         return textwrap.dedent(f"""
-    {tabs}subroutine nc_read_{t}_{dim}(ncid, varname, var, timestep)
-    {tabs}   integer, intent(in) :: ncid
-    {tabs}   character(len=*), intent(in) :: varname
-    {tabs}   {t_str}, intent(out) :: var{dim_str}
-    {tabs}   integer, optional, intent(in) :: timestep
-    {tabs}   integer :: var_id
-    {tabs}   integer, allocatable :: start(:), count(:)
+   {tabs}subroutine {subname}(ncid, varname, ndim, var, timestep)
+   {tabs}   integer, intent(in) :: ncid
+   {tabs}   character(len=*), intent(in) :: varname
+   {tabs}   integer, intent(in) :: ndim
+   {tabs}   logical, intent(out) :: var({dim_str})
+   {tabs}   integer, intent(in) :: timestep
+   {tabs}   {temp_decl}
+   {tabs}   ! Locals:
+   {tabs}   integer :: lbs(ndim), ubs(ndim)
+   {tabs}   lbs = lbound(var); ubs = ubound(var)
+   {tabs}   {alloc_temp}
 
-    {tabs}   if (present(timestep)) then
-    {tabs}     allocate(start(ndim+1), count(ndim+1))
-    {tabs}     start(1:ndim) = 1
-    {tabs}     start(ndim+1) = timestep
-    {tabs}     count(1:ndim) = shape(var)
-    {tabs}     count(ndim+1) = 1
-    {tabs}  else
-    {tabs}     allocate(start(ndim), count(ndim))
-    {tabs}     start(1:ndim) = 1
-    {tabs}     count(1:ndim) = shape(var)
-    {tabs}  end if
+   {tabs}   call nc_read_var(ncid,varname,ndim,temp, timestep)
+   {tabs}   var({dim_str}) = .false.
+   {tabs}   where(temp == 1) var = .true.
 
-    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
-    {tabs}   call check(nf90_get_var(ncid, var_id, var,start=start, count=count))
-    {tabs}end subroutine
+   {tabs}end subroutine {subname}
 
         """)
+    else:
+        return textwrap.dedent(f"""
+   {tabs} subroutine {subname}(ncid, varname, var, timestep)
+   {tabs}   integer, intent(in) :: ncid
+   {tabs}   character(len=*), intent(in) :: varname
+   {tabs}   logical, intent(out) :: var
+   {tabs}   integer, intent(in) :: timestep
+   {tabs}   integer :: temp
+
+   {tabs}   call nc_read_var(ncid,varname, temp, timestep)
+   {tabs}   if (temp == 1) then
+   {tabs}      var = .true.
+   {tabs}   else
+   {tabs}      var = .false.
+   {tabs}   end if
+
+   {tabs} end subroutine {subname}
+
+        """)
+
+def gen_check()->str:
+    tabs = hio.indent(Tab.reset)
+    return textwrap.dedent(f"""
+    {tabs}subroutine check(status)
+    {tabs}   integer, intent(in) :: status
+    {tabs}   if (status /= nf90_noerr) then
+    {tabs}      print *, trim(nf90_strerror(status))
+    {tabs}      stop 2
+    {tabs}   end if
+    {tabs}end subroutine check
+    """)
 
 def gen_nc_file()->str:
     tabs = hio.indent(Tab.reset)
@@ -492,8 +619,10 @@ def gen_nc_file()->str:
     {tabs}integer function nc_create_or_open_file(fn, mode) result(ncid)
     {tabs}   character(len=*), intent(in) :: fn
     {tabs}   integer, intent(in) :: mode
-    {tabs}   if (mode == open_file) then
+    {tabs}   if (mode == read_file) then
     {tabs}      call check(nf90_open(trim(fn), nf90_nowrite + nf90_netcdf4, ncid))
+    {tabs}   else if(mode == append_file) then
+    {tabs}      call check(nf90_open(trim(fn), nf90_write + nf90_netcdf4, ncid))
     {tabs}   else
     {tabs}      call check(nf90_create(trim(fn), nf90_clobber + nf90_netcdf4, ncid))
     {tabs}   end if
@@ -587,7 +716,7 @@ def gen_nc_write_numeric_array()->list[str]:
     {tabs}   character(len=*), dimension(:), intent(in) :: dim_names
     {tabs}   {ftype}, intent(in) :: var(product(dims))
     {tabs}   character(len=*), intent(in) :: varname
-    {tabs}   integer, optional :: timestep
+    {tabs}   integer, intent(in) :: timestep
     {tabs}   !! locals:
     {tabs}   integer :: var_id, i
     {tabs}   logical :: unlim
@@ -597,7 +726,7 @@ def gen_nc_write_numeric_array()->list[str]:
 
     {tabs}   allocate (buffer(product(dims)))
     {tabs}   buffer = var
-    {tabs}   if(present(timestep)) then 
+    {tabs}   if(timestep > 0) then 
     {tabs}      unlim = .true.
     {tabs}      allocate(start(ndim+1), count(ndim+1))
     {tabs}   else
@@ -619,13 +748,13 @@ def gen_nc_write_numeric_array()->list[str]:
     {tabs}   select case (ndim)
     {tabs}   case (1)
     {tabs}      allocate (data_1d(dims(1))); data_1d = reshape(buffer, [dims(1)])
-    {tabs}      call check(nf90_put_var(ncid, var_id, data_1d))
+    {tabs}      call check(nf90_put_var(ncid, var_id, data_1d,start=start,count=count))
     {tabs}   case (2)
     {tabs}      allocate (data_2d(dims(1), dims(2))); data_2d = reshape(buffer, [dims(1), dims(2)])
-    {tabs}      call check(nf90_put_var(ncid, var_id, data_2d))
+    {tabs}      call check(nf90_put_var(ncid, var_id, data_2d,start=start,count=count))
     {tabs}   case (3)
     {tabs}      allocate (data_3d(dims(1), dims(2), dims(3))); data_3d = reshape(buffer, [dims(1), dims(2), dims(3)])
-    {tabs}      call check(nf90_put_var(ncid, var_id, data_3d))
+    {tabs}      call check(nf90_put_var(ncid, var_id, data_3d,start=start,count=count))
     {tabs}   case default
     {tabs}      stop "(nc_write_{t}) doesn't support >3D doubles"
     {tabs}   end select
@@ -651,20 +780,53 @@ def gen_nc_write_string()->str:
 def gen_nc_write_logical()->str:
     tabs = hio.indent(Tab.reset)
     return textwrap.dedent(f"""
-    {tabs}subroutine nc_write_logical(ncid, ndim, dims, dim_names, var, varname)
+    {tabs}subroutine nc_write_logical(ncid, ndim, dims, dim_names, var, varname, timestep)
     {tabs}   integer, intent(in) :: ncid, ndim
     {tabs}   integer, intent(in) :: dims(ndim)
     {tabs}   character(len=*), dimension(:), intent(in) :: dim_names
     {tabs}   logical, intent(in) :: var(product(dims))
     {tabs}   character(len=*), intent(in) :: varname
-    {tabs}   integer :: var_id
+    {tabs}   integer, intent(in) :: timestep
+    {tabs}   integer :: var_id, i
     {tabs}   integer, allocatable :: int_buf(:)
+    {tabs}   integer, allocatable :: data_1d(:), data_2d(:, :), data_3d(:, :, :)
+    {tabs}   logical :: unlim
+    {tabs}   integer, allocatable :: start(:), count(:)
 
     {tabs}   allocate (int_buf(product(dims)))
     {tabs}   int_buf = merge(1, 0, var)  ! logical → int (1=true, 0=false)
+    {tabs}   if(timestep > 0) then 
+    {tabs}      unlim = .true.
+    {tabs}      allocate(start(ndim+1), count(ndim+1))
+    {tabs}   else
+    {tabs}      unlim = .false.
+    {tabs}      allocate(start(ndim), count(ndim))
+    {tabs}   endif
+
+    {tabs}   do i = 1, ndim
+    {tabs}      start(i) = 1
+    {tabs}      count(i) = dims(i)
+    {tabs}   end do
+
+    {tabs}   if (unlim) then 
+    {tabs}      start(ndim+1) = timestep
+    {tabs}      count(ndim+1) = 1
+    {tabs}   endif
 
     {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
-    {tabs}   call check(nf90_put_var(ncid, var_id, int_buf))
+    {tabs}   select case (ndim)
+    {tabs}   case (1)
+    {tabs}      allocate (data_1d(dims(1))); data_1d = reshape(int_buf, [dims(1)])
+    {tabs}      call check(nf90_put_var(ncid, var_id, data_1d,start=start,count=count))
+    {tabs}   case (2)
+    {tabs}      allocate (data_2d(dims(1), dims(2))); data_2d = reshape(int_buf, [dims(1), dims(2)])
+    {tabs}      call check(nf90_put_var(ncid, var_id, data_2d,start=start,count=count))
+    {tabs}   case (3)
+    {tabs}      allocate (data_3d(dims(1), dims(2), dims(3))); data_3d = reshape(int_buf, [dims(1), dims(2), dims(3)])
+    {tabs}      call check(nf90_put_var(ncid, var_id, data_3d,start=start,count=count))
+    {tabs}   case default
+    {tabs}      stop "(nc_write_logical) doesn't support >3D vars"
+    {tabs}   end select
     {tabs}end subroutine nc_write_logical
 
     {tabs}subroutine nc_write_logical_scalar(ncid, var, varname)
@@ -678,5 +840,34 @@ def gen_nc_write_logical()->str:
     {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
     {tabs}   call check(nf90_put_var(ncid, var_id, buf))
     {tabs}end subroutine nc_write_logical_scalar
+    """)
+
+def gen_nc_read_timeslices()->str:
+    tabs = hio.indent(Tab.reset)
+    return textwrap.dedent(f"""
+    {tabs}integer function nc_read_timeslices(fn) result(time_len)
+    {tabs}    character(len=*), intent(in) :: fn
+
+    {tabs}    integer :: ncid         ! file ID
+    {tabs}    integer :: time_dimid   ! dimension ID for 'time'
+    {tabs}    integer :: ierr         ! error status
+
+    {tabs}    ! Open file in read-only mode
+    {tabs}    ierr = nf90_open(trim(fn), NF90_NOWRITE, ncid)
+    {tabs}    if (ierr /= nf90_noerr) stop "Error opening file"
+
+    {tabs}    ! Inquire about the 'time' dimension
+    {tabs}    ierr = nf90_inq_dimid(ncid, "time", time_dimid)
+    {tabs}    if (ierr /= nf90_noerr) stop "Error: 'time' dimension not found"
+
+    {tabs}    ! Get the length of the 'time' dimension
+    {tabs}    call check(nf90_inquire_dimension(ncid, time_dimid, len=time_len))
+    {tabs}    if (ierr /= nf90_noerr) stop "Error inquiring length of 'time' dimension"
+
+
+    {tabs}    ! Close file
+    {tabs}    call check(nf90_close(ncid))
+
+    {tabs}end function nc_read_timeslices
     """)
 
