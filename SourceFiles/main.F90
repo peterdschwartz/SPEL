@@ -1,4 +1,4 @@
-program main()
+program main
 
 use shr_kind_mod, only: r8 => shr_kind_r8
 use UpdateParamsAccMod, only: update_params_acc
@@ -6,19 +6,20 @@ use elm_varctl
 use filterMod
 !!use decompMod, only: get_clump_bounds_gpu, gpu_clumps, gpu_procinfo, init_proc_clump_info
 use decompMod, only: get_proc_bounds, get_clump_bounds, procinfo, clumps
-use ReadWriteMod, only : write_elmtypes
+use ReadWriteMod, only : write_elmtypes, read_elmtypes
 use decompMod, only: bounds_type
 #ifdef _CUDA
 use cudafor
 #endif
 use timeInfoMod
 use elm_initializeMod
+use nc_io, only: nc_read_timeslices
 !#USE_START
 
 !=======================================!
 implicit none
 type(bounds_type)  ::  bounds_clump, bounds_proc
-integer :: beg = 1, fin = 10, p, nclumps, nc, step_count
+integer :: beg = 1, fin = 10, p, nclumps, nc, step
 integer :: err
 #if _CUDA
 integer(kind=cuda_count_kind) :: heapsize, free1, free2, total
@@ -29,6 +30,8 @@ integer :: clump_input, pproc_input, fc, c, l, fp, g, j
 logical :: found_thawlayer
 integer :: k_frz
 integer :: begg, endg
+character(len=256) :: const_fn, var_fn
+integer :: time_len
 real(r8) :: declin, declinp1
 real :: startt, stopt
 real(r8), allocatable :: icemask_dummy_arr(:)
@@ -56,14 +59,18 @@ ELSEIF (COMMAND_ARGUMENT_COUNT() == 2) THEN
      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 END IF
 
-call elm_init(clump_input, pproc_input, dtime_mod, year_curr, bounds_proc)
+const_fn = "spel-constants.nc"
+var_fn = "spel-elmtypes.nc"
+call elm_init(const_fn, var_fn, clump_input, pproc_input, dtime_mod, year_curr, bounds_proc)
+
+time_len = nc_read_timeslices(var_fn)
+print *, "Number of time slices found: ", time_len
+
 declin = -0.4030289369547867
-step_count = 0
-print *, "number of clumps", nclumps
-print *, "step:", step_count
+step = 0
 
 #ifdef _OPENACC
-if (step_count == 0) then
+if (step == 0) then
    print *, "transferring data to GPU"
    call init_proc_clump_info()
 #ifdef _CUDA
@@ -113,6 +120,11 @@ declinp1 = -0.4023686267583503
 
 nclumps = procinfo%nclumps
 
+do step = 1, time_len
+
+   call get_clump_bounds(1, bounds_clump)
+   call read_elmtypes(1, step, trim(var_fn), bounds_clump)
+
 !$acc parallel loop independent gang vector default(present) private(bounds_clump)
 do nc = 1, nclumps
    call get_clump_bounds(nc, bounds_clump)
@@ -120,7 +132,8 @@ do nc = 1, nclumps
 
 end do
 
-call write_elmtypes(1,"fut-results.nc", bounds_clump)
+call write_elmtypes(1,step,"fut-results.nc", bounds_clump)
+end do
 
 #if _CUDA
 istat = cudaMemGetInfo(free1, total)

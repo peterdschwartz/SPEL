@@ -147,16 +147,12 @@ def comment_line(lines: list[LineTuple], ct: int, verbose:bool=False):
     newline = newline.replace(str_, comment_ + str_, 1)
     lines[ct] = newline
     continuation = bool(newline.strip("\n").strip().endswith("&"))
-    if verbose:
-        print(lines[ct].rstrip("\n"))
     while continuation:
         ct += 1
         newline = lines[ct]
         str_ = newline.split()[0]
         newline = newline.replace(str_, comment_ + str_, 1)
         lines[ct] = newline
-        if verbose:
-            print(lines[ct].rstrip("\n"))
         continuation = bool(newline.strip("\n").strip().endswith("&"))
     return lines, ct
 
@@ -488,8 +484,6 @@ def getLocalVariables(sub: Subroutine, verbose=False, class_var=False):
         match_variable = find_variables.search(line)
 
         if match_variable:
-            if verbose:
-                print(f"{func_name} Matched:{match_variable.group()},{line}")
             # Track variable declaration start / end
             if sub.var_declaration_startl == 0:
                 sub.var_declaration_startl = ln
@@ -504,7 +498,7 @@ def getLocalVariables(sub: Subroutine, verbose=False, class_var=False):
                 else:  # user-defined type
                     m_type = user_type.search(line)
                     if not m_type:
-                        print(f"{func_name}::Error Can't Identify Data Type for {line}")
+                        sub.logger.error(f"{func_name}::Error Can't Identify Data Type for {line}")
                         sys.exit(1)
                     data_type = find_type.search(line).group()
 
@@ -559,7 +553,7 @@ def getLocalVariables(sub: Subroutine, verbose=False, class_var=False):
                         if parameter:
                             print("ERROR:Arguments can't be parameters")
                             sys.exit(1)
-                        sub.Arguments[varname] = Variable(
+                        sub.arguments[varname] = Variable(
                             data_type,
                             varname,
                             subgrid,
@@ -570,7 +564,7 @@ def getLocalVariables(sub: Subroutine, verbose=False, class_var=False):
                             bounds=bounds,
                         )
                     else:
-                        sub.LocalVariables["arrays"][varname] = Variable(
+                        sub.local_variables[varname] = Variable(
                             data_type,
                             varname,
                             subgrid,
@@ -579,7 +573,7 @@ def getLocalVariables(sub: Subroutine, verbose=False, class_var=False):
                             parameter,
                             bounds=bounds,
                         )
-                        sub.LocalVariables["arrays"][varname].declaration = line
+                        sub.local_variables[varname].declaration = line
                     # This removes the array from the list of variables
                     temp_vars = temp_vars.replace(arr, "")
 
@@ -594,7 +588,7 @@ def getLocalVariables(sub: Subroutine, verbose=False, class_var=False):
                         optional = True
                     else:
                         optional = False
-                    sub.Arguments[var] = Variable(
+                    sub.arguments[var] = Variable(
                         data_type,
                         var,
                         "",
@@ -606,7 +600,7 @@ def getLocalVariables(sub: Subroutine, verbose=False, class_var=False):
                 else:
                     if "=" in var:
                         var = var.split("=")[0].strip()
-                    sub.LocalVariables["scalars"][var] = Variable(
+                    sub.local_variables[var] = Variable(
                         data_type, var, "", ln, dim=0, parameter=parameter
                     )
         ln += 1

@@ -1,5 +1,5 @@
 module decompInitMod
-   #include "unittest_defs.h"
+#include "unittest_defs.h"
 
   !------------------------------------------------------------------------------
   ! !DESCRIPTION:

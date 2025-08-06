@@ -29,6 +29,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (allocated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
       ! Check if 'lbounds' attribute exists
       status = nf90_get_att(ncid, varid, "lbounds", lbs)
@@ -53,6 +54,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (allocated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -78,6 +80,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (allocated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -103,6 +106,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (allocated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -128,6 +132,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (allocated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -153,6 +158,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (allocated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -178,6 +184,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (allocated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -203,6 +210,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (allocated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -228,6 +236,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (allocated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -253,6 +262,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (associated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -278,6 +288,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (associated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -303,6 +314,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (associated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -328,6 +340,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (associated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -353,6 +366,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (associated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -378,6 +392,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (associated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -402,6 +417,7 @@ contains
       integer :: lbs(ndim), ubs(ndim), status
       logical :: has_bounds
       integer :: varid
+      if (associated(var)) return
 
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
@@ -428,6 +444,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (associated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists
@@ -453,6 +470,7 @@ contains
       logical :: has_bounds
       integer :: varid
 
+      if (associated(var)) return
       call check(nf90_inq_varid(ncid, trim(varname), varid))
 
       ! Check if 'lbounds' attribute exists

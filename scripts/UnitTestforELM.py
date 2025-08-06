@@ -1,4 +1,5 @@
 import logging
+import sys
 from pprint import pprint
 
 import scripts.dynamic_globals as dg
@@ -8,6 +9,7 @@ from scripts.DerivedType import DerivedType
 from scripts.fortran_modules import FortranModule, get_filename_from_module
 from scripts.helper_functions import construct_call_tree
 from scripts.logging_configs import get_logger
+from scripts.LoopConstructs import get_loops
 from scripts.mod_config import (
     _bc,
     default_mods,
@@ -16,6 +18,7 @@ from scripts.mod_config import (
     spel_output_dir,
     unittests_dir,
 )
+from scripts.refactor_tools import compress_on_filter, prune_associate_clause
 from scripts.utilityFunctions import Variable
 from scripts.variable_analysis import determine_global_variable_status
 
@@ -135,6 +138,11 @@ def create_unit_test(sub_names: list[str], casename: str, keep: bool) -> None:
         type_dict=type_dict,
     )
 
+    # if "lakefluxes" in main_sub_dict:
+    #     lakefluxes = main_sub_dict["lakefluxes"]
+    #     compress_on_filter(sub=lakefluxes)
+    #     sys.exit(0)
+
     aggregate_dtype_vars(
         sub_dict=main_sub_dict,
         type_dict=type_dict,
@@ -197,6 +205,7 @@ def create_unit_test(sub_names: list[str], casename: str, keep: bool) -> None:
     wr.write_elminstMod(type_dict, case_dir)
     # duplicateMod.F90
     wr.duplicate_clumps(type_dict)
+    wr.create_fortls(case_dir)
 
     # Go through all needed files and include a header that defines some constants
     insert_header_for_unittest(
@@ -212,7 +221,6 @@ def create_unit_test(sub_names: list[str], casename: str, keep: bool) -> None:
         f"cp {spel_mods_dir}unittest_defs.h {case_dir}",
         f"cp {spel_mods_dir}decompInitMod.F90 {case_dir}",
         f"cp {spel_mods_dir}check_config.sh {case_dir}",
-        f"touch {case_dir}/.fortls",
     ]
     for cmd in cmds:
         logger.info(cmd)
@@ -277,6 +285,10 @@ def process_subroutines_for_unit_test(
     for sub in sub_dict.values():
         if sub.elmtype_access_by_ln:
             sub.summarize_readwrite()
+
+    # for subname in fut_subs:
+    #     sub = sub_dict[subname]
+    #     prune_associate_clause(sub)
 
     return
 

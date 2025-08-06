@@ -4,6 +4,6 @@
 #define var_desc_t integer
 #define is_active_betr_bgc .false.
 #define npes 1 
-#define iam masterproc
+#define iam 1
 #define temperature_type integer
 #define hlm_fates_interface_type integer

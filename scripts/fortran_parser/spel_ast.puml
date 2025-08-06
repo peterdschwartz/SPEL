@@ -1,0 +1,40 @@
+@startuml
+hide stereotype
+skinparam rectangle {
+  BackgroundColor white
+  BorderColor black
+  FontColor black
+  ShowStereotype false
+}
+rectangle "SubCallStatement" as node_0
+rectangle "Func: dynamic_plant_alloc\nArgs: expr, expr, expr" as node_1
+node_0 --> node_1
+rectangle "Func: min\nArgs: expr, expr" as node_2
+node_1 --> node_2
+rectangle "InfixExpr:\nOp: -" as node_3
+node_2 --> node_3
+rectangle "Literal: 1.0" as node_4
+node_3 --> node_4
+rectangle "Identifier: n_lim_factor" as node_5
+node_3 --> node_5
+rectangle "InfixExpr:\nOp: -" as node_6
+node_2 --> node_6
+rectangle "Literal: 1.0" as node_7
+node_6 --> node_7
+rectangle "Identifier: p_lim_factor" as node_8
+node_6 --> node_8
+rectangle "InfixExpr:\nOp: +" as node_9
+node_1 --> node_9
+rectangle "Func: laisun\nArgs: p" as node_10
+node_9 --> node_10
+rectangle "Identifier: p" as node_11
+node_10 --> node_11
+rectangle "Func: laisha\nArgs: p" as node_12
+node_9 --> node_12
+rectangle "Identifier: p" as node_13
+node_12 --> node_13
+rectangle "Func: allocation_leaf\nArgs: p" as node_14
+node_1 --> node_14
+rectangle "Identifier: p" as node_15
+node_14 --> node_15
+@enduml

@@ -268,7 +268,6 @@ def handle_bad_inst(state: ParseState, logger: Logger):
             _, _ = state.line_it.consume_until(regex_do_end, regex_do_start)
             state.line_it.comment_cont_block(index=start_index)
         else:
-            logger.info(f"Commenting: {state.curr_line}")
             # simple statement just remove
             set_comment(state, logger)
     elif match_decl and not state.in_sub:
@@ -661,7 +660,7 @@ def modify_file(
         orig_lines=orig_lines,
         path=fn,
         curr_line=None,
-        line_it= LogicalLineIterator(work_lines,iter_logger),
+        line_it= LogicalLineIterator(work_lines),
         sub_init_dict={},
         removed_subs=[],
         in_sub=False,

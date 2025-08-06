@@ -18,7 +18,7 @@ from scripts.helper_functions import (ReadWrite, SubroutineCall,
                                       summarize_read_write_status,
                                       trace_derived_type_arguments)
 from scripts.logging_configs import get_logger
-from scripts.LoopConstructs import Loop, exportVariableDependency
+from scripts.LoopConstructs import Loop
 from scripts.mod_config import _bc, _no_colors, spel_dir
 from scripts.process_associate import getAssociateClauseVars
 from scripts.types import (ArgLabel, CallDesc, CallTree, FileInfo, LineTuple,
@@ -32,6 +32,7 @@ from scripts.utilityFunctions import (Variable, determine_filter_access,
 
 # Setup logger
 logger = get_logger("SubroutineAnalysis")
+
 
 class Subroutine(object):
     """
@@ -65,7 +66,7 @@ class Subroutine(object):
         self,
         init_obj: SubInit,
         lib_func=False,
-        verbose:bool=False,
+        verbose: bool = False,
     ):
         """
         Initalizes the subroutine object:
@@ -82,7 +83,7 @@ class Subroutine(object):
         self.startline: int = init_obj.start
         self.endline: int = init_obj.end
         self.module: str = init_obj.mod_name
-        self.mod_deps: dict[str, str|list[Any]]
+        self.mod_deps: dict[str, str | list[Any]]
         if self.endline == 0 or self.startline == 0 or not self.filepath:
             print(
                 f"Error in finding subroutine {self.name} {self.filepath} {self.startline} {self.endline}"
@@ -93,15 +94,13 @@ class Subroutine(object):
         self.abstract_call_tree: Optional[CallTree] = None
 
         # Initialize arguments and local variables
-        self.Arguments: dict[str, Variable] = {}
-        self.LocalVariables = {}
-        self.LocalVariables["arrays"] = {}
-        self.LocalVariables["scalars"] = {}
+        self.arguments: dict[str, Variable] = {}
+        self.local_variables: dict[str, Variable] = {}
         self.class_method: bool = False
         self.class_type: Optional[str] = None
 
         # Create another argument dict that stores the read,write status of them:
-        self.arguments_read_write: dict[str, ReadWrite]= {}
+        self.arguments_read_write: dict[str, ReadWrite] = {}
         self.arg_access_by_ln: dict[str, list[ReadWrite]] = {}
 
         # Store when the arguments/local variable declarations start and end
@@ -114,8 +113,8 @@ class Subroutine(object):
         self.cpp_filepath: str | None = init_obj.cpp_fn
 
         # Process the Associate Clause
-        self.associate_vars: dict[str,str] = {}
-        self.reverse_associate_map: dict[str,str] = {}
+        self.associate_vars: dict[str, str] = {}
+        self.reverse_associate_map: dict[str, str] = {}
         self.ptr_vars: dict[str, list[str]] = {}
 
         self.associate_start: int = -1
@@ -124,73 +123,79 @@ class Subroutine(object):
         self.dummy_args_list: List[str] = []
         self.return_type = init_obj.function.return_type if init_obj.function else ""
         self.result_name = init_obj.function.result if init_obj.function else ""
-        self.result: Variable|None = None
+        self.result: Variable | None = None
 
         self.dtype_vars: dict[str, Variable] = {}
         self.sub_lines: list[LineTuple] = []
 
         if not lib_func:
             self.sub_lines = self.get_sub_lines(init_obj.mod_lines)
-            if(not self.sub_lines):
+            if not self.sub_lines:
                 sys.exit(f"FAILED TO GET SUB_LINES FOR { self.name }")
 
             self.associate_vars, jstart, jend = getAssociateClauseVars(self)
             self.associate_start = jstart
             self.associate_end = jend
-            self.reverse_associate_map: dict[str,str] = {val : key for key, val in self.associate_vars.items()}
+            self.reverse_associate_map: dict[str, str] = {
+                val: key for key, val in self.associate_vars.items()
+            }
 
             self.dummy_args_list = self._get_dummy_args()
             getLocalVariables(self, verbose=verbose)
-
+            if self.local_variables:
+                decl_lns: list[int] = [var.ln for var in self.local_variables.values()]
+                self.last_decl_ln = max(decl_lns)
 
         if init_obj.function:
-            if self.result_name in self.Arguments:
-                self.result = self.Arguments.pop(self.result_name)
+            if self.result_name in self.arguments:
+                self.result = self.arguments.pop(self.result_name)
             else:
                 self.result = Variable(
-                            type=self.return_type,
-                            name=self.result_name,
-                            subgrid="?",
-                            ln=self.startline,
-                            dim=0,
+                    type=self.return_type,
+                    name=self.result_name,
+                    subgrid="?",
+                    ln=self.startline,
+                    dim=0,
                 )
             self.dummy_args_list.remove(self.result_name)
-        if self.Arguments:
+        if self.arguments:
             sort_args = {}
             for arg in self.dummy_args_list:
-                sort_args[arg] = self.Arguments[arg]
-            self.Arguments = sort_args.copy()
+                sort_args[arg] = self.arguments[arg]
+            self.arguments = sort_args.copy()
 
         # These 3 dictionaries will be summaries of ReadWrite Status for the FUT subroutines as a whole
-        self.elmtype_access_sum : dict[str,str] = {}
+        self.elmtype_access_sum: dict[str, str] = {}
 
-        self.elmtype_access_by_ln: Dict[str,List[ReadWrite]] = {}
+        self.elmtype_access_by_ln: dict[str, list[ReadWrite]] = {}
 
-        self.subroutine_call: List[SubroutineCall] = []
+        self.local_vars_access_by_ln: dict[str, list[ReadWrite]] = {}
+
+        self.subroutine_call: list[SubroutineCall] = []
         self.child_subroutines: dict[str, Subroutine] = {}
-        self.sub_call_desc: dict[int,CallDesc] = {}
+        self.sub_call_desc: dict[int, CallDesc] = {}
 
-        self.DoLoops = []
+        self.loops: list[Loop] = []
 
         # non-derived type variables used in the subroutine
-        self.active_global_vars: Dict[str,Variable] = {}
+        self.active_global_vars: dict[str, Variable] = {}
 
         ## Section for flags to avoid re-processing subroutines
 
-        # Flag that denotes subroutines that were user requested 
+        # Flag that denotes subroutines that were user requested
         self.unit_test_function: bool = False
         self.acc_status: bool = False
         self.analyzed_child_subroutines: bool = False
-        self.preprocessed : bool = False
+        self.preprocessed: bool = False
         self.args_analyzed: bool = False
         self.global_analyzed: bool = False
 
         self.environment: Optional[Environment] = None
 
+        self.logger: logging.Logger = get_logger(self.name)
+
         if not self.library:
             self.get_arg_intent()
-
-
 
     def __repr__(self) -> str:
         name = "Subroutine" if not self.func else "Function"
@@ -219,10 +224,10 @@ class Subroutine(object):
             + c.ENDC
         )
         if self.func:
-            ofile.write(c.HEADER+f"{tab}Result -> {self.result}\n")
+            ofile.write(c.HEADER + f"{tab}Result -> {self.result}\n")
 
         ofile.write(c.WARNING + "Has Arguments:\n" + c.ENDC)
-        for arg in self.Arguments.values():
+        for arg in self.arguments.values():
             if arg.optional:
                 _str = "~" * len(tab)
             else:
@@ -231,13 +236,18 @@ class Subroutine(object):
 
         # Print local variables
         ofile.write(c.WARNING + "Local Arrays:\n" + c.ENDC)
-        array_dict = self.LocalVariables["arrays"]
+        array_dict = {
+            key: val for key, val in self.local_variables.items() if val.dim > 0
+        }
         for arg in array_dict:
             var = array_dict[arg]
             ofile.write(c.OKGREEN + f"{tab}{var}\n" + c.ENDC)
         if long:
             ofile.write(c.WARNING + "Local Scalars:\n")
-            for arg in self.LocalVariables["scalars"]:
+            scalars = {
+                key: val for key, val in self.local_variables.items() if val.dim == 0
+            }
+            for arg in scalars:
                 ofile.write(f"{tab}{arg}\n")
 
         # print Child Subroutines
@@ -255,24 +265,26 @@ class Subroutine(object):
         And then passes it to the getArguments function
         """
         func_name = "_get_dummy_args"
-        tabs = ' '*len(func_name)
+        tabs = " " * len(func_name)
 
         lines = self.sub_lines
-        regex = re.compile(r'(?<=\()[\w\s,]+(?=\))')
+        regex = re.compile(r"(?<=\()[\w\s,]+(?=\))")
 
         full_line = lines[0].line
         if self.func:
-            _ftype, _f , func_rest = split_func_line(full_line)
+            _ftype, _f, func_rest = split_func_line(full_line)
             args_and_res = regex.findall(func_rest)
             if args_and_res:
-                args = args_and_res[0].split(',')
-                if(len(args_and_res)!=2):
+                args = args_and_res[0].split(",")
+                if len(args_and_res) != 2:
                     args.append(self.result_name)
                 elif len(args_and_res) == 2:
                     args.append(args_and_res[1])
                 else:
-                    logger.error(f"{func_name}Error - wrong function dummy args"
-                        +f"{tabs}{args_and_res}\n{tabs}{full_line}")
+                    logger.error(
+                        f"{func_name}Error - wrong function dummy args"
+                        + f"{tabs}{args_and_res}\n{tabs}{full_line}"
+                    )
                     sys.exit(1)
             else:
                 args = [self.result_name] if self.result_name else []
@@ -280,42 +292,48 @@ class Subroutine(object):
             args_str = regex.findall(full_line)
             args_str = [_str for _str in args_str if _str.strip()]
             if args_str:
-                args = args_str[0].split(',')
+                args = args_str[0].split(",")
             else:
                 args = []
 
         args = [arg.strip() for arg in args]
         return args
 
-
-    def get_dtype_vars(self, instance_dict: Dict[str, DerivedType])-> Dict[str,Variable]:
+    def get_dtype_vars(
+        self, instance_dict: Dict[str, DerivedType]
+    ) -> Dict[str, Variable]:
         """
-        Function 
+        Function
         """
         index_str = "(index)"
-        regex_paren = re.compile(r"\((.+)\)") # for removing array of struct index
+        regex_paren = re.compile(r"\((.+)\)")  # for removing array of struct index
         regex_dtype_var = re.compile(r"\w+(?:\(\w+\))?%\w+")
 
         lines = self.sub_lines
-        matched_lines = [line for line in filter(lambda x: regex_dtype_var.search(x.line), lines)]
+        matched_lines = [
+            line for line in filter(lambda x: regex_dtype_var.search(x.line), lines)
+        ]
 
         def check_local_decls(my_dict):
-            return lambda key: key.replace(index_str,"") in my_dict
+            return lambda key: key.replace(index_str, "") in my_dict
 
-        def sub_soa(name: str)->str:
+        def sub_soa(name: str) -> str:
             inst, field = name.split("%")
             inst = regex_paren.sub(index_str, inst)
             return f"{inst}%{field}"
 
-        local_and_args_dict = self.Arguments | self.LocalVariables['arrays'] | self.LocalVariables['scalars']
+        local_and_args_dict = (
+            self.arguments
+            | self.local_variables
+        )
         is_arg_or_local = check_local_decls(local_and_args_dict)
 
-        dtype_vars: dict[str,Variable] = {}
+        dtype_vars: dict[str, Variable] = {}
         for lpair in matched_lines:
             m_vars = regex_dtype_var.findall(lpair.line)
             for dtype in m_vars:
                 dtype = sub_soa(dtype)
-                if dtype not in dtype_vars and not is_arg_or_local(dtype.split('%')[0]):
+                if dtype not in dtype_vars and not is_arg_or_local(dtype.split("%")[0]):
                     dtype_var = get_component(instance_dict, dtype)
                     if dtype_var:
                         dtype_var.name = dtype
@@ -325,7 +343,7 @@ class Subroutine(object):
 
     def get_ptr_vars(self):
         """
-        Function that finds pointers to derived types either directly or 
+        Function that finds pointers to derived types either directly or
         through an associated name.
         """
         fileinfo = self.get_file_info()
@@ -335,13 +353,18 @@ class Subroutine(object):
         sub_lines = [lpair for lpair in sub_lines if lpair.ln >= fileinfo.startln]
 
         total_matches: list[LineTuple] = []
-        matches = [line for line in filter(lambda x: regex_ptr.search(x.line), sub_lines)]
+        matches = [
+            line for line in filter(lambda x: regex_ptr.search(x.line), sub_lines)
+        ]
         total_matches.extend(matches)
         if self.associate_vars:
             ptrname_list = [key for key in self.associate_vars.keys()]
             ptrname_str = "|".join(ptrname_list)
             regex_ptr_assoc = re.compile(r"\w+\s*(=>)\s*({})".format(ptrname_str))
-            matches = [line for line in filter(lambda x: regex_ptr_assoc.search(x.line), sub_lines)]
+            matches = [
+                line
+                for line in filter(lambda x: regex_ptr_assoc.search(x.line), sub_lines)
+            ]
             total_matches.extend(matches)
 
         for ptr_line in total_matches:
@@ -354,35 +377,43 @@ class Subroutine(object):
 
         return None
 
-
-    def get_sub_lines(self, mod_lines: Optional[list[LineTuple]]=None)-> list[LineTuple]:
+    def get_sub_lines(
+        self, mod_lines: Optional[list[LineTuple]] = None
+    ) -> list[LineTuple]:
         """
         Function that returns lines of a subroutine after trimming comments,
         removing line continuations, and lower-case
         """
         fileinfo = self.get_file_info(all=True)
-        regex_all = re.compile(r'(.*)')
+        regex_all = re.compile(r"(.*)")
         if not mod_lines:
-            lines = search_in_file_section(fpath=fileinfo.fpath,
-                                           start_ln=fileinfo.startln,
-                                           end_ln=fileinfo.endln,
-                                           pattern=regex_all,)
+            lines = search_in_file_section(
+                fpath=fileinfo.fpath,
+                start_ln=fileinfo.startln,
+                end_ln=fileinfo.endln,
+                pattern=regex_all,
+            )
             fline_list: list[LineTuple] = []
             ln: int = 0
             while ln < len(lines):
                 full_line, new_ln = line_unwrapper(lines, ln)
-                if(full_line):
+                if full_line:
                     statements = full_line.split(";")
                     for stmt in statements:
-                        fline_list.append(LineTuple(line=stmt.strip(),ln=ln))
+                        fline_list.append(LineTuple(line=stmt.strip(), ln=ln))
                 ln = new_ln + 1
 
-            fline_list = [ LineTuple(line=f.line,ln=f.ln+fileinfo.startln) for f in fline_list ]
+            fline_list = [
+                LineTuple(line=f.line, ln=f.ln + fileinfo.startln) for f in fline_list
+            ]
         else:
-            fline_list = [linetuple for linetuple in mod_lines if fileinfo.startln <= linetuple.ln <= fileinfo.endln]
+            fline_list = [
+                linetuple
+                for linetuple in mod_lines
+                if fileinfo.startln <= linetuple.ln <= fileinfo.endln
+            ]
 
         return fline_list
-
 
     def get_arg_intent(self):
         """
@@ -391,40 +422,42 @@ class Subroutine(object):
         """
         flines = self.sub_lines if self.sub_lines else self.get_sub_lines()
 
-        lookup_lines = { lpair.ln: lpair.line for lpair in flines }
+        lookup_lines = {lpair.ln: lpair.line for lpair in flines}
 
-        regex_intent = re.compile(r'intent\s*\(\s*(in\b|inout\b|out\b)\s*\)', re.IGNORECASE)
-        regex_class= re.compile(r'class\s*\(\s*\w+\s*\)', re.IGNORECASE)
-        regex_paren = re.compile(r'(?<=\()\s*\w+\s*(?=\))')
-        def set_intent(x:str) -> str:
+        regex_intent = re.compile(
+            r"intent\s*\(\s*(in\b|inout\b|out\b)\s*\)", re.IGNORECASE
+        )
+        regex_class = re.compile(r"class\s*\(\s*\w+\s*\)", re.IGNORECASE)
+        regex_paren = re.compile(r"(?<=\()\s*\w+\s*(?=\))")
+
+        def set_intent(x: str) -> str:
             match x:
                 case "in":
-                    return 'r'
+                    return "r"
                 case "out":
-                    return 'w'
+                    return "w"
                 case "inout":
-                    return 'rw'
+                    return "rw"
                 case _:
                     print("Error - Wrong Intent For Argument")
                     sys.exit(1)
 
-        for arg in self.Arguments.values():
+        for arg in self.arguments.values():
             line = lookup_lines[arg.ln]
             m_ = regex_intent.search(line.lower())
             cl = regex_class.search(line.lower())
-            if(m_):
+            if m_:
                 intent = regex_paren.search(m_.group())
                 arg.intent = set_intent(intent.group().strip())
             elif cl:
                 class_type = regex_paren.search(cl.group())
-                arg.intent = set_intent('inout')
+                arg.intent = set_intent("inout")
                 self.class_method = True
                 self.class_type = class_type.group().strip()
 
         return None
 
-
-    def get_file_info(self, all: bool=False):
+    def get_file_info(self, all: bool = False):
         """
         Getter that returns tuple for fn, start and stop linenumbers.takes into account cpp files
         """
@@ -443,45 +476,34 @@ class Subroutine(object):
                 start_ln = self.associate_end
             endline = self.endline
 
-        return FileInfo(fpath=fn,startln=start_ln,endln=endline)
+        return FileInfo(fpath=fn, startln=start_ln, endln=endline)
 
-    def check_variable_consistency(self)-> bool:
+    def check_variable_consistency(self) -> bool:
         """
         Checks that the variables in Arguments, LocalVariables, dtype_vars and active_global_vars
         do not overlap (i.e. no variables are improperly shadowed)
         """
         var_set = set()
 
-        var_set.update(self.Arguments.keys())
+        var_set.update(self.arguments.keys())
 
-        if var_set & self.LocalVariables['scalars'].keys():
-            print("Error: Local scalar and Argument names overlap.")
+        if var_set & self.local_variables.keys():
+            self.logger.error("Error: Local scalar and Argument names overlap.")
             return False
-        var_set.update(self.LocalVariables['scalars'].keys())
-
-        if var_set & self.LocalVariables['arrays'].keys():
-            print("Error: Local Array names overlap.")
-            return False
-        var_set.update(self.LocalVariables['arrays'].keys())
+        var_set.update(self.local_variables.keys())
 
         if var_set & self.dtype_vars.keys():
-            print("Error: global dtype names overlap.")
+            self.logger.error("Error: global dtype names overlap.")
             return False
         var_set.update(self.dtype_vars.keys())
 
-        # if var_set & self.active_global_vars.keys():
-        #     print("Error: global non-dtype names overlap.")
-        #     print(var_set & self.active_global_vars.keys())
-        #     return False
-
         return True
-
 
     @Trace.trace_decorator("collect_var_and_call_info")
     def collect_var_and_call_info(
         self,
-        sub_dict: dict[str,Subroutine],
-        dtype_dict: dict[str,DerivedType],
+        sub_dict: dict[str, Subroutine],
+        dtype_dict: dict[str, DerivedType],
         verbose=False,
     ):
         """
@@ -491,23 +513,25 @@ class Subroutine(object):
             * dtype_dict : dict of user type defintions
             * interface_list : contains names of known interfaces
         """
-        func_name = "collect_var_and_call_info::"
+        func_name = "(collect_var_and_call_info)"
+        logger = get_logger(func_name)
 
-        global_vars: Dict[str,DerivedType] = {}
+        global_vars: Dict[str, DerivedType] = {}
         for dtype in dtype_dict.values():
             for inst in dtype.instances.keys():
                 if inst not in global_vars:
                     global_vars[inst] = dtype
-        for argname, arg in self.Arguments.items():
+        for argname, arg in self.arguments.items():
             if arg.type in dtype_dict.keys():
                 global_vars[argname] = dtype_dict[arg.type]
-
 
         self.dtype_vars = self.get_dtype_vars(global_vars)
 
         ok = self.check_variable_consistency()
         if not ok:
-            print(f"Subroutine parsing has inconsistencies for {self.name} exiting...")
+            logger.error(
+                f"Subroutine parsing has inconsistencies for {self.name} exiting..."
+            )
             sys.exit(1)
 
         self.get_ptr_vars()
@@ -524,7 +548,7 @@ class Subroutine(object):
                     + _bc.ENDC
                 )
                 childsub: Subroutine = Subroutine(
-                    init_obj = SubInit(
+                    init_obj=SubInit(
                         name=actual_sub_name,
                         mod_name="lib",
                         mod_lines=[],
@@ -566,7 +590,12 @@ class Subroutine(object):
                 return None
 
     @Trace.trace_decorator("analyze_variables")
-    def analyze_variables(self, sub_dict: dict[str,Subroutine], type_dict: dict[str,DerivedType],verbose: bool=False,):
+    def analyze_variables(
+        self,
+        sub_dict: dict[str, Subroutine],
+        type_dict: dict[str, DerivedType],
+        verbose: bool = False,
+    ):
         """
         Function used to determine read and write variables
         If var is written to first, then rest of use is ignored.
@@ -577,25 +606,36 @@ class Subroutine(object):
         results of unit-testing.
 
         """
-        func_name = "analyze_variables"
+        func_name = "( analyze_variables )"
 
-        global_vars: Dict[str,Variable] = {}
+        global_vars: Dict[str, Variable] = {}
         for dtype in type_dict.values():
             for dtype_var in dtype.instances.values():
                 if dtype_var.name not in global_vars:
                     global_vars[dtype_var.name] = dtype_var
 
-        # remove struct of arrays/field/access from dtype_vars and replace with the instance var
-        regex_inst_name = re.compile(r'(?:\(\w+\))?%\w+')
-        var_dict: dict[str,Variable] = {
-            key:val for key,val in self.dtype_vars.items() 
-            if not regex_inst_name.search(key)
-        }
-        inst_set = {regex_inst_name.sub("",x) for x in self.dtype_vars.keys() if regex_inst_name.search(x)}
 
-        for inst in inst_set:
-            inst_var = global_vars[inst]
-            var_dict[inst] = inst_var.copy()
+        # remove struct of arrays/field/access from dtype_vars and replace with the instance var
+        regex_inst_name = re.compile(r"(?:\(\w+\))?%\w+")
+        var_dict: dict[str, Variable] = {
+            key: val
+            for key, val in self.dtype_vars.items()
+        }
+
+        for alias, gv in self.associate_vars.items():
+            if gv.split("%")[0] not in self.arguments.keys():
+                var = var_dict[gv]
+                var_dict[alias] = var.copy()
+        # inst_set = {
+        #     regex_inst_name.sub("", x)
+        #     for x in self.dtype_vars.keys()
+        #     if regex_inst_name.search(x)
+        # }
+        #
+        # for inst in inst_set:
+        #     inst_var = global_vars[inst]
+        #     var_dict[inst] = inst_var.copy()
+
 
         globals_accessed = analyze_sub_variables(
             self,
@@ -606,21 +646,21 @@ class Subroutine(object):
         )
         norm = normalize_soa_keys(globals_accessed)
 
-        for var_name,stat_list in norm.items():
+        for var_name, stat_list in norm.items():
             if var_name in self.active_global_vars:
                 continue
             if var_name in self.associate_vars:
                 actual_name = self.associate_vars[var_name]
                 inst, _ = actual_name.split("%")
-                if inst in self.Arguments:
-                    merge_status_list(actual_name,self.arg_access_by_ln,stat_list)
+                if inst in self.arguments:
+                    merge_status_list(actual_name, self.arg_access_by_ln, stat_list)
                 else:
-                    merge_status_list(actual_name,self.elmtype_access_by_ln,stat_list)
+                    merge_status_list(actual_name, self.elmtype_access_by_ln, stat_list)
             else:
                 self.elmtype_access_by_ln[var_name] = stat_list.copy()
 
         # Analyze local variables and add any pointers to elmtypes to elmtype_access_by_ln
-        local_var_dict = self.LocalVariables["arrays"] | self.LocalVariables["scalars"]
+        local_var_dict = self.local_variables
         local_accessed = analyze_sub_variables(
             self,
             sub_dict,
@@ -629,11 +669,14 @@ class Subroutine(object):
             verbose=verbose,
         )
 
+        self.local_vars_access_by_ln = local_accessed
+
+        # For local variables that are pointers, merge their ReadWrite status with their target
         for ptr, gv_list in self.ptr_vars.items():
             stat_list = local_accessed[ptr]
             for gv in gv_list:
                 inst, _ = gv.split("%")
-                if inst in self.Arguments:
+                if inst in self.arguments:
                     merge_status_list(gv, self.arg_access_by_ln, stat_list)
                 else:
                     merge_status_list(gv, self.elmtype_access_by_ln, stat_list)
@@ -649,14 +692,14 @@ class Subroutine(object):
 
         return
 
-    def match_arg_to_inst(self, type_dict: dict[str,DerivedType]):
+    def match_arg_to_inst(self, type_dict: dict[str, DerivedType]):
         """
         Called for parent subroutine: populate elmtype_access_by_ln
         with instances with status from arg_access_by_ln
         """
         verbose = False
-        name_map: dict[str,str] = {}
-        for arg in self.Arguments.values():
+        name_map: dict[str, str] = {}
+        for arg in self.arguments.values():
             dtype = type_dict.get(arg.type, None)
             if dtype:
                 for inst in dtype.instances:
@@ -670,8 +713,7 @@ class Subroutine(object):
         summary_elmtype = summarize_read_write_status(self.elmtype_access_by_ln)
         for var, status in summary_elmtype.items():
             self.elmtype_access_sum[var] = status
-        return 
-
+        return
 
     def generate_update_directives(self, elmvars_dict, verify_vars):
         """
@@ -778,11 +820,8 @@ class Subroutine(object):
             # dict with 'arg' : Subroutine
             # where 'arg' is a local array, and 'sub' is child subroutine that uses it.
             passed_to_sub = {}
-            local_array_list = [v for v in self.LocalVariables["arrays"]]
-            print(f"local_array for {self.name}\n", local_array_list)
+            local_array_list = [key for key, val in self.local_variables.items() if val.dim > 0]
 
-        if verbose:
-            print(f"Opening file {self.filepath} ")
         ifile = open(self.filepath, "r")
         lines = ifile.readlines()  # read entire file
         ifile.close()
@@ -797,7 +836,6 @@ class Subroutine(object):
         # Starting parsing lines at the subroutine start
         sublines = lines[self.startline - 1 : self.endline]
         loopcount = 0
-        print(f"Examing Loops for {self.name}")
         dowhile = False
         lines_to_skip = 0
         for n, line in enumerate(sublines):
@@ -882,7 +920,7 @@ class Subroutine(object):
                         if (
                             subcall
                         ):  # check if an argument is passed to another subroutine
-                            arg_list = [v for v in self.Arguments]
+                            arg_list = [v for v in self.arguments]
                             for arg in args:
                                 if arg in arg_list:
                                     print(f"{arg} passed to {child_sub_name}")
@@ -907,7 +945,7 @@ class Subroutine(object):
                     )
                     if verbose:
                         print(f"Adding {len(childloops)} loops from {childsub.name}")
-                    self.DoLoops.extend(childloops)
+                    self.loops.extend(childloops)
                     self.child_subroutine_list.append(childsub)
                     self.child_subroutines[child_sub_name] = childsub
 
@@ -952,14 +990,14 @@ class Subroutine(object):
                     lend = loop_end - self.startline
 
                     newloop.lines = sublines[lstart : lend + 1]
-                    self.DoLoops.append(newloop)
+                    self.loops.append(newloop)
                 else:
                     loop_end = n + self.endline
                     newloop.end[loopcount] = loop_end
 
         # Parse variables used in Loop
         print(f"Parsing variables for Loops in {self.name}")
-        for n, loop in enumerate(self.DoLoops):
+        for n, loop in enumerate(self.loops):
             if loop.subcall.name is self.name:
                 # loops in child subroutines have already been Parsed!
                 loop.parseVariablesinLoop(verbose=verbose)
@@ -972,7 +1010,7 @@ class Subroutine(object):
             self.generate_unstructured_data_regions()
 
         if subcall:
-            return self.DoLoops
+            return self.loops
 
         # Create dictionary to hold subroutines found so far
         # and their initial startlines to help adjust for line insertions later.
@@ -982,7 +1020,7 @@ class Subroutine(object):
         loop_dict = {}
         num_reduction_loops = 0
         ofile = open(f"loops-{self.name}.txt", "w")
-        for loop in self.DoLoops:
+        for loop in self.loops:
             loopkey = f"{loop.subcall.name}:L{loop.start[0]}"
             if loopkey not in loop_dict:
                 loop_dict[loopkey] = loop
@@ -1033,7 +1071,7 @@ class Subroutine(object):
         # Note: Can't use List Comprehension here with class attributes
         var_list = []
         local_vars_only = []
-        for loop in self.DoLoops:
+        for loop in self.loops:
             for key in loop.vars.keys():
                 var_list.append(key)
                 if key not in global_vars:
@@ -1048,15 +1086,6 @@ class Subroutine(object):
         for v in var_list:
             if v in global_vars or "filter" in v:
                 global_loop_vars.append(v)
-
-        exportVariableDependency(
-            self.name,
-            var_list,
-            global_loop_vars,
-            local_vars_only,
-            self.DoLoops,
-            mode="",
-        )
 
         return None
 
@@ -1106,11 +1135,8 @@ class Subroutine(object):
         """
         from mod_config import _bc
 
-        print(_bc.HEADER)
-        print(f"update_arg_tree::{self.name} called {childsubname} w/ args {args}")
-        print(_bc.ENDC)
 
-        arrays = self.LocalVariables["arrays"]
+        arrays = self.local_variables
 
         for v in args:
             if "=" in v:
@@ -1119,19 +1145,19 @@ class Subroutine(object):
                 var = var.strip()
                 if var not in arrays:
                     continue
-                self.LocalVariables["arrays"][var].keyword = kw
-                self.LocalVariables["arrays"][var].subs.append(childsubname)
+                self.local_variables[var].keyword = kw
+                self.local_variables[var].subs.append(childsubname)
                 self.VariablesPassedToSubs.setdefault(childsubname, []).append(
-                    self.LocalVariables["arrays"][var]
+                    self.local_variables[var]
                 )
             else:
                 var = v.strip()
                 if var not in arrays:
                     continue
-                self.LocalVariables["arrays"][var].keyword = ""
-                self.LocalVariables["arrays"][var].subs.append(childsubname)
+                self.local_variables[var].keyword = ""
+                self.local_variables[var].subs.append(childsubname)
                 self.VariablesPassedToSubs.setdefault(childsubname, []).append(
-                    self.LocalVariables["arrays"][var]
+                    self.local_variables[var]
                 )
 
     def generate_unstructured_data_regions(self, remove=True) -> None:
@@ -1215,7 +1241,7 @@ class Subroutine(object):
 
         # Create New directives
         vars = []  # list to hold all vars needed to be on the device
-        arrays_dict = self.LocalVariables["arrays"]
+        arrays_dict = self.local_variables["arrays"]
         for k, v in arrays_dict.items():
             varname = v.name
             dim = v.dim
@@ -1227,9 +1253,9 @@ class Subroutine(object):
 
         # Only add scalars to if they are a reduction variables
         # Only denoting that by if it has "sum" in the name
-        for v in self.LocalVariables["scalars"]:
+        for v in self.local_variables["scalars"]:
             varname = v.name
-            for loop in self.DoLoops:
+            for loop in self.loops:
                 if loop.subcall.name == self.name:
                     if varname in loop.reduce_vars and varname not in vars:
                         print(f"Adding scalar {varname} to directives")
@@ -1349,21 +1375,27 @@ class Subroutine(object):
             print(_bc.BOLD + _bc.WARNING + "NO CHANGE" + _bc.ENDC)
         return None
 
-    def parse_arguments(self, sub_dict: dict[str,Subroutine], type_dict: dict[str,DerivedType],verbose=False,):
+    def parse_arguments(
+        self,
+        sub_dict: dict[str, Subroutine],
+        type_dict: dict[str, DerivedType],
+        verbose=False,
+    ):
         """
         Function that will analyze the variable status for only the arguments
             'sub.arguments_read_write' : { `arg` : ReadWrite}
         """
-        func_name = "parse_arguments::"
+        func_name = "( parse_arguments )"
         associate_set: set[str] = set()
-        var_dict = self.Arguments.copy()
+        var_dict = self.arguments.copy()
 
         for key, val in self.associate_vars.items():
             if val.split("%")[0] in var_dict:
                 associate_set.add(key)
         if associate_set:
-            var_inst_dict: dict[str,DerivedType] = {
-                var.name: type_dict[var.type] for var in var_dict.values() 
+            var_inst_dict: dict[str, DerivedType] = {
+                var.name: type_dict[var.type]
+                for var in var_dict.values()
                 if is_derived_type(var) and var.type in type_dict
             }
             for key in associate_set:
@@ -1384,28 +1416,33 @@ class Subroutine(object):
             full_name = self.associate_vars[key]
             ptr_status = args_accessed.pop(key, None)
             if ptr_status:
-                args_accessed.setdefault(full_name,[]).extend(ptr_status)
+                args_accessed.setdefault(full_name, []).extend(ptr_status)
 
         self.arg_access_by_ln = args_accessed.copy()
         # All args should have been processed. Store information into Subroutine
         arg_status_summary = summarize_read_write_status(args_accessed)
         for arg, status in arg_status_summary.items():
-            self.arguments_read_write[arg] = ReadWrite(status, -999)
-            if '%' in arg:
-                inst,_ = arg.split('%')
+            self.arguments_read_write[arg] = ReadWrite(
+                status, -999, LineTuple(ln=-999, line="")
+            )
+            if "%" in arg:
+                inst, _ = arg.split("%")
                 if inst not in self.arguments_read_write:
-                    self.arguments_read_write[inst] = ReadWrite(status, -999)
+                    self.arguments_read_write[inst] = ReadWrite(
+                        status, -999, LineTuple(ln=-999, line="")
+                    )
                 else:
                     val = self.arguments_read_write[inst].status
                     cstat = combine_status(status, val)
                     self.arguments_read_write[inst].status = cstat
 
-        if not self.arguments_read_write and not self.Arguments:
+        if not self.arguments_read_write and not self.arguments:
             print(f"{func_name}::ERROR: Failed to analyze arguments for {self.name}")
             sys.exit(1)
 
-        for arg in self.Arguments:
+        for arg in self.arguments:
             if arg not in self.arguments_read_write:
-                self.arguments_read_write[arg] = ReadWrite('-',-999)
+                self.arguments_read_write[arg] = ReadWrite(
+                    "-", -999, LineTuple(ln=-999, line="")
+                )
         return None
-

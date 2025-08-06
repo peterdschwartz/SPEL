@@ -35,6 +35,8 @@ class TokenTypes(Enum):
     FALSE = ".false."
     RETURN = "RETURN"
     CALL = "CALL"
+    DO = "DO"
+    DOWHILE = "DO WHILE"
 
 
 keywords: Dict[str, TokenTypes] = {
@@ -43,6 +45,8 @@ keywords: Dict[str, TokenTypes] = {
     "call": TokenTypes.CALL,
     "subroutine": TokenTypes.SUBROUTINE,
     "function": TokenTypes.FUNCTION,
+    "while": TokenTypes.DOWHILE,
+    "do": TokenTypes.DO,
 }
 
 
@@ -50,6 +54,9 @@ keywords: Dict[str, TokenTypes] = {
 class Token:
     token: TokenTypes
     literal: str
+
+    def __str__(self):
+        return f"{self.literal}"
 
 
 def lookup_indentifer(ident: str) -> TokenTypes:

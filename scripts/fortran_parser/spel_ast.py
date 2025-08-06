@@ -1,7 +1,12 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
+from scripts.fortran_parser.environment import Environment
 from scripts.fortran_parser.tokens import Token
+
+
+class SemanticError(Exception):
+    pass
 
 
 # Base interface: Node
@@ -14,6 +19,9 @@ class Node(ABC):
     @abstractmethod
     def __str__(self) -> str:
         pass
+
+    def classify(self, env: Environment):
+        return self
 
 
 # Derived interface: Statement
@@ -66,6 +74,9 @@ class Identifier(Expression):
     def __str__(self) -> str:
         return self.value
 
+    def __repr__(self):
+        return f"Ident({self.value})"
+
     def expression_node(self) -> None:
         pass
 
@@ -80,7 +91,7 @@ class Identifier(Expression):
 class ExpressionStatement(Statement):
     def __init__(self, tok: Token):
         self.token = tok
-        self.expression = None
+        self.expression: Expression
 
     def statement_node(self):
         pass
@@ -104,7 +115,7 @@ class ExpressionStatement(Statement):
 class SubCallStatement(Statement):
     def __init__(self, tok):
         self.token: Token = tok  # "CALL"
-        self.function: Optional[FuncExpression] = None  # FuncExpression
+        self.function: FuncExpression  # FuncExpression
 
     def statement_node(self):
         pass
@@ -208,7 +219,7 @@ class FloatLiteral(Expression):
         return isinstance(other, FloatLiteral) and self.value == other.value
 
     def to_dict(self):
-        return {"Node": "FloatExpression", "Val": self.value}
+        return {"Node": "FloatLiteral", "Val": self.value}
 
 
 class PrefixExpression(Expression):
@@ -262,6 +273,9 @@ class InfixExpression(Expression):
     def token_literal(self) -> str:
         return self.token.literal
 
+    def decompose(self) -> Tuple[Expression, str, Expression]:
+        return (self.left_expr, self.operator, self.right_expr)
+
     def __str__(self):
         return "(" + str(self.left_expr) + self.operator + str(self.right_expr) + ")"
 
@@ -284,9 +298,21 @@ class InfixExpression(Expression):
             "Right": self.right_expr.to_dict(),
         }
 
+    def classify(self, env: Environment):
+        if self.operator == "=" and isinstance(self.left_expr, Identifier):
+            var = env.variables.get(self.left_expr.value)
+            if not var:
+                raise SemanticError(f"Undeclared variable: {self.left_expr.value}")
+            return AssignmentStatement(
+                tok=self.token,
+                lhs=self.left_expr,
+                rhs=self.right_expr,
+                env=env,
+            )
+        return self
+
 
 class FieldAccessExpression(Expression):
-
     def __init__(
         self,
         tok: Token,
@@ -396,3 +422,94 @@ class BoundsExpression(Expression):
             "Node": "BoundsExpression",
             "Val": str(self),
         }
+
+
+class DoLoop(Statement):
+    def __init__(
+        self,
+        tok: Token,
+        index: Token,
+        start: Expression,
+        end: Expression,
+        step: Optional[Expression],
+    ):
+        self.token: Token = tok
+        self.index: str = index.literal
+        self.start: Expression = start
+        self.end: Expression = end
+        self.step: Optional[Expression] = step
+        self.statements: list[Statement] = []
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return super().token_literal()
+
+    def __str__(self):
+        return f"{self.token} {self.index} = {self.start}, {self.end}"
+
+    def __eq__(self, other):
+        if not isinstance(other, DoLoop):
+            return False
+        else:
+            return (
+                self.token == other.token
+                and self.index == other.index
+                and self.start == other.start
+                and self.end == other.end
+            )
+
+    def to_dict(self):
+        return {
+            "Node": "DoLoop",
+            "Val": str(self),
+        }
+
+
+class DoWhile(Statement):
+    def __init__(
+        self,
+        tok: Token,
+        cond: Expression,
+    ):
+        self.token = tok
+        self.condition = cond
+        self.statements: list[Statement] = []
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return super().token_literal()
+
+    def __str__(self):
+        return f"{self.token}({self.condition}"
+
+    def __eq__(self, other):
+        if not isinstance(other, DoWhile):
+            return False
+        else:
+            return self.token == other.token and self.condition == other.condition
+
+    def to_dict(self):
+        return {
+            "Node": "DoWhile",
+            "Val": str(self),
+        }
+
+
+class AssignmentStatement(Statement):
+    def __init__(self, tok: Token, lhs: Expression, rhs: Expression, env: Environment):
+        self.token: Token = tok
+        self.left = lhs
+        self.right = rhs
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return f"{self.left} = {self.right}"
