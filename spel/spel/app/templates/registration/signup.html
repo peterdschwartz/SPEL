@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Create account</h1>
+<form method="post"
+	action="{% url 'signup' %}{% if request.GET.next %}?next={{ request.GET.next|urlencode }}{% endif %}">
+	{% csrf_token %}
+	{{ form.non_field_errors }}
+	<div>
+		<label>Username</label>
+		{{ form.username }}
+		{% if form.username.errors %}
+		<div style="color:#b00020;">{% for e in form.username.errors %}{{ e }}{% endfor %}</div>
+		{% endif %}
+	</div>
+	<div>
+		<label>Password</label>
+		{{ form.password1 }}
+		{% if form.password1.errors %}
+		<div style="color:#b00020;">{% for e in form.password1.errors %}{{ e }}{% endfor %}</div>
+		{% endif %}
+	</div>
+	<div>
+		<label>Confirm Password</label>
+		{{ form.password2 }}
+		{% if form.password2.errors %}
+		<div style="color:#b00020;">{% for e in form.password2.errors %}{{ e }}{% endfor %}</div>
+		{% endif %}
+	</div>
+	<div>
+		<label>Invite code</label>
+		<input type="text" name="invite_code" required>
+	</div>
+	<button class="styled-button" type="submit">Sign up</button>
+	<p>Already have an account? <a href="{% url 'login' %}">Log in</a></p>
+</form>
+{% endblock %}

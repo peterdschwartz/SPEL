@@ -35,7 +35,7 @@ class Trace:
     @classmethod
     def untrace(cls, msg: str):
         if cls.enabled:
-            cls.trace_print(f"END {msg} {cls.enabled}")
+            cls.trace_print(f"END {msg}")
             cls.dec_ident()
 
     @classmethod

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict
 
 
 class TokenTypes(Enum):
@@ -10,6 +9,8 @@ class TokenTypes(Enum):
     FLOAT = "FLOAT"
     STRING = "STRING"
     ILLEGAL = "ILLEGAL"
+    TYPE = "TYPE"
+    TYPE_DEF = "type"
     # Operators
     ASSIGN = "="
     PLUS = "+"
@@ -19,6 +20,15 @@ class TokenTypes(Enum):
     SLASH = "/"
     EXP = "**"
     EQUIV = "=="
+    GT = ">"
+    GTEQ = ">="
+    LT = "<"
+    LTEQ = "<="
+    NOT_EQUIV = "!="
+    OR = "or"
+    AND = "and"
+    CONCAT = "//"
+    PTR = "=>"
     # delimiters
     DOT = "."
     COMMA = ","
@@ -27,7 +37,15 @@ class TokenTypes(Enum):
     NEWLINE = "\n"
     COLON = ":"
     PERCENT = "%"
+    MACRO = "#"
+    DOUBLE_COLON = "::"
+    ARRAY_INIT_START = "(/"
+    ARRAY_INIT_END = "/)"
+    ARRAY_LBRACKET = "["
+    ARRAY_RBRACKET = "]"
+
     # keywords
+    CONTAINS = "contains"
     SUBROUTINE = "SUBROUTINE"
     FUNCTION = "FUNCTION"
     LOGICAL = "LOGICAL"
@@ -37,9 +55,26 @@ class TokenTypes(Enum):
     CALL = "CALL"
     DO = "DO"
     DOWHILE = "DO WHILE"
+    IF = "IF"
+    THEN = "THEN"
+    ELSE = "ELSE"
+    ELSEIF = "ELSE IF"
+    END = "END"
+    ENDIF = "ENDIF"
+    ENDDO = "ENDDO"
+    ENDSUB = "END SUB"
+    ENDFUNC = "END FUNC"
+    PRINT = "PRINT"
+    WRITE = "WRITE"
+    IFDEF = "ifdef"
+    DEF = "def"
+    IFNDEF = "ifndef"
+    M_ENDIF = "#endif"
+    ENDTYPE = "end type"
+    PROC = "procedure"
 
 
-keywords: Dict[str, TokenTypes] = {
+keywords: dict[str, TokenTypes] = {
     ".true.": TokenTypes.LOGICAL,
     ".false.": TokenTypes.LOGICAL,
     "call": TokenTypes.CALL,
@@ -47,6 +82,38 @@ keywords: Dict[str, TokenTypes] = {
     "function": TokenTypes.FUNCTION,
     "while": TokenTypes.DOWHILE,
     "do": TokenTypes.DO,
+    "if": TokenTypes.IF,
+    "else": TokenTypes.ELSE,
+    "end": TokenTypes.END,
+    "enddo": TokenTypes.ENDDO,
+    "endif": TokenTypes.ENDIF,
+    "elseif": TokenTypes.ELSEIF,
+    "then": TokenTypes.THEN,
+    ".eq.": TokenTypes.EQUIV,
+    ".gt.": TokenTypes.GT,
+    ".lt.": TokenTypes.LT,
+    ".not.": TokenTypes.BANG,
+    ".ne.": TokenTypes.NOT_EQUIV,
+    ".ge.": TokenTypes.GTEQ,
+    ".le.": TokenTypes.LTEQ,
+    ".and.": TokenTypes.AND,
+    ".or.": TokenTypes.OR,
+    "print": TokenTypes.PRINT,
+    "write": TokenTypes.WRITE,
+    "ifdef": TokenTypes.IFDEF,
+    "define": TokenTypes.DEF,
+    "ifndef": TokenTypes.IFNDEF,
+    "#endif": TokenTypes.M_ENDIF,
+    "type": TokenTypes.TYPE_DEF,
+    "class": TokenTypes.TYPE,
+    "integer": TokenTypes.TYPE,
+    "real": TokenTypes.TYPE,
+    "complex": TokenTypes.TYPE,
+    "logical": TokenTypes.TYPE,
+    "character": TokenTypes.TYPE,
+    "contains": TokenTypes.CONTAINS,
+    "endtype": TokenTypes.ENDTYPE,
+    "procedure": TokenTypes.PROC,
 }
 
 
@@ -59,7 +126,7 @@ class Token:
         return f"{self.literal}"
 
 
-def lookup_indentifer(ident: str) -> TokenTypes:
+def lookup_identifer(ident: str) -> TokenTypes:
     if ident in keywords:
         return keywords[ident]
     return TokenTypes.IDENT

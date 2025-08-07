@@ -2,6 +2,7 @@ import argparse
 import os
 import subprocess
 
+from scripts.fortran_parser.spel_repl import parse_line
 from scripts.profiler_context import profile_ctx
 
 SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -41,6 +42,29 @@ def run(args):
 
     # Run the test executable with extra args
     subprocess.run(["./build/elmtest", *args.exe_args], check=True, cwd=unit_test)
+
+
+def repl(args):
+    from IPython.terminal.embed import InteractiveShellEmbed
+
+    banner = "SPEL (IPython) — autoreload is on"
+    exit_msg = "bye"
+
+    shell = InteractiveShellEmbed(banner1=banner, exit_msg=exit_msg)
+
+    # Enable magics programmatically
+    shell.run_line_magic("load_ext", "autoreload")
+    shell.run_line_magic("autoreload", "2")
+    shell.run_line_magic("xmode", "Minimal")
+    shell.run_line_magic("config", "TerminalInteractiveShell.confirm_exit=False")
+
+    from scripts.fortran_parser.spel_repl import parse_line
+
+    shell.push({"parse_line": parse_line})
+
+    shell()  # drop into IPython loop
+    # start_repl()
+    return
 
 
 def upload(args):
@@ -143,6 +167,9 @@ def main():
     upload_parser.add_argument("machine", help="remote machine")
     upload_parser.add_argument("dest", help="path")
     upload_parser.set_defaults(func=upload)
+
+    repl_parser = subparsers.add_parser("repl", help="Start repl ")
+    repl_parser.set_defaults(func=repl)
 
     args = parser.parse_args()
     args.func(args)

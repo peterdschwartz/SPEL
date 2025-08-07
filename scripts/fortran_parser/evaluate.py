@@ -18,7 +18,7 @@ from scripts.fortran_parser.lexer import Lexer
 from scripts.fortran_parser.spel_parser import Parser
 from scripts.fortran_parser.tracing import Trace
 from scripts.types import (ArgDesc, ArgNode, ArgType, ArgVar, CallDesc,
-                           IdentKind, LineTuple)
+                           IdentKind, LineTuple, LogicalLineIterator)
 
 REAL = "real"
 INT = "integer"
@@ -26,7 +26,13 @@ CHAR = "character"
 BOOL = "logical"
 INHERITED = "inherited"
 
-map_py_to_f_types = {int: INT, float: REAL,  str : CHAR, bool: BOOL ,}
+map_py_to_f_types = {
+    int: INT,
+    float: REAL,
+    str: CHAR,
+    bool: BOOL,
+}
+
 
 @dataclass
 class SymbolTable:
@@ -34,12 +40,14 @@ class SymbolTable:
     intrinsics: List[ArgNode]
     fns: List[ArgNode]
 
+
 class ArgTree:
     """
     node: ArgNode
     children: List[ArgTree]
     parent
     """
+
     def __init__(self, node):
         self.node: ArgNode = node
         self.children: List[ArgTree] = []
@@ -98,7 +106,7 @@ class ArgTree:
             child.parent = parent
 
         # Short-hand slice syntax to replace child node with it's children
-        parent.children[index:index+1] = self.children
+        parent.children[index : index + 1] = self.children
 
         self.children = []
         self.parent = None
@@ -145,7 +153,7 @@ intrinsic_fns = {
 
 
 _ignore_subs = [
-    r'\bcpu_time\b',
+    r"\bcpu_time\b",
     r"\bget_curr_date\b",
     r"\bt_start",
     r"\bt_stop",
@@ -159,23 +167,23 @@ regex_ignore = re.compile(r"({})".format(ignore_str))
 def construct_arg_tree(
     args,
     env: Environment,
-) -> List[ArgTree]:
+) -> list[ArgTree]:
     """
     Takes a list of expressions from subroutine call, returns
     a List with the ith element corresponding the ith argument expression.
     """
-    flat_tree: List[List[ArgNode]] = [[] for i in range(0, len(args))]
+    flat_tree: list[list[ArgNode]] = [[] for i in range(0, len(args))]
     for arg_num, expr in enumerate(args):
         evaluate(arg_num, expr, env, flat_tree, nested=0)
 
-    arg_trees : List[ArgTree] = []
+    arg_trees: list[ArgTree] = []
     for nodes in flat_tree:
         arg_trees.append(make_tree(nodes))
 
     return arg_trees
 
 
-def make_tree(flat_arg_nodes: List[ArgNode]) -> ArgTree:
+def make_tree(flat_arg_nodes: list[ArgNode]) -> ArgTree:
     """
     Generates a linked tree structure for each argument node based on nested_level
     """
@@ -205,25 +213,26 @@ def parse_subroutine_call(
     sub_dict: dict[str, Subroutine],
     input: LineTuple,
     ilist: list[str],
-    instance_dict: dict[str, DerivedType],
+    type_dict: dict[str, DerivedType],
     verbose: bool = False,
 ) -> Optional[CallDesc]:
     """
     Function to generate and parse an AST for a subroutine call string
     """
-    lex = Lexer(input=input.line)
+    line_it = LogicalLineIterator([input])
+    lex = Lexer(line_it=line_it)
     parser = Parser(lex=lex)
     program = parser.parse_program()
     if len(program.statements) > 1:
-        print("Error -- multiple calls in input")
+        sub.logger.error("Error -- multiple calls in input")
         sys.exit(1)
 
     stmt = program.statements[0]
-    ast: Dict[str, Any] = stmt.to_dict()
+    ast: dict[str, Any] = stmt.to_dict()
 
     node_type = ast["Node"]
     if node_type != "SubCallStatement":
-        print("Error -- Not a SubCallStatement!\n{input}\n")
+        sub.logger.error("Error -- Not a SubCallStatement!\n{input}\n")
         sys.exit(1)
     sub_node: dict[str, Any] = ast["Sub"]
     sub_name = sub_node["Func"]
@@ -231,27 +240,22 @@ def parse_subroutine_call(
     if regex_ignore.search(sub_name):
         return None
 
-    type_dict: dict[str,DerivedType] = {inst.type_name : inst for inst in instance_dict.values()}
-
     if not sub.environment:
         env: Environment = create_environment(sub, sub_dict, type_dict)
         sub.environment = env
         if verbose:
             print("Environment: \n")
-            pprint(env.to_dict(),sort_dicts=False)
+            pprint(env.to_dict(), sort_dicts=False)
     else:
         env = sub.environment
 
-
     arg_tree = construct_arg_tree(arg_list, env)
-
     arg_desc_list = create_arg_descr(arg_tree, env)
 
-
     if sub_name in ilist:
-        fn = resolve_interface2(sub_name, arg_desc_list, sub_dict) 
+        fn = resolve_interface2(sub_name, arg_desc_list, sub_dict)
     elif "%" in sub_name:
-        fn = resolve_class_method(sub_name, instance_dict, arg_desc_list, arg_tree)
+        fn = resolve_class_method(sub_name, sub, arg_desc_list, arg_tree)
     else:
         fn = sub_name
     if not fn:
@@ -260,27 +264,30 @@ def parse_subroutine_call(
 
     sort_variables(sub, arg_tree, arg_desc_list)
 
-    return CallDesc(alias=sub_name,
-                    fn=fn,
-                    args=arg_desc_list,
-                    globals=[],
-                    locals=[],
-                    dummy_args=[],
-                    lpair=input)
+    return CallDesc(
+        alias=sub_name,
+        fn=fn,
+        args=arg_desc_list,
+        globals=[],
+        locals=[],
+        dummy_args=[],
+        lpair=input,
+    )
+
 
 def resolve_class_method(
     subname: str,
-    inst_dict: dict[str,DerivedType],
+    sub: Subroutine,
     arg_desc_list: list[ArgDesc],
     tree: list[ArgTree],
-)->str:
+) -> str:
     """
     Function that returns the name of the class method.
     Side-effects:
         New arg_desc is added for class var, and the argn's are incremented
     """
-    inst_name, method = subname.split('%')
-    dtype = inst_dict[inst_name]
+    inst_name, method = subname.split("%")
+    dtype = sub.environment.inst_dict[inst_name]
     for arg in arg_desc_list:
         arg.increment_arg_number()
 
@@ -289,7 +296,7 @@ def resolve_class_method(
         ident=inst_name,
         kind=IdentKind.variable,
         nested_level=0,
-        node={"Node":"Ident", "Val": inst_name},
+        node={"Node": "Ident", "Val": inst_name},
     )
     for branch in tree:
         branch.inc_argn()
@@ -298,19 +305,21 @@ def resolve_class_method(
     tree.insert(0, cl_tree)
 
     arg_type = ArgType(datatype=dtype.type_name, dim=0)
-    class_arg_desc = ArgDesc(argn=0,
-                       intent='',
-                       keyword=False,
-                       key_ident='',
-                       argtype=arg_type,
-                       locals=[],
-                       globals=[],
-                       dummy_args=[],
-                       )
+    class_arg_desc = ArgDesc(
+        argn=0,
+        intent="",
+        keyword=False,
+        key_ident="",
+        argtype=arg_type,
+        locals=[],
+        globals=[],
+        dummy_args=[],
+    )
 
-    arg_desc_list.insert(0,class_arg_desc)
+    arg_desc_list.insert(0, class_arg_desc)
 
     return dtype.procedures[method]
+
 
 def create_environment(
     sub: Subroutine,
@@ -321,29 +330,27 @@ def create_environment(
     Package relevant variables and functions for this subroutine.
     variables are categorized as local, dummy argument, or "global"
     """
-    intrinsic_types = { "real", "integer", "character", "logical" }
-    local_vars: dict[str,Variable] = sub.local_variables
+    intrinsic_types = {"real", "integer", "character", "logical", "complex"}
+    local_vars: dict[str, Variable] = sub.local_variables
 
     for ptr, gv_key in sub.associate_vars.items():
         if gv_key in sub.dtype_vars:
             sub.dtype_vars[ptr] = sub.dtype_vars[gv_key]
 
     variables: dict[str, Variable] = (
-        sub.dtype_vars
-        | sub.active_global_vars
-        | local_vars
+        sub.dtype_vars | sub.active_global_vars | local_vars
     )
-    global_dict: dict[str,Variable] = sub.dtype_vars | sub.active_global_vars
+    global_dict: dict[str, Variable] = sub.dtype_vars | sub.active_global_vars
 
     # Local Variables
-    dtype_locals: list[Variable] = [ var for var in local_vars.values()
-        if var.type not in intrinsic_types
+    dtype_locals: list[Variable] = [
+        var for var in local_vars.values() if var.type not in intrinsic_types
     ]
 
     expanded_dtypes = expand_dtype(dtype_locals, type_dict)
     variables.update(expanded_dtypes)
 
-    local_dict: dict[str,Variable] = expanded_dtypes | local_vars
+    local_dict: dict[str, Variable] = expanded_dtypes | local_vars
 
     # Argument Variables
     dtype_args: list[Variable] = [
@@ -353,17 +360,17 @@ def create_environment(
 
     # Add associated names for argument derived types to expanded arg dict.
     for ptr, var in sub.associate_vars.items():
-        gv_key = var[0] if isinstance(var,list) else var
+        gv_key = var[0] if isinstance(var, list) else var
         if gv_key in expanded_dtypes:
             expanded_dtypes[ptr] = expanded_dtypes[gv_key]
 
     variables.update(expanded_dtypes)
     variables.update(sub.arguments)
 
-    dummy_dict: dict[str,Variable] = expanded_dtypes | sub.arguments
+    dummy_dict: dict[str, Variable] = expanded_dtypes | sub.arguments
 
-    instance_dict: Dict[str,DerivedType] = {}
-    inst_var_dict: Dict[str, Variable] = {}
+    instance_dict: dict[str, DerivedType] = {}
+    inst_var_dict: dict[str, Variable] = {}
 
     for dtype in type_dict.values():
         for inst_name, inst_var in dtype.instances.items():
@@ -375,20 +382,26 @@ def create_environment(
 
     variables.update(inst_var_dict)
 
+    for var in dtype_locals:
+        instance_dict[var.name] = type_dict[var.type]
+
     for argname, arg in sub.arguments.items():
-        if arg.type in type_dict.keys():
+        if arg.type not in intrinsic_types:
             instance_dict[argname] = type_dict[arg.type]
 
-    return Environment(variables=variables,
-                       locals=local_dict,
-                       dummy_args=dummy_dict,
-                       globals=global_dict,
-                       fns=sub_dict,
-                       inst_dict=instance_dict)
+    return Environment(
+        variables=variables,
+        locals=local_dict,
+        dummy_args=dummy_dict,
+        globals=global_dict,
+        fns=sub_dict,
+        inst_dict=instance_dict,
+    )
+
 
 def evaluate(
     argn: int,
-    expr:dict[str,Any],
+    expr: dict[str, Any],
     env: Environment,
     arg_tree_flat: List[List[ArgNode]],
     nested: int,
@@ -402,18 +415,42 @@ def evaluate(
         case "Ident":
             var = expr["Val"]
             arg_tree_flat[argn].append(
-                ArgNode(argn=argn, ident=var, kind=IdentKind.variable, nested_level=nested, node=expr)
+                ArgNode(
+                    argn=argn,
+                    ident=var,
+                    kind=IdentKind.variable,
+                    nested_level=nested,
+                    node=expr,
+                )
             )
 
         case "FuncExpression":
             func_name = expr["Func"]
 
             if func_name in intrinsic_fns:
-                arg_node = ArgNode(argn=argn, ident=func_name, kind=IdentKind.intrinsic, nested_level=nested, node=expr,)
+                arg_node = ArgNode(
+                    argn=argn,
+                    ident=func_name,
+                    kind=IdentKind.intrinsic,
+                    nested_level=nested,
+                    node=expr,
+                )
             elif func_name in env.fns:
-                arg_node = ArgNode(argn=argn, ident=func_name, kind=IdentKind.function, nested_level=nested, node=expr,)
+                arg_node = ArgNode(
+                    argn=argn,
+                    ident=func_name,
+                    kind=IdentKind.function,
+                    nested_level=nested,
+                    node=expr,
+                )
             else:
-                arg_node = ArgNode(argn=argn, ident=func_name, kind=IdentKind.variable, nested_level=nested, node=expr,)
+                arg_node = ArgNode(
+                    argn=argn,
+                    ident=func_name,
+                    kind=IdentKind.variable,
+                    nested_level=nested,
+                    node=expr,
+                )
 
             arg_list = expr["Args"]
             arg_tree_flat[argn].append(arg_node)
@@ -430,7 +467,7 @@ def evaluate(
                     node=expr,
                 )
             )
-            expr_list = [ expr["Left"], expr["Field"]]
+            expr_list = [expr["Left"], expr["Field"]]
             for opexpr in expr_list:
                 evaluate(argn, opexpr, env, arg_tree_flat, nested + 1)
 
@@ -527,29 +564,32 @@ def create_arg_descr(
     env: Environment,
 ) -> List[ArgDesc]:
     """
-    Function that assigns an Variable type to each function argument and 
+    Function that assigns an Variable type to each function argument and
     returns an overall description of each argument expression.
     """
     args: List[ArgDesc] = []
     for argn, tree in enumerate(arg_tree):
         arg_type = check_arg_branch(tree, env)
         keyword = check_keyword(tree.node)
-        key_ident = tree.node.node['Left'] if keyword else ''
-        desc = ArgDesc(argn=argn,
-                       intent='',
-                       keyword=keyword,
-                       key_ident=key_ident,
-                       argtype=arg_type,
-                       locals=[],
-                       globals=[],
-                       dummy_args=[],
-                       )
+        key_ident = tree.node.node["Left"]["Val"] if keyword else ""
+        desc = ArgDesc(
+            argn=argn,
+            intent="",
+            keyword=keyword,
+            key_ident=key_ident,
+            argtype=arg_type,
+            locals=[],
+            globals=[],
+            dummy_args=[],
+        )
         args.append(desc)
-
 
     return args
 
-def sort_variables(sub: Subroutine, arg_tree: List[ArgTree], args: List[ArgDesc]) -> None:
+
+def sort_variables(
+    sub: Subroutine, arg_tree: List[ArgTree], args: List[ArgDesc]
+) -> None:
     """
     Function to fill out the locals and globals field in ArgDesc
     """
@@ -561,11 +601,17 @@ def sort_variables(sub: Subroutine, arg_tree: List[ArgTree], args: List[ArgDesc]
             if node.node.kind == IdentKind.variable:
                 varname = node.node.ident
                 if varname in globals:
-                    args[argn].globals.append(ArgVar(node=node.node,var=globals[varname]))
+                    args[argn].globals.append(
+                        ArgVar(node=node.node, var=globals[varname])
+                    )
                 elif varname in locals:
-                    args[argn].locals.append(ArgVar(node=node.node,var=locals[varname]))
+                    args[argn].locals.append(
+                        ArgVar(node=node.node, var=locals[varname])
+                    )
                 elif varname in dummy:
-                    args[argn].dummy_args.append(ArgVar(node=node.node,var=dummy[varname]))
+                    args[argn].dummy_args.append(
+                        ArgVar(node=node.node, var=dummy[varname])
+                    )
     return
 
 
@@ -599,11 +645,12 @@ def evaluate_arg_node(branch: ArgTree, env: Environment) -> ArgType:
             datatype = map_py_to_f_types[type(node.ident)]
             return ArgType(datatype=datatype, dim=0)
         case IdentKind.field:
-            return evaluate_field_access(branch,env)
+            return evaluate_field_access(branch, env)
         case IdentKind.prefix:
-            return evaluate_prefix_arg(branch,env)
+            return evaluate_prefix_arg(branch, env)
         case _:
             return ArgType(datatype="default", dim=0)
+
 
 def evaluate_field_access(branch: ArgTree, env: Environment) -> ArgType:
     """
@@ -614,7 +661,7 @@ def evaluate_field_access(branch: ArgTree, env: Environment) -> ArgType:
 
     TODO: Handle case where field is an accessed by index and adjust dimensions
     """
-    field_name= get_ident(branch.node.node["Field"])
+    field_name = get_ident(branch.node.node["Field"])
     inst_node = branch.node.node["Left"]
 
     # FieldAccessExpression only gets used if the instance is AoS
@@ -622,8 +669,7 @@ def evaluate_field_access(branch: ArgTree, env: Environment) -> ArgType:
     inst = env.inst_dict[inst_name]
     field_var: Variable = inst.components[field_name]
 
-
-    branch.node.ident = inst_name+"(index)%"+field_name
+    branch.node.ident = inst_name + "(index)%" + field_name
     branch.node.kind = IdentKind.variable
 
     for child in branch.children:
@@ -635,17 +681,17 @@ def evaluate_field_access(branch: ArgTree, env: Environment) -> ArgType:
     return arg_type
 
 
-def get_ident(node: dict[str,Any])->str:
+def get_ident(node: dict[str, Any]) -> str:
     if node["Node"] == "FuncExpression":
         return node["Func"]
     elif node["Node"] == "Ident":
         return node["Val"]
     else:
-        print("Unexpected Expression in FieldAccessExpression:\n",node)
+        print("Unexpected Expression in FieldAccessExpression:\n", node)
         sys.exit(1)
 
 
-def evaluate_prefix_arg(branch: ArgTree, env: Environment)-> ArgType:
+def evaluate_prefix_arg(branch: ArgTree, env: Environment) -> ArgType:
     """
     Evaluate prefix expression by evaluating the it's child node.
     """
@@ -662,24 +708,27 @@ def evaluate_infix_arg(branch: ArgTree, env: Environment) -> ArgType:
     Evaluate infix argument type by looking at the Left and Right
     expressions and taking the higher precision of the two.
     """
-    child_types = [evaluate_arg_node(child,env) for child in branch.children]
+    child_types = [evaluate_arg_node(child, env) for child in branch.children]
     unique_types = set(child_types)
-    if(len(unique_types) == 1):
+    if len(unique_types) == 1:
         return next(iter(unique_types))
     else:
         # There is a mixed datatype expression.
-        if(not arg_dim_equals(unique_types) or not valid_mixed_types(unique_types)):
+        if not arg_dim_equals(unique_types) or not valid_mixed_types(unique_types):
             print("Error -- Infix Operation on non-equal dimension or compatible types")
-            pprint(branch.node.node,sort_dicts=False)
+            pprint(branch.node.node, sort_dicts=False)
             branch.print_tree()
             sys.exit(1)
         return next(filter(lambda arg: arg.datatype == REAL, unique_types))
 
+
 def arg_dim_equals(arg_set: set[ArgType]) -> bool:
     return len({arg.dim for arg in arg_set}) <= 1
 
+
 def valid_mixed_types(arg_set: set[ArgType]) -> bool:
     return {arg.datatype for arg in arg_set} <= {INT, REAL}
+
 
 def adjust_dim(dim: int, branch: ArgTree) -> int:
     """
@@ -689,13 +738,14 @@ def adjust_dim(dim: int, branch: ArgTree) -> int:
 
     for child in branch.children:
         if child.node.kind != IdentKind.slice:
-            dim -=1
+            dim -= 1
 
     assert dim >= 0, f"can't have negative dimension:\n {branch.node}"
     return dim
 
-def check_keyword(node: ArgNode)->bool:
-    if(node.kind != IdentKind.infix):
+
+def check_keyword(node: ArgNode) -> bool:
+    if node.kind != IdentKind.infix:
         return False
     else:
-        return bool(node.node['Op'] == '=')
+        return bool(node.node["Op"] == "=")

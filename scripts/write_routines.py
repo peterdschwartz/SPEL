@@ -10,20 +10,17 @@ from typing import TYPE_CHECKING, Dict, Iterable
 
 import scripts.io.helper as hio
 from scripts.analyze_subroutines import Subroutine
+from scripts.config import (ELM_SRC, PHYSICAL_PROP_TYPE_LIST, _bc,
+                            spel_mods_dir, spel_output_dir, unit_test_files)
 from scripts.edit_files import macros
 from scripts.fortran_modules import get_module_name_from_file
-# from scripts.io.hdf5_io import (generate_constants_io_hdf5,
-#                                 generate_elmtypes_io_hdf5)
 from scripts.io.netcdf_io import (generate_constants_io_netcdf,
                                   generate_elmtypes_io_netcdf, generate_verify)
 from scripts.logging_configs import get_logger
-from scripts.mod_config import (ELM_SRC, PHYSICAL_PROP_TYPE_LIST, _bc,
-                                spel_mods_dir, spel_output_dir,
-                                unit_test_files)
 from scripts.types import LineTuple, SubInit
-from scripts.utilityFunctions import (Variable, comment_line,
-                                      find_file_for_subroutine, getArguments,
-                                      line_unwrapper, unwrap_section)
+from scripts.utilityFunctions import (Variable, find_file_for_subroutine,
+                                      getArguments, line_unwrapper,
+                                      unwrap_section)
 
 if TYPE_CHECKING:
     from scripts.DerivedType import DerivedType

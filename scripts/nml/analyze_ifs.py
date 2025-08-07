@@ -1,8 +1,73 @@
+from __future__ import annotations
+
 import re
-from utilityFunctions import line_unwrapper
+from copy import deepcopy
+from typing import TYPE_CHECKING, Optional
+
+from scripts.fortran_parser.sections import parse_blocks
+from scripts.fortran_parser.spel_ast import (Expression, IfConstruct,
+                                             InfixExpression)
+
+if TYPE_CHECKING:
+    from scripts.analyze_subroutines import Subroutine
+
+from scripts.fortran_parser.tokens import Token, TokenTypes
+from scripts.types import FlatIfs, IfType
 
 
-class Ifs:
+def AND(a, b):
+    if a is None:
+        return b
+    # clone if your nodes are mutable; drop deepcopy if they’re immutable
+    return InfixExpression(
+        tok=Token(TokenTypes.AND, ".and."),
+        left=deepcopy(a),
+        op=".and.",
+        right=deepcopy(b),
+    )
+
+
+def flatten_if(if_node: IfConstruct, context_guard: Optional[Expression]=None) -> list[FlatIfs]:
+    """
+    Takes an if node turns it into a flattened list of conditions and start/end line numbers
+    """
+
+    flat_blocks: list[FlatIfs] = []
+
+    guards, else_guard = if_node.build_branch_guards()
+    g_if = AND(context_guard, guards[0])
+    # First, the main IF
+    start_ln = if_node.lineno
+    end_ln = if_node.end_ln
+    flat_blocks.append(FlatIfs(start_ln, end_ln, g_if, IfType.IF))
+
+    for stmt in if_node.consequence.statements:
+        if isinstance(stmt, IfConstruct):
+            flat_blocks.extend(flatten_if(stmt, g_if))
+
+    # ELSEIFs (use the guarded conditions)
+    for idx, elif_node in enumerate(if_node.else_ifs, start=1):
+        g_elif = AND(context_guard, guards[idx])
+        flat_blocks.append(
+            FlatIfs(elif_node.lineno, elif_node.end_ln, g_elif, IfType.ELSEIF)
+        )
+        for stmt in elif_node.consequence.statements:
+            if isinstance(stmt, IfConstruct):
+                flat_blocks.extend(flatten_if(stmt, g_elif))
+    # ELSE
+    if if_node.else_ and else_guard is not None:
+        g_else = AND(context_guard, else_guard)
+        flat_blocks.append(
+            FlatIfs(if_node.else_.lineno, if_node.else_.end_ln, g_else, IfType.ELSE)
+        )
+        for stmt in if_node.else_.alternative.statements:
+            if isinstance(stmt, IfConstruct):
+                flat_blocks.extend(flatten_if(stmt, g_else))
+
+    return flat_blocks
+
+
+class IfBlock:
     """
     Class to hold infomation on if_blocks:
     * self.start : starting line number of particular block
@@ -29,24 +94,34 @@ class Ifs:
     * self.kind : 1 for if, 2 for else_if, 3 for else
     * self.assigned_as_child : bookkeeping info
     * self.child_conditions : bookkeeping info
-
     """
 
-    def __init__(self):
-        self.start: int = -1
+    def __init__(
+        self,
+        start: int,
+        condition: str,
+        sub: Subroutine,
+        kind: IfType,
+    ):
+        self.start: int = start
         self.end: int = -1
-        self.relative_end = 0
-        self.condition: str = ""
-        self.default = -1
-        self.parent: Ifs = None
+        self.relative_end: int = 0
+        self.condition: str = condition
+        self.default: bool = False
+        self.sub = sub
+        self.parent: Optional[IfBlock] = None
         self.children = []
         self.elseif = []
-        self.elses: Ifs = None
-        self.depth = 0
+        self.elses: Optional[IfBlock] = None
+        self.depth: int = 0
         self.calls = []
-        self.kind: int = -1
-        self.assigned_as_child = False
+        self.kind: IfType = kind
+        self.assigned_as_child: bool = False
         self.child_conditions = set()
+
+    def add_child(self, child: IfBlock):
+        """Add a child to this block."""
+        self.children.append(child)
 
     def print_if_structure(self, indent=0):
         idx = "->|" * indent
@@ -167,37 +242,38 @@ def set_default_helper(node, namelist_dict, stack):
     if not node:
         return
 
-    if node.kind == 1:  # `if` block
-        node.default = node.evaluate(namelist_dict)
-        if node.default:
-            stack.append(1)
-            for child in node.children:
-                set_default_helper(child, namelist_dict, stack)
-            stack.pop()
-        else:
-            stack.append(-1)
-            for elseif in node.elseif:
-                set_default_helper(elseif, namelist_dict, stack)
+    match (node.kind):
+        case IfType.IF:  # `if` block
+            node.default = node.evaluate(namelist_dict)
+            if node.default:
+                stack.append(1)
+                for child in node.children:
+                    set_default_helper(child, namelist_dict, stack)
+                stack.pop()
+            else:
+                stack.append(-1)
+                for elseif in node.elseif:
+                    set_default_helper(elseif, namelist_dict, stack)
 
-                if stack and stack[-1] > 0:
-                    return
-            if node.elses and stack[-1] == -1:
-                set_default_helper(node.elses, namelist_dict, stack)
+                    if stack and stack[-1] > 0:
+                        return
+                if node.elses and stack[-1] == -1:
+                    set_default_helper(node.elses, namelist_dict, stack)
+                    stack.pop()
+
+        case IfType.ELSEIF:
+            node.default = node.evaluate(namelist_dict)
+            stack.append(2)
+            if node.default:
+                for child in node.children:
+                    set_default_helper(child, namelist_dict, stack)
+            else:
                 stack.pop()
 
-    elif node.kind == 2:
-        node.default = node.evaluate(namelist_dict)
-        stack.append(2)
-        if node.default:
+        case IfType.ELSE:
+            node.default = True
             for child in node.children:
                 set_default_helper(child, namelist_dict, stack)
-        else:
-            stack.pop()
-
-    elif node.kind == 3:
-        node.default = True
-        for child in node.children:
-            set_default_helper(child, namelist_dict, stack)
 
 
 def set_default(ifs, namelist_dict):
@@ -268,151 +344,37 @@ def print_if_structure(if_block, indent=0):
             print_if_structure(child, indent + 2)
 
 
-def find_if_blocks(lines):
+def get_if_blocks(sub: Subroutine):
     """
-    Returns all parent (outer-most) if_blocks
+    Collects and groups the if-blocks (if, else if, else) within a Fortran subroutine
+    Parameters:
+    sub (Subroutine): The subroutine object containing the lines of code.
     """
-    res = []
-    index = 0
-    depth = 0
-    stack = []
+    lines = sub.sub_lines
 
-    current = None
-    root = Ifs()
-    root.condition = "ROOT"
-    last_elseif = None
-    last_else = None
+    debug_sub = 'xxxx'
+    verbose = True if sub.name == debug_sub else False
 
-    while index < len(lines):
-        ct = index
-        line, index = line_unwrapper(lines, index)
-        line = line.strip()
+    regex_if_start = re.compile(r"^\s*if\s*\((.*?)\)\s*(then)?")
+    regex_if_end = re.compile(r"^\s*end\s*if")
+    regex_check_block = re.compile(r"^\s*if\s*\((.*?)\)\s*(then)")
 
-        ln = index if index == ct else ct
-        subroutine_call = re.findall(r"\b\s*call\s*(\w*)\(", line)
-        if subroutine_call and subroutine_call[0] != "endrun" and current:
-            current.calls.append((ln, subroutine_call[0].lower()))
-        # FOUND IF BLOCK
-        if re.search(r"^if\s*\(", line) or re.findall(r"\w*\s*:\s*if\s*\(", line):
-            depth += 1
-            parent = Ifs()
-            parent.start = ln
-            parent.depth = depth
-            parent.condition = get_if_condition(line)
-            parent.kind = 1
-            parent.parent = root
-
-            # ONE LINER
-            if not re.search(r"\bthen\s*($|\n)", line):
-                if subroutine_call and subroutine_call[0] != "endrun":
-                    parent.calls.append((ln, subroutine_call[0].lower()))
-                parent.relative_end = index
-                parent.end = index
-                depth -= 1
-
-                if parent.parent.condition == "ROOT":
-                    res.append(parent)
-                elif parent.start not in root.child_conditions:
-                    root.children.append(parent)
-                    root.child_conditions.add(parent.start)
-                index = ln + 1
-                continue
-
-            if last_else and last_else.depth == depth - 1:
-                if parent.start not in last_else.child_conditions:
-                    last_else.children.append(parent)
-                    last_else.child_conditions.add(parent.start)
-                parent.assigned_as_child = True
-
-            elif last_elseif and last_elseif.depth == depth - 1:
-                if parent.start not in last_elseif.child_conditions:
-                    last_elseif.children.append(parent)
-                    last_elseif.child_conditions.add(parent.start)
-                parent.assigned_as_child = True
-
-            elif parent.start not in root.child_conditions:
-                root.children.append(parent)
-                root.child_conditions.add(parent.start)
-
-            root = parent
-            current = parent
-            stack.append(parent)
-
-        # FOUND ELSE_IF BLOCK
-        elif re.search(r"\s*else\s*if\s*[(]", line):
-            # UPDATE PREVIOUS IF/ELSE_IF ENDIND LINE NUMBER
-            if root.elseif:
-                root.elseif[-1].end = ln
-                root.elseif[-1].relative_end = ln
-            else:
-                root.relative_end = ln
-            elf = Ifs()
-            elf.start = ln
-            elf.depth = depth
-            elf.condition = get_if_condition(line)
-            elf.kind = 2
-            elf.parent = root
-
-            if root.kind == 1 and elf.start not in root.child_conditions:
-                root.elseif.append(elf)
-                root.child_conditions.add(elf.start)
-                last_elseif = elf
-
-            current = elf
-            stack.append(elf)
-
-        # FOUND ELSE BLOCK
-        elif re.search(r"\s*else\s*", line):
-            # UPDATE PREVIOUS IF/ELSE_IF ENDIND LINE NUMBER
-            if root.elseif:
-                root.elseif[-1].end = ln
-                root.elseif[-1].relative_end = ln
-            else:
-                root.relative_end = ln
-            elf = Ifs()
-            elf.start = ln
-            elf.depth = depth
-            elf.default = False
-            elf.kind = 3
-            elf.parent = root
-
-            if root.kind == 1:
-                root.elses = elf
-                last_else = elf
-            current = elf
-            stack.append(elf)
-
-        # FOUND END OF IF_BLOCK
-        elif re.search(r"\s*end\s*if", line) and not line.startswith("#"):
-            node = None
-            depth -= 1
-            while True:
-                node = stack.pop()
-                if node.end == -1:
-                    node.end = ln
-                if node.relative_end == 0:
-                    node.relative_end = ln
-                if node.kind == 1 and node.depth > 1 and not node.assigned_as_child:
-                    if node.start not in node.parent.child_conditions:
-                        node.parent.children.append(node)
-                        node.parent.child_conditions.add(node.start)
-                if node.kind == 1:
-                    break
-            # APPEND PARENT (OUTER-MOST) IF BLOCK AND RESET
-            if node.depth == 1:
-                res.append(node)
-                root = Ifs()
-                root.condition = "ROOT"
-                index = ln + 1
-                last_elseif = None
-                last_else = None
-                continue
-            root = node.parent
-            last_elseif = None
-            last_else = None
-
-        index = ln + 1
-    return res
+    if_statements = parse_blocks(
+        lines,
+        regex_if_start,
+        regex_if_end,
+        regex_check=regex_check_block,
+        verbose=verbose,
+        tag=sub.name,
+    )
+    if if_statements:
+        sub.if_blocks = if_statements
+        flat_ifs: list[FlatIfs] = []
+        for ifnode in if_statements:
+            flat_ifs.extend(flatten_if(ifnode))
+        sub.flat_ifs = flat_ifs
+    sub.ifs_analyzed = True
+    return
 
 
 def set_parent_helper(node, parent):

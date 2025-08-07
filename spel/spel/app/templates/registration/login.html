@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block body %}
+<h1>Sign in</h1>
+
+{% if messages %}
+<ul class="messages">
+	{% for message in messages %}
+	<li class="message {{ message.tags }}">{{ message }}</li>
+	{% endfor %}
+</ul>
+{% endif %}
+
+<form method="post"
+	action="{% url 'login' %}{% if request.GET.next %}?next={{ request.GET.next|urlencode }}{% endif %}">
+	{% csrf_token %}
+
+	{# Non-field errors (e.g., invalid credentials) #}
+	{% if form.non_field_errors %}
+	<div class="form-error">
+		{% for e in form.non_field_errors %}<div>{{ e }}</div>{% endfor %}
+	</div>
+	{% endif %}
+
+	<div class="form-row">
+		<label for="{{ form.username.id_for_label }}">Username</label>
+		{{ form.username }}
+		{% if form.username.errors %}
+		<div class="field-error">{% for e in form.username.errors %}{{ e }}{% endfor %}</div>
+		{% endif %}
+	</div>
+
+	<div class="form-row">
+		<label for="{{ form.password.id_for_label }}">Password</label>
+		{{ form.password }}
+		{% if form.password.errors %}
+		<div class="field-error">{% for e in form.password.errors %}{{ e }}{% endfor %}</div>
+		{% endif %}
+	</div>
+
+	<button class="styled-button" type="submit">Log in</button>
+
+	{# Link to signup if you’re using the invite-code signup we discussed #}
+	<p>New here? <a
+			href="{% url 'signup' %}{% if request.GET.next %}?next={{ request.GET.next|urlencode }}{% endif %}">Create
+			an account</a></p>
+</form>
+
+<style>
+	/* Lightweight form styling that matches your toolbar/buttons */
+	form {
+		max-width: 420px;
+	}
+
+	.form-row {
+		margin-bottom: .75rem;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.form-row input[type="text"],
+	.form-row input[type="password"] {
+		padding: 8px 10px;
+		border: 1px solid #ccd;
+		border-radius: 6px;
+	}
+
+	.form-error,
+	.field-error {
+		color: #b00020;
+		font-size: .9rem;
+		margin-top: .25rem;
+	}
+
+	.messages {
+		list-style: none;
+		padding: 0;
+	}
+
+	.message {
+		padding: .5rem .75rem;
+		border-radius: 6px;
+		margin-bottom: .5rem;
+	}
+
+	.message.success {
+		background: #e8f5e9;
+	}
+
+	.message.error {
+		background: #ffebee;
+	}
+</style>
+{% endblock %}

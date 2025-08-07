@@ -13,7 +13,7 @@ cd SPEL_OpenACC
 pip install -e .
 ```
 
-Extra configuration is required to point SPEL to the location of the E3SM clone in the __./scripts/mod_config.py__ file modify the `E3SM_SRCROOT = spel_dir + <relative path to E3SM>`
+Extra configuration is required to point SPEL to the location of the E3SM clone in the __./scripts/config.py__ file modify the `E3SM_SRCROOT = spel_dir + <relative path to E3SM>`
 
 # Commands:
 ```bash

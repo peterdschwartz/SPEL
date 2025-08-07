@@ -23,7 +23,7 @@ def getAssociateClauseVars(sub: Subroutine, verbose=False):
     associate_vars = {}
     associate_start = 0
     associate_end = 0
-    regex_associate = re.compile(r"\b(associate)\b(?=\()")
+    regex_associate = re.compile(r"\b(associate)\s*(?=\()")
     matches: list[LineTuple] = [
         line for line in filter(lambda x: regex_associate.search(x.line), lines)
     ]
@@ -36,7 +36,10 @@ def getAssociateClauseVars(sub: Subroutine, verbose=False):
         return associate_vars, associate_start, associate_end
 
     if verbose:
-        print(f"{func_name}::associate start {associate_start} {sub.cpp_startline}")
+        sub.logger.info(f"associate matches {matches}")
+        sub.logger.info(
+            f"{func_name}::associate start {associate_start} {sub.cpp_startline}"
+        )
 
     associate_line = matches[0]
     associate_start = associate_line.ln
@@ -46,7 +49,7 @@ def getAssociateClauseVars(sub: Subroutine, verbose=False):
     associate_string = regex_str.search(associate_line.line).group(0)
 
     if verbose:
-        print(f"{func_name}::{associate_string}")
+        sub.logger.info(f"{func_name}::{associate_string}")
 
     regex_remove_index = re.compile(r"(\()(.+)(\))")
     for pair in associate_string.split(","):
@@ -66,8 +69,10 @@ def getAssociateClauseVars(sub: Subroutine, verbose=False):
         associate_vars[find_ex] = repl_ex
 
     if verbose:
-        print(f"{func_name}:: Found associate variables for {subroutine_name}")
+        sub.logger.info(
+            f"{func_name}:: Found associate variables for {subroutine_name}"
+        )
         for key in associate_vars:
-            print(f"{key} => {associate_vars[key]}")
+            sub.logger.info(f"{key} => {associate_vars[key]}")
 
     return associate_vars, associate_start, associate_end

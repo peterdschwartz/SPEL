@@ -7,18 +7,86 @@ test_dir = os.path.dirname(__file__) + "/"
 logger = logging.getLogger("TEST")
 logging.basicConfig(level=logging.INFO)  # change to DEBUG to see detailed logs
 
+expected_arg_status = {
+    "test_parsing_sub": {
+        "bounds": "r",
+        "bounds%begg": "r",
+        "bounds%endg": "r",
+        "var1": "r",
+        "var2": "r",
+        "var3": "rw",
+        "input4": "rw",
+    },
+    "add": {
+        "x": "r",
+        "y": "rw",
+    },
+    "ptr_test_sub": {
+        "numf": "-",
+        "soilc": "-",
+        "arr": "w",
+    },
+    "tridiagonal_sr": {
+        "bounds": "r",
+        "bounds%begc": "r",
+        "bounds%endc": "r",
+        "lbj": "r",
+        "ubj": "r",
+        "jtop": "r",
+        "numf": "r",
+        "filter": "r",
+        "a": "r",
+        "b": "r",
+        "c": "r",
+        "r": "r",
+        "u": "w",
+        "is_col_active": "r",
+    },
+    "call_sub": {
+        "numf": "r",
+        "bounds": "r",
+        "bounds%begc": "r",
+        "bounds%endc": "r",
+        "mytype": "rw",
+        "mytype%field2": "w",
+        "mytype%field1": "rw",
+        "patch_state_updater%dwt": "w",
+        "patch_state_updater": "w",
+    },
+    "col_nf_init": {
+        "begc": "r",
+        "endc": "r",
+        "this": "w",
+        "this%hrv_deadstemn_to_prod100n": "w",
+        "this%hrv_deadstemn_to_prod10n": "w",
+        "this%m_n_to_litr_lig_fire": "w",
+        "this%m_n_to_litr_met_fire": "w",
+    },
+    "trace_dtype_example": {
+        "mytype2": "rw",
+        "mytype2%field1": "r",
+        "mytype2%field2": "rw",
+        "mytype2%field3": "r",
+        "mytype2%field4": "rw",
+        "mytype2%active": "r",
+        "col_nf_inst": "w",
+        "col_nf_inst%hrv_deadstemn_to_prod10n": "w",
+        "flag": "r",
+    },
+}
+
 
 def test_Functions():
     """
     Test for parsing functions
     """
-    with patch("scripts.mod_config.ELM_SRC", test_dir), patch(
-        "scripts.mod_config.SHR_SRC", test_dir
+    with patch("scripts.config.ELM_SRC", test_dir), patch(
+        "scripts.config.SHR_SRC", test_dir
     ):
         from scripts.analyze_subroutines import Subroutine
+        from scripts.config import scripts_dir
         from scripts.edit_files import modify_file
         from scripts.fortran_modules import get_module_name_from_file
-        from scripts.mod_config import scripts_dir
         from scripts.utilityFunctions import Variable
 
         fn = f"{scripts_dir}/tests/example_functions.f90"
@@ -66,84 +134,21 @@ def test_sub_parse(subtests):
     """
     Test for parsing function/subroutine calls
     """
-    with patch("scripts.mod_config.ELM_SRC", test_dir), patch(
-        "scripts.mod_config.SHR_SRC", test_dir
+    with patch("scripts.config.ELM_SRC", test_dir), patch(
+        "scripts.mconfig.SHR_SRC", test_dir
     ):
         import scripts.dynamic_globals as dg
         from scripts.aggregate import aggregate_dtype_vars
         from scripts.analyze_subroutines import Subroutine
+        from scripts.config import scripts_dir
         from scripts.DerivedType import DerivedType
         from scripts.edit_files import process_for_unit_test
         from scripts.fortran_modules import FortranModule
-        from scripts.mod_config import scripts_dir
-        from scripts.UnitTestforELM import process_subroutines_for_unit_test
+        from scripts.UnitTestforELM import (
+            create_unit_test,
+            process_subroutines_for_unit_test,
+        )
         from scripts.utilityFunctions import Variable
-
-        expected_arg_status = {
-            "test_parsing_sub": {
-                "bounds": "r",
-                "bounds%begg": "r",
-                "bounds%endg": "r",
-                "var1": "r",
-                "var2": "r",
-                "var3": "rw",
-                "input4": "rw",
-            },
-            "add": {
-                "x": "r",
-                "y": "rw",
-            },
-            "ptr_test_sub": {
-                "numf": "-",
-                "soilc": "-",
-                "arr": "w",
-            },
-            "tridiagonal_sr": {
-                "bounds": "r",
-                "bounds%begc": "r",
-                "bounds%endc": "r",
-                "lbj": "r",
-                "ubj": "r",
-                "jtop": "r",
-                "numf": "r",
-                "filter": "r",
-                "a": "r",
-                "b": "r",
-                "c": "r",
-                "r": "r",
-                "u": "w",
-                "is_col_active": "r",
-            },
-            "call_sub": {
-                "numf": "r",
-                "bounds": "r",
-                "bounds%begc": "r",
-                "bounds%endc": "r",
-                "mytype": "rw",
-                "mytype%field2": "w",
-                "mytype%field1": "rw",
-            },
-            "col_nf_init": {
-                "begc": "r",
-                "endc": "r",
-                "this": "w",
-                "this%hrv_deadstemn_to_prod100n": "w",
-                "this%hrv_deadstemn_to_prod10n": "w",
-                "this%m_n_to_litr_lig_fire": "w",
-                "this%m_n_to_litr_met_fire": "w",
-            },
-            "trace_dtype_example": {
-                "mytype2": "rw",
-                "mytype2%field1": "r",
-                "mytype2%field2": "rw",
-                "mytype2%field3": "r",
-                "mytype2%field4": "rw",
-                "mytype2%active": "r",
-                "col_nf_inst": "w",
-                "col_nf_inst%hrv_deadstemn_to_prod10n": "w",
-                "flag": "r",
-            },
-        }
 
         dg.populate_interface_list()
         fn = f"{scripts_dir}/tests/example_functions.f90"
@@ -242,14 +247,14 @@ def test_sub_parse(subtests):
 
 
 def test_arg_intent():
-    with patch("scripts.mod_config.ELM_SRC", test_dir), patch(
-        "scripts.mod_config.SHR_SRC", test_dir
+    with patch("scripts.config.ELM_SRC", test_dir), patch(
+        "scripts.config.SHR_SRC", test_dir
     ):
         import scripts.dynamic_globals as dg
         from scripts.analyze_subroutines import Subroutine
+        from scripts.config import scripts_dir
         from scripts.edit_files import process_for_unit_test
         from scripts.fortran_modules import FortranModule, get_module_name_from_file
-        from scripts.mod_config import scripts_dir
 
         dg.populate_interface_list()
         fn = f"{scripts_dir}/tests/example_functions.f90"

@@ -10,6 +10,10 @@ from xarray.core.dataset import Dataset
 # namedtuple for summary of errors
 Tally = namedtuple("Tally", ["name", "total", "rmse", "max"])
 
+NUMLOGS = 10  # total number of examples to report
+EPSILON = 1.0e-30  # avoid div by zero
+ERROR = 1.0e-10
+
 
 def progressbar(it, prefix="", size=60, out=sys.stdout):
     count = len(it)
@@ -48,7 +52,7 @@ def rel_error(refdata: Dataset, compdata: Dataset, var: str, error_log):
     the gridcell is always the rightmost dimension.
     """
     # Get relevant data
-    MAX_LOG_LENGTH = 10
+    global NUMLOGS
     original_vals = refdata[var].values
     comp_vals = compdata[var].values
     dims = refdata[var].dims
@@ -73,9 +77,8 @@ def rel_error(refdata: Dataset, compdata: Dataset, var: str, error_log):
         sys.exit(1)
 
     # Set parameters and initialize diff log
-    EPSILON = 1.0e-50
-    ERROR = 0.0e-25  # Threshold to report
-    NUMLOGS = 8  # total number of examples to report
+    global EPSILON
+    global ERROR
     diff_vals = original_vals - comp_vals
     diff_vals = np.abs(diff_vals)
 
@@ -143,6 +146,9 @@ def find_diffs(refn: str, compfn: str, var: str = "", ostream=sys.stdout):
     print("Reference File is:", refn)
     print("Comparison File is:", compfn)
     print("Findall is:", findall)
+    global NUMLOGS
+    if not findall:
+        NUMLOGS = 100
 
     refdata = xarray.open_dataset(refn)
     compdata = xarray.open_dataset(compfn)

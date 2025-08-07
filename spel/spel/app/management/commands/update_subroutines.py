@@ -35,12 +35,3 @@ class Command(BaseCommand):
                     module=mod_obj,
                     subroutine_name=sub_name,
                 )
-
-                if created:
-                    self.stdout.write(
-                        self.style.SUCCESS(f"Subroutine {sub_name}  created.")
-                    )
-                else:
-                    self.stdout.write(
-                        self.style.SUCCESS(f"Subroutine {sub_name}  updated.")
-                    )

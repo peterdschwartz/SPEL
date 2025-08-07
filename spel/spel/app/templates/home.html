@@ -7,48 +7,9 @@
 
 {% block body %}
 
-<div class="button-container">
-    <h2>
+{% include 'banner.html' %}
 
-        <img src="{% static 'images/database-icon.svg' %}" alt="DB Icon">
-        Tables in the Database:
-    </h2>
-    <div class="button-group">
-        <a href="{% url 'view_table' table_name='subroutine_calltree' %}">
-            <button class="styled-button">Subroutine CallTree</button>
-        </a>
-        <a href="{% url 'view_table' table_name='types' %}">
-            <button class="styled-button">User Types</button>
-        </a>
-        <a href="{% url 'view_table' table_name='dependency' %}">
-            <button class="styled-button">Module Dependency</button>
-        </a>
-        <a href="{% url 'view_table' table_name='instances' %}">
-            <button class="styled-button">Type Instances</button>
-        </a>
-        <a href="{% url 'view_table' table_name='modules' %}">
-            <button class="styled-button">Modules</button>
-        </a>
-        <a href="{% url 'view_table' table_name='subroutines' %}">
-            <button class="styled-button">Subroutines</button>
-        </a>
-        <a href="{% url 'view_table' table_name='subroutineargs' %}">
-            <button class="styled-button">Subroutine Arguments</button>
-        </a>
-        <a href="{% url 'view_table' table_name='activeglobalvars' %}">
-            <button class="styled-button">Active Global Vars</button>
-        </a>
-    </div>
-</div>
-
-<!--form hx-post="{% url 'subcall' %}" hx-target="#active-view" hx-swap="innerHTML">
-    {% csrf_token %}
-    <label for="Variable">Enter Global Variable:</label>
-    <input type="text" id="Variable" name="Variable" required autocomplete="off" hx-get="{% url 'autocomplete' %}"
-        hx-target="#suggestions-list" hx-trigger="input" hx-include="[name='Variable']">
-    <ul id="suggestions-list"></ul> 
-<button type="submit">Submit</button>
-</form-->
+<h1> {{ title }} <a href="{% url 'sub_view' 'elm_drv' %}" class="return-link">Subroutine View</a></h1>
 
 <form hx-post="{% url 'subcall' %}" hx-target="#active-view" hx-swap="innerHTML">
     <label for="Variable">Enter Global Variable (inst%member):</label>
@@ -65,10 +26,10 @@
 </div>
 
 <!-- Modal Structure -->
-<div id="modalOverlay" class="modal-overlay" style="display:none;">
-    <div id="modalContent" class="modal-content" hx-on="click: event.stopPropagation()">
-        <!-- HTMX will load subroutine details here -->
-    </div>
-</div>
+<!-- <div id="modalOverlay" class="modal-overlay" style="display:none;"> -->
+<!--     <div id="modalContent" class="modal-content" hx-on="click: event.stopPropagation()"> -->
+<!--         <!-- HTMX will load subroutine details here --> -->
+<!--     </div> -->
+<!-- </div> -->
 
 {% endblock %}

@@ -1,6 +1,6 @@
 import re
 
-from scripts.mod_config import _bc
+from scripts.config import _bc
 
 
 def test_regex(input: list[str], expected: list[bool], pattern: re.Pattern) -> None:

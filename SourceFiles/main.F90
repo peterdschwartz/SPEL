@@ -13,7 +13,7 @@ use cudafor
 #endif
 use timeInfoMod
 use elm_initializeMod
-use nc_io, only: nc_read_timeslices
+use nc_io, only: nc_read_timeslices, io_constants, io_inputs, io_outputs
 !#USE_START
 
 !=======================================!
@@ -26,11 +26,8 @@ integer(kind=cuda_count_kind) :: heapsize, free1, free2, total
 integer  :: istat, val
 #endif
 character(len=50) :: clump_input_char, pproc_input_char
-integer :: clump_input, pproc_input, fc, c, l, fp, g, j
-logical :: found_thawlayer
-integer :: k_frz
+integer :: nsets, pproc_input, fc, c, l, fp, g, j
 integer :: begg, endg
-character(len=256) :: const_fn, var_fn
 integer :: time_len
 real(r8) :: declin, declinp1
 real :: startt, stopt
@@ -42,41 +39,38 @@ real(r8), allocatable :: icemask_dummy_arr(:)
 
 IF (COMMAND_ARGUMENT_COUNT() == 0) THEN
    WRITE (*, *) 'ONE COMMAND-LINE ARGUMENT DETECTED, Defaulting to 1 site per clump'
-   clump_input = 1
+   nsets = 1
    pproc_input = 1 !1 site per clump
 
 elseIF (COMMAND_ARGUMENT_COUNT() == 1) THEN
    WRITE (*, *) 'ONE COMMAND-LINE ARGUMENT DETECTED, Defaulting to 1 site per clump'
    call get_command_argument(1, clump_input_char)
-   READ (clump_input_char, *) clump_input
+   READ (clump_input_char, *) nsets
    pproc_input = 1 !1 site per clump
 
 ELSEIF (COMMAND_ARGUMENT_COUNT() == 2) THEN
    call get_command_argument(1, clump_input_char)
    call get_command_argument(2, pproc_input_char)
-   READ (clump_input_char, *) clump_input
+   READ (clump_input_char, *) nsets
    READ (pproc_input_char, *) pproc_input
      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 END IF
 
-const_fn = "spel-constants.nc"
-var_fn = "spel-elmtypes.nc"
-call elm_init(const_fn, var_fn, clump_input, pproc_input, dtime_mod, year_curr, bounds_proc)
+block 
+   character(len=256) :: input_path = "/home/mrgex/SPEL_Openacc/unit-tests/input-data/"
+   call io_constants%init(base_fn=trim(input_path)//'spel-constants',max_tpf=720,read_io=.true.)
+   call io_inputs%init(base_fn=trim(input_path)//'spel-inputs',max_tpf=720,read_io=.true.)
+   call io_outputs%init(base_fn=trim(input_path)//'fut-outputs',max_tpf=720,read_io=.false.)
+end block
 
-time_len = nc_read_timeslices(var_fn)
-print *, "Number of time slices found: ", time_len
+call elm_init(nsets, pproc_input, dtime_mod, year_curr, bounds_proc)
 
 declin = -0.4030289369547867
 step = 0
 
 #ifdef _OPENACC
 if (step == 0) then
-   print *, "transferring data to GPU"
    call init_proc_clump_info()
-#ifdef _CUDA
-   istat = cudaMemGetInfo(free1, total)
-   print *, "Free1:", free1
-#endif
    call update_params_acc()
 
    !Note: copy/paste enter data directives here for FUT.
@@ -85,20 +79,6 @@ if (step == 0) then
 
    call get_proc_bounds(bounds_proc)
    ! Calculate filters on device
-   !call setProcFilters(bounds_proc, proc_filter, .false., icemask_dummy_arr)
-
-#if _CUDA
-   ! Heap Limit may need to be increased for certain routines
-   ! if using routine directives with many automatic arrays
-   ! should be adjusted based on problem size
-   istat = cudaDeviceGetLimit(heapsize, cudaLimitMallocHeapSize)
-   print *, "SETTING Heap Limit from", heapsize
-   heapsize = 10_8*1024_8*1024_8
-   print *, "TO:", heapsize
-   istat = cudaDeviceSetLimit(cudaLimitMallocHeapSize, heapsize)
-   istat = cudaMemGetInfo(free1, total)
-   print *, "Free1:", free1/1.E+9
-#endif
 end if
 #endif
 !$acc enter data copyin( doalb, declinp1, declin )
@@ -120,10 +100,10 @@ declinp1 = -0.4023686267583503
 
 nclumps = procinfo%nclumps
 
-do step = 1, time_len
+do while (.true.)
 
-   call get_clump_bounds(1, bounds_clump)
-   call read_elmtypes(1, step, trim(var_fn), bounds_clump)
+   call read_elmtypes(io_inputs, bounds_proc)
+   if(io_inputs%end_run) exit
 
 !$acc parallel loop independent gang vector default(present) private(bounds_clump)
 do nc = 1, nclumps
@@ -132,14 +112,10 @@ do nc = 1, nclumps
 
 end do
 
-call write_elmtypes(1,step,"fut-results.nc", bounds_clump)
+   call write_elmtypes(io_outputs, bounds_proc)
 end do
 
-#if _CUDA
-istat = cudaMemGetInfo(free1, total)
-print *, "free after kernel:", free1/1.E+9
-#endif
-print *, "done with unit-test execution"
+print *, "Finished: Read ", io_inputs%filenum-1, " files"
 deallocate (clumps, procinfo%cid)
 deallocate (filter, filter_inactive_and_active)
 

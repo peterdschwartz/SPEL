@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import pprint
 import re
+import sys
 from logging import Logger
 from typing import TYPE_CHECKING, Dict
 
@@ -51,7 +52,17 @@ def find_global_var_bounds(
                 bounds = match.group(2)
                 global_vars[varname].bounds = bounds[1:-1]
 
+    for gv in global_vars.values():
+        if not gv.bounds and gv.dim > 0:
+            gv.bounds = generate_dim_names(gv)
     return
+
+
+def generate_dim_names(var: Variable) -> str:
+    if var.dim == 0:
+        sys.exit(1)
+    bounds = [f"{var.name}_dim{i}" for i in range(1, var.dim + 1)]
+    return ",".join(bounds)
 
 
 def add_global_vars(
@@ -97,6 +108,30 @@ def check_global_vars(regex_variables, sub: Subroutine) -> set[str]:
     return active_vars
 
 
+def update_default_value(mod_dict: dict[str, FortranModule]):
+    global_vars = {
+        v: var for mod in mod_dict.values() for v, var in mod.global_vars.items()
+    }
+
+    def update_default(gv: Variable, seen=None) -> None:
+        if seen is None:
+            seen = set()
+
+        val = gv.default_value
+        if val in seen:  # prevent infinite loops
+            return
+        if val in global_vars:
+            seen.add(val)
+            gv.default_value = global_vars[val].default_value
+            update_default(gv, seen)
+        return
+
+    for mod in mod_dict.values():
+        for var in mod.global_vars.values():
+            update_default(var)
+    return
+
+
 def determine_global_variable_status(
     mod_dict: dict[str, FortranModule],
     sub: Subroutine,
@@ -120,6 +155,8 @@ def determine_global_variable_status(
     test_modules: Dict[str, FortranModule] = {}
     modname = sub.module
     sub_mod = mod_dict[modname]
+    update_default_value(mod_dict)
+
     variables: dict[str, Variable] = {}
     for mod_name, musage in sub_mod.head_modules.items():
         add_global_vars(dep_mod=mod_dict[mod_name], vars=variables, mod_usage=musage)

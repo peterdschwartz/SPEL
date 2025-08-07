@@ -53,6 +53,18 @@ class Command(BaseCommand):
             help="Path to the CSV file for Subroutine updates.",
         )
         parser.add_argument(
+            "--nml_csv",
+            action="store_true",
+            required=False,
+            help="Path to the CSV file for Ifs/NML updates.",
+        )
+        parser.add_argument(
+            "--intrinsic_csv",
+            action="store_true",
+            required=False,
+            help="Path to the CSV file for intrinsic type globals updates.",
+        )
+        parser.add_argument(
             "--all",
             action="store_true",
             required=False,
@@ -85,6 +97,10 @@ class Command(BaseCommand):
                 csv_files["calltree_csv"] = f
             elif "subroutines" in filename:
                 csv_files["subroutines_csv"] = f
+            elif "nml_ifs" in filename:
+                csv_files["nml_csv"] = f
+            elif "intrinsic_globals" in filename:
+                csv_files["intrinsic_csv"] = f
         # Update options with the detected file paths.
         if options["all"]:
             options.update(csv_files)
@@ -104,8 +120,8 @@ class Command(BaseCommand):
         active_globals_csv = options.get("active_globals_csv", None)
         sub_args_csv = options.get("sub_args_csv", None)
         sub_calltree = options.get("calltree_csv", None)
-
-        print("sub_call_tree:", sub_calltree)
+        nml_csv = options.get("nml_csv", None)
+        intrinsic_csv = options.get("intrinsic_csv", None)
 
         if modules_csv:
             self.stdout.write("Updating Modules and ModuleDependency...")
@@ -121,7 +137,6 @@ class Command(BaseCommand):
             call_command("update_subroutines", subroutines_csv)
         if sub_calltree:
             self.stdout.write("Updating SubroutineCalltree...")
-            print(sub_calltree)
             call_command("update_subroutine_calltree", sub_calltree)
         if active_globals_csv:
             self.stdout.write("Updating SubroutineActiveGlobalVars...")
@@ -129,3 +144,9 @@ class Command(BaseCommand):
         if sub_args_csv:
             self.stdout.write("Updating SubroutineArgs...")
             call_command("update_subroutine_args", sub_args_csv)
+        if intrinsic_csv:
+            self.stdout.write("Updating Intrinsic Globals...")
+            call_command("update_intrinsic_globals", intrinsic_csv)
+        if nml_csv:
+            self.stdout.write("Updating If and NML Tables...")
+            call_command("update_ifsnml", nml_csv)

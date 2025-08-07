@@ -7,12 +7,14 @@ from enum import Enum, auto
 from logging import Logger
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
 
+from scripts.fortran_parser.spel_ast import Expression
 from scripts.logging_configs import get_logger
 
 if TYPE_CHECKING:
     from scripts.analyze_subroutines import Subroutine
     from scripts.utilityFunctions import Variable
 
+regex_preand = re.compile(r'^\s*&')
 
 class SubStart(NamedTuple):
     subname: str
@@ -384,6 +386,8 @@ class CallTree:
 
     def __repr__(self):
         return f"CallTree({self.node.subname}, children={len(self.children)})"
+    def __str__(self):
+        return self.node.subname
 
     def print_tree(self, level: int = 0):
         """Recursively prints the tree in a hierarchical format."""
@@ -401,10 +405,11 @@ class LogicalLineIterator:
         self.lines = lines
         self.i = 0
         self.start_index = 0
+        self.curr_line: LineTuple = lines[0]
         if not log_name:
-            self.logger: Logger = get_logger("LineIter", level=logging.DEBUG)
+            self.logger: Logger = get_logger("LineIter", level=logging.INFO)
         else:
-            self.logger: Logger = get_logger(log_name, level=logging.DEBUG)
+            self.logger: Logger = get_logger(log_name, level=logging.INFO)
 
     def __iter__(self):
         return self
@@ -412,6 +417,10 @@ class LogicalLineIterator:
     def reset(self):
         self.i = 0
         self.start_index = 0
+
+    def get_start_ln(self)->int:
+        idx = self.start_index
+        return self.lines[idx].ln
 
     def strip_comment(self) -> str:
         in_string = None  # None, "'", or '"'
@@ -443,6 +452,7 @@ class LogicalLineIterator:
             raise StopIteration
         self.start_index = self.i
 
+        cur_ln = self.lines[self.i].ln
         full_line = self.strip_comment()
         full_line = full_line.rstrip("\n").strip()
         num_continuations: int = 1
@@ -453,15 +463,18 @@ class LogicalLineIterator:
             if self.i >= len(self.lines):
                 self.logger.error("Error-- line incomplete!")
                 raise StopIteration
-            new_line = self.lines[self.i].line.split("!")[0].strip()
+            # new_line = self.lines[self.i].line.split("!")[0].strip()
+            new_line = self.strip_comment().strip()
             # test if line is just a comment or otherwise empty
             if not new_line:
                 full_line += " &"  # re append & so loop goes to next line
             else:
-                full_line += new_line.rstrip("\n").strip()
+                new_line = regex_preand.sub(' ',new_line)
+                full_line += " " + new_line.rstrip("\n")
 
         result = (full_line.lower(), self.i)
         self.i += 1
+        self.curr_line = LineTuple(line=full_line.lower(),ln=cur_ln)
         return result
 
     def next_n(self, n):
@@ -504,26 +517,28 @@ class LogicalLineIterator:
         self,
         end_pattern: re.Pattern,
         start_pattern: Optional[re.Pattern],
-    ):
-        self.logger.debug(
-            f"(consume_until) patterns:\n {start_pattern}\n {end_pattern}"
-        )
-        results = []
+    ) -> tuple[list[LineTuple],int]:
+
+        results: list[LineTuple] = [self.curr_line]
         ln: int = -1
         nesting = 0
         while self.has_next():
             full_line, ln = next(self)
-            results.append(full_line)
+            start_ln = self.get_start_ln()
+            results.append(LineTuple(line=full_line,ln=start_ln))
             if start_pattern and start_pattern.match(full_line):
                 nesting += 1
             if end_pattern.match(full_line):
                 if nesting == 0:
-                    self.logger.debug(f"(consume_until) final ln: {ln}, {full_line}")
                     break
                 else:
                     nesting -= 1
 
         return results, ln
+
+    def get_orig_ln(self):
+        start_index = self.get_start_ln()
+        return self.lines[start_index].ln
 
     def replace_in_line(
         self,
@@ -557,6 +572,24 @@ class Pass:
     fn: Callable[[ParseState, logging.Logger], None]
     name: Optional[str] = None
 
+class IfType(Enum):
+    UNKNOWN = -1
+    IF = 1
+    ELSEIF = 2
+    ELSE = 3
+    SIMPLE = 4
+
+
+class FlatIfs:
+    def __init__(self, start, end, cond, kind):
+        self.start_ln: int = start
+        self.end_ln: int = end
+        self.condition: Expression = cond
+        self.kind: IfType = kind
+        self.nml_vars: dict[str, NameList] = {}
+
+    def __str__(self):
+        return f"{self.kind.name} L{self.start_ln}-{self.end_ln} {self.condition}"
 
 class PassManager:
     """
@@ -579,18 +612,58 @@ class PassManager:
         self.passes = [p for p in self.passes if p.name != name]
 
     def run(self, state: ParseState):
-        self.logger.debug(f"Iterating over file with {len(state.line_it.lines)}")
         for full_line, _ in state.line_it:
             # ln in LineTuple always points to original loc. line_it.i is cpp_ln if applicable
             # seems a little circuitous but makes state management easy
             start_index = state.line_it.start_index
-            orig_ln = state.line_it.lines[start_index].ln
+            orig_ln = state.line_it.get_start_ln()
             status = state.line_it.lines[start_index].commented
             if not full_line or status:
                 continue
             state.curr_line = LineTuple(line=full_line, ln=orig_ln)
             for p in self.passes:
                 if p.pattern.search(full_line):
-                    self.logger.debug(f"Running pass: {p.name or p.fn.__name__}")
                     p.fn(state, self.logger)
                     break  # first match wins
+
+class NameList:
+    def __init__(self) -> None:
+        """
+        Class to hold infomation on namelist variables:
+        * self.name : namelist name
+        * self.group : the group the namelist variable belongs to
+        * self.if_blocks : list of number lines that if statments where the namelist variable is present in
+        * self.variable : a pointer to a Variable class
+        * self.filepath : file where namelist variable was found
+        """
+        self.name: str = ""
+        self.group: str = ""
+        self.if_blocks: list[FlatIfs] = []
+        self.variable: Optional[Variable] = None
+        self.ln: int = -1
+        self.filepath: str = ""
+
+    def __str__(self) -> str:
+        type_str = self.variable.type if self.variable else ""
+        val = self.variable.default_value if self.variable else "N/A"
+        return f"nml: {type_str} {self.name} {self.group} {val}"
+
+    def __repr__(self) -> str:
+        type_str = self.variable.type if self.variable else ""
+        return f"Namelist(type={type_str},name={self.name},group={self.group})"
+
+    def __eq__(self,other) -> bool:
+        return self.name == other.name
+
+
+class Precedence(Enum):
+    _ = 0
+    LOWEST = 1
+    EQUALS = 2
+    LESSGREATER = 3
+    SUM = 4
+    PRODUCT = 5
+    PREFIX = 6
+    BOUNDS = 7
+    CALL = 8
+

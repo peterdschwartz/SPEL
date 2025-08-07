@@ -19,9 +19,9 @@ from scripts.types import LineTuple, LogicalLineIterator, ReadWrite
 if TYPE_CHECKING:
     from scripts.analyze_subroutines import Subroutine
 
+from scripts.config import _bc
 from scripts.fortran_parser.lexer import Lexer
 from scripts.logging_configs import get_logger
-from scripts.mod_config import _bc
 from scripts.utilityFunctions import Variable, lineContinuationAdjustment
 
 regex_do_start = re.compile(r"^\s*(\w+\s*:)?\s*do\b", re.IGNORECASE)
@@ -53,6 +53,46 @@ def in_loop(line_no: int, loop: Loop) -> bool:
     return loop.start < line_no < loop.end
 
 
+
+def get_do_blocks(sub: Subroutine):
+    """
+    Collects and groups the if-blocks (if, else if, else) within a Fortran subroutine into chains.
+
+    Parameters:
+    sub (Subroutine): The subroutine object containing the lines of code.
+
+    """
+    lines = sub.sub_lines
+    loops: list[Loop] = []
+    line_it = LogicalLineIterator(lines, "DoIter")
+
+    for full_line, _ in line_it:
+        start_index = line_it.start_index
+        orig_ln = line_it.lines[start_index].ln
+
+        # Check for possible if constructs
+        m_start = regex_do_start.search(full_line)
+
+        if m_start:
+            # kind = IfType.IF if m_start.group(2) else IfType.SIMPLE
+            if m_start.group(2):
+                _, cur_idx = line_it.consume_until(regex_do_end, regex_do_end)
+                block = [ lpair for lpair in line_it.lines[start_index:cur_idx+1]]
+                line_it = LogicalLineIterator(lines=block,log_name="get_do_loops")
+                lexer = Lexer(line_it)
+                parser = Parser(lexer)
+                program = parser.parse_program()
+
+                block = [ f"{lpair.ln}  {lpair.line}" for lpair in line_it.lines[start_index:cur_idx+1]]
+                block_txt = "\n".join(block)
+                sub.logger.info(f"\n{block_txt}")
+                for stmt in program.statements:
+                    print(stmt)
+
+    sub.loops = loops
+    return loops
+
+
 def get_loops(sub: Subroutine):
     """
     Function
@@ -78,12 +118,11 @@ def get_loops(sub: Subroutine):
         if m_enddo:
             nested -= 1
             end_lns.append(orig_ln)
-
             end_ln = end_lns.pop()
             start_ln = start_lns.pop()
             loops.append(Loop(do_line, start_ln.ln, end_ln, start_ln.kind, sub, nested))
 
-    input: list[str] = [l.line for l in loops]
+    input: list[str] = [ l.line for l in loops]
     input_str = "\n".join(input)
 
     lex = Lexer(input=input_str)
@@ -279,21 +318,21 @@ class Loop(object):
             access = self.local_vars[pfilter]
             for rw in access:
                 filter_accesses.append(rw)
-        inputs = [x.ltuple.line for x in filter_accesses]
-        input_str = "\n".join(inputs)
-        self.infer_filter_index_map(input_str, regex_filter)
+        inputs = [x.ltuple for x in filter_accesses]
+        self.infer_filter_index_map(inputs, regex_filter)
 
         self.filter = [aliases.get(f, f) for f in self.filter]
 
         return
 
-    def infer_filter_index_map(self, input: str, pattern: re.Pattern):
+    def infer_filter_index_map(self, input: list[LineTuple], pattern: re.Pattern):
         """
         Function to find global index mapped to loop index.
         """
 
         logger = self.sub.logger
-        lexer = Lexer(input)
+        line_it = LogicalLineIterator(lines=input)
+        lexer = Lexer(line_it)
         parser = Parser(lexer)
         program = parser.parse_program()
         for stmt in program.statements:
@@ -467,7 +506,7 @@ class Loop(object):
         lines_adjusted is a dictionary to keep track of line insertions into a subroutine
         to appropriately adjust where the loops start.
         """
-        from mod_config import _bc
+        from config import _bc
 
         total_loops = self.nested + 1
         ifile = open(f"{self.file}", "r")
