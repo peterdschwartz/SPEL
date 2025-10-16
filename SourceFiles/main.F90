@@ -19,7 +19,7 @@ use nc_io, only: nc_read_timeslices, io_constants, io_inputs, io_outputs
 !=======================================!
 implicit none
 type(bounds_type)  ::  bounds_clump, bounds_proc
-integer :: beg = 1, fin = 10, p, nclumps, nc, step
+integer :: beg = 1, fin = 10, p, nclumps, nc
 integer :: err
 #if _CUDA
 integer(kind=cuda_count_kind) :: heapsize, free1, free2, total
@@ -66,10 +66,8 @@ end block
 call elm_init(nsets, pproc_input, dtime_mod, year_curr, bounds_proc)
 
 declin = -0.4030289369547867
-step = 0
 
 #ifdef _OPENACC
-if (step == 0) then
    call init_proc_clump_info()
    call update_params_acc()
 
@@ -79,18 +77,12 @@ if (step == 0) then
 
    call get_proc_bounds(bounds_proc)
    ! Calculate filters on device
-end if
 #endif
 !$acc enter data copyin( doalb, declinp1, declin )
 !$acc update device(dtime_mod, dayspyr_mod, &
 !$acc    year_curr, mon_curr, day_curr, secs_curr, nstep_mod, thiscalday_mod &
 !$acc  , nextsw_cday_mod, end_cd_mod, doalb )
 
-! Note: should add these to writeConstants in the future (as arguments?)
-!$acc serial
-declin = -0.4023686267583503
-declinp1 = -0.4023686267583503
-!$acc end serial
 
 #ifdef _OPENACC
 #define gpuflag 1
@@ -100,23 +92,28 @@ declinp1 = -0.4023686267583503
 
 nclumps = procinfo%nclumps
 
-do while (.true.)
+block
+    integer :: step = 0
+    integer :: max_step = 1000
+    do while (.true.)
 
-   call read_elmtypes(io_inputs, bounds_proc)
-   if(io_inputs%end_run) exit
+       if (step .ne. 0) then
+          call read_elmtypes(io_inputs, bounds_proc)
+       end if
+       if (io_inputs%end_run) exit
 
-!$acc parallel loop independent gang vector default(present) private(bounds_clump)
-do nc = 1, nclumps
-   call get_clump_bounds(nc, bounds_clump)
-!#CALL_SUB
+       !$acc parallel loop independent gang vector default(present) private(bounds_clump)
+       do nc = 1, nclumps
+          call get_clump_bounds(nc, bounds_clump)
+          !#CALL_SUB
 
-end do
+       end do
 
-   call write_elmtypes(io_outputs, bounds_proc)
-end do
+       call write_elmtypes(io_outputs, bounds_proc)
+       step = step + 1
+    end do
+end block
 
 print *, "Finished: Read ", io_inputs%filenum-1, " files"
-deallocate (clumps, procinfo%cid)
-deallocate (filter, filter_inactive_and_active)
 
 end Program main
