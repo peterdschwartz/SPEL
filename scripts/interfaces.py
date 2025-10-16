@@ -10,7 +10,7 @@ from scripts.types import ArgDesc, ArgType
 if TYPE_CHECKING:
     from scripts.analyze_subroutines import Subroutine
 
-from scripts.mod_config import ELM_SRC, _bc
+from scripts.config import ELM_SRC, _bc
 from scripts.types import PointerAlias
 from scripts.utilityFunctions import Variable
 
@@ -35,8 +35,6 @@ def match_input_arguments(l_args, sub: Subroutine, special, verbose=False):
     for arg in test_args:
         if arg.optional:
             num_optional_args += 1
-    if verbose:
-        print(f"{sub.name}:: {num_optional_args} Optional arguments found")
 
     # Keep track of which args can be matched.
     matched = [False] * num_input_args
@@ -45,8 +43,6 @@ def match_input_arguments(l_args, sub: Subroutine, special, verbose=False):
     # Simple check regarding number of arguments first:
     num_dummy_args = len(test_args)
     if num_input_args > num_dummy_args:
-        if verbose:
-            print(f"Too many arguments for {sub.name}")
         return matched  # Too many arguments
     if num_input_args < num_dummy_args - num_optional_args:
         if verbose:
@@ -75,14 +71,10 @@ def match_input_arguments(l_args, sub: Subroutine, special, verbose=False):
             keyword = keyword.strip()
             varname = varname.strip()
             if keyword in test_arg_names:
-                if verbose:
-                    print(f"{sub.name} accepts {keyword} as keyword")
                 matched[argn] = True
                 argn += 1
                 continue
             else:
-                if verbose:
-                    print(f"{sub.name} doesn't support {keyword} as keyword")
                 matching = False
                 continue
 
@@ -97,26 +89,14 @@ def match_input_arguments(l_args, sub: Subroutine, special, verbose=False):
         if same_type and same_dim:
             # This variable should correspond
             # to this dummy argument
-            if verbose:
-                print(f"{input_arg.name} matches {dummy_arg.name}")
             matched[argn] = True
             argn += 1  # go to next argument
         else:
-            if verbose:
-                print(f"{input_arg.name} {input_arg.type} {input_arg.dim}")
-            if verbose:
-                print(
-                    f" does not match \n{dummy_arg.name} {dummy_arg.type} {dummy_arg.dim}"
-                )
             # Check to see if dummy_arg is optional
             # If it is optional, then cycle through the
             # rest of the variables (which should all be optional right?)
             # Assuming no keywords are used
             if dummy_arg.optional:
-                if verbose:
-                    print(
-                        f"{dummy_arg.name} argument is optional and did not match -- Skipping"
-                    )
                 skip += 1
             else:
                 # This subroutine is not a match
@@ -147,9 +127,6 @@ def determine_arg_name(
     var_string = "|".join(matched_vars)
     var_string = f"({var_string})"
 
-    if verbose:
-        print(func_name, args)
-
     arg_vars_list = []
     # Make lists of matched expressions and their location in args.
     matches = [arg for arg in args if re.search(r"\b{}\b".format(var_string), arg)]
@@ -171,8 +148,6 @@ def determine_arg_name(
             m_var_name = matched_arg
 
         arg_to_dtype = PointerAlias(actual_arg.name, m_var_name)
-        if verbose:
-            print(f"{func_name}{arg_to_dtype}")
         arg_vars_list.append(arg_to_dtype)
 
     return arg_vars_list
@@ -234,8 +209,6 @@ def get_interface_procedures(iname: str, verbose: bool = False) -> list[str]:
     """
     Function that finds the potential procedures of an interface
     """
-    if verbose:
-        print(_bc.FAIL + f"Resolving interface for {iname}\n with args: {args}")
     cmd = f'grep -rin --exclude-dir={ELM_SRC}external_models/ -E "^[[:space:]]+(interface {iname})" {ELM_SRC}*'
     output = sp.getoutput(cmd)
 

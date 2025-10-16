@@ -1,7 +1,7 @@
 import subprocess as sp
 from typing import Optional, Tuple
 
-from scripts.mod_config import ELM_SRC
+from scripts.config import ELM_SRC
 
 interface_list: list[str] = []
 

@@ -20,6 +20,7 @@ module test_sub_parse
   integer :: nlevdecomp
   integer,  pointer :: ft_index_bigleaf(:)                      ! array holding the pft index of each competitor
   real(r8), allocatable,target :: veg_rootc_bigleaf(:,:)        ! column-level fine-root biomas kgc/m3
+  real :: array(1:10)
 
 #ifndef DCPL
    integer :: cpp(11:11)
@@ -52,7 +53,31 @@ module test_sub_parse
          procedure, public :: Init  => col_nf_init
    end type
 
+  public :: soil_water_retention_curve_type
+
+  type, abstract :: soil_water_retention_curve_type
+     private
+   contains
+     ! compute hydraulic conductivity
+     procedure(soil_hk_interface), deferred :: soil_hk
+
+     ! compute soil suction potential
+     procedure(soil_suction_interface), deferred :: soil_suction
+
+     ! compute relative saturation at which soil suction is equal to a target value
+     procedure(soil_suction_inverse_interface), deferred :: soil_suction_inverse
+  end type soil_water_retention_curve_type
+
    type(column_nitrogen_flux), target :: col_nf
+
+  type, public :: ConcTransportType
+     !! Type that points to decomposition pools for vertical transport calculations
+
+     real(r8), pointer :: conc_ptr(:,:,:) => null()
+     real(r8), pointer :: src_ptr(:,:,:)  => null()
+     real(r8), pointer :: trcr_tend_ptr(:,:,:) => null()
+  end type ConcTransportType
+  type(ConcTransportType), public, allocatable :: transport_ptr_list(:)
 
    type :: prior_weights_type
      real(r8), allocatable :: pwtcol(:)
@@ -95,6 +120,61 @@ module test_sub_parse
   end interface Tridiagonal
 
 contains
+   subroutine createLitterTransportList()
+      ! This subroutine creates a list that will point to the
+      ! litter/som fields needed for the vertical transport
+      ! calculations.
+
+      implicit none
+
+      integer :: ntype
+
+      ntype = 3
+      if ( use_c13 ) then
+         ntype = ntype+1
+      endif
+      if ( use_c14 ) then
+         ntype = ntype+1
+      endif
+
+      allocate(transport_ptr_list(ntype))
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      ! C
+      transport_ptr_list(1)%conc_ptr        => col_cs%decomp_cpools_vr
+      transport_ptr_list(1)%src_ptr         => col_cf%decomp_cpools_sourcesink
+      transport_ptr_list(1)%trcr_tend_ptr   => col_cf%decomp_cpools_transport_tendency
+      ! N
+      transport_ptr_list(2)%conc_ptr        => col_ns%decomp_npools_vr
+      transport_ptr_list(2)%src_ptr         => col_nf%decomp_npools_sourcesink
+      transport_ptr_list(2)%trcr_tend_ptr   => col_nf%decomp_npools_transport_tendency
+      ! P
+      transport_ptr_list(3)%conc_ptr        => col_ps%decomp_ppools_vr
+      transport_ptr_list(3)%src_ptr         => col_pf%decomp_ppools_sourcesink
+      transport_ptr_list(3)%trcr_tend_ptr   => col_pf%decomp_ppools_transport_tendency
+      ! c13 and c14 if there
+      if(use_c14 .and. use_c13) then
+         !
+         transport_ptr_list(4)%conc_ptr       => c13_col_cs%decomp_cpools_vr
+         transport_ptr_list(4)%src_ptr        => c13_col_cf%decomp_cpools_sourcesink
+         transport_ptr_list(4)%trcr_tend_ptr  => c13_col_cf%decomp_cpools_transport_tendency
+         !
+         transport_ptr_list(5)%conc_ptr       => c14_col_cs%decomp_cpools_vr
+         transport_ptr_list(5)%src_ptr        => c14_col_cf%decomp_cpools_sourcesink
+         transport_ptr_list(5)%trcr_tend_ptr  => c14_col_cf%decomp_cpools_transport_tendency
+      else
+         if(use_c13) then
+            transport_ptr_list(4)%conc_ptr       => c13_col_cs%decomp_cpools_vr
+            transport_ptr_list(4)%src_ptr        => c13_col_cf%decomp_cpools_sourcesink
+            transport_ptr_list(4)%trcr_tend_ptr  => c13_col_cf%decomp_cpools_transport_tendency
+         end if
+         if (use_c14) then
+            transport_ptr_list(4)%conc_ptr       => c14_col_cs%decomp_cpools_vr
+            transport_ptr_list(4)%src_ptr        => c14_col_cf%decomp_cpools_sourcesink
+            transport_ptr_list(4)%trcr_tend_ptr  => c14_col_cf%decomp_cpools_transport_tendency
+         end if
+      end if
+
+   end subroutine createLitterTransportList
 
    subroutine allocInit(bounds)
       type(bounds_type), intent(in) :: bounds
@@ -153,6 +233,108 @@ function constructor(bounds) result(this)
     allocate(this%m_n_to_litr_lig_fire            (begc:endc,1:nlevdecomp_full)) ; this%m_n_to_litr_lig_fire           (:,:) = spval
   end subroutine col_nf_init
 
+    integer function shr_pio_getindex_fromid(compid) result(index)
+     implicit none
+     integer, intent(in) :: compid
+     integer :: i
+
+     index = -1
+     do i=1,total_comps
+        if(io_compid(i)==compid) then
+          index = i
+          exit
+       end if
+    end do
+
+    if(index<0) then
+       call shr_sys_abort('shr_pio_getindex :: compid out of allowed range')
+    end if
+  end function shr_pio_getindex_fromid
+
+
+  integer function shr_pio_getindex_fromname(component) result(index)
+     use shr_string_mod, only : shr_string_toupper
+
+     implicit none
+
+     ! 'component' must be equal to some element of io_compname(:)
+     ! (but it is case-insensitive)
+     character(len=*), intent(in) :: component
+
+     character(len=len(component)) :: component_ucase
+     integer :: i
+
+     ! convert component name to upper case in order to match case in io_compname
+     component_ucase = shr_string_toUpper(component)
+
+     index = -1  ! flag for not found
+     do i=1,size(io_compname)
+        if (trim(component_ucase) == trim(io_compname(i))) then
+           index = i
+           exit
+        end if
+     end do
+    if(index<0) then
+       call shr_sys_abort(' shr_pio_getindex:: compid out of allowed range')
+    end if
+   end function shr_pio_getindex_fromname
+
+  function get_gamma_A(ivt_in, elai240_in,elai_in,nclass_in)
+
+    ! Activity factor for leaf age (Guenther et al., 2006)
+    !-----------------------------
+    ! If bgc not active, then elai is constant therefore gamma_a=1.0
+    ! gamma_a set to unity for evergreens (Patches 1, 2, 4, 5)
+    ! Note that we assume here that the time step is shorter than the number of 
+    !days after budbreak required to induce isoprene emissions (ti=12 days) and 
+    ! the number of days after budbreak to reach peak emission (tm=28 days)
+    !
+    ! !ARGUMENTS:
+    implicit none
+    integer,intent(in)  :: ivt_in
+    integer,intent(in)  :: nclass_in
+    real(r8),intent(in) :: elai240_in
+    real(r8),intent(in) :: elai_in
+    !
+    ! !LOCAL VARIABLES:
+    real(r8) :: get_gamma_A
+    real(r8) :: elai_prev               ! lai for previous timestep
+    real(r8) :: fnew, fgro, fmat, fold  ! fractions of leaves at different phenological stages
+    !-----------------------------------------------------------------------
+    !if ( (ivt_in == ndllf_dcd_brl_tree) .or. (ivt_in >= nbrdlf_dcd_trp_tree) ) then  ! non-evergreen
+    if ( (woody(ivt_in) == 1.0_r8) .and. (evergreen(ivt_in) <= 0) ) then  ! non-evergreen tree
+       
+       if ( (elai240_in > 0.0_r8) .and. (elai240_in < 1.e30_r8) )then 
+          elai_prev = 2._r8*elai240_in-elai_in  ! have accumulated average lai over last timestep
+          if (elai_prev == elai_in) then
+             fnew = 0.0_r8
+             fgro = 0.0_r8
+             fmat = 1.0_r8
+             fold = 0.0_r8
+          else if (elai_prev > elai_in) then
+             fnew = 0.0_r8
+             fgro = 0.0_r8
+             fmat = 1.0_r8 - (elai_prev - elai_in)/elai_prev
+             fold = (elai_prev - elai_in)/elai_prev
+          else if (elai_prev < elai_in) then
+             fnew = 1 - (elai_prev / elai_in)
+             fgro = 0.0_r8
+             fmat = (elai_prev / elai_in)
+             fold = 0.0_r8
+          end if
+          
+          get_gamma_A = fnew*Anew(nclass_in) + fgro*Agro(nclass_in) + fmat*Amat(nclass_in) + fold*Aold(nclass_in)
+
+       else
+          get_gamma_A = 1.0_r8
+       end if
+       
+    else
+       get_gamma_A = 1.0_r8
+    end if
+    
+  end function get_gamma_A
+
    subroutine test_parsing_sub(bounds, var1, var2, input4, var3)
 
       type(bounds_type), intent(in) :: bounds
@@ -175,13 +357,14 @@ function constructor(bounds) result(this)
 
    end subroutine test_parsing_sub
 
-   subroutine call_sub(numf, bounds, mytype)
+   subroutine call_sub(numf, bounds, mytype, patch_state_updater)
       use shr_const_mod, only : test_type
       use constants_mod, only : i_const, param2
 
       integer, intent(in) :: numf
       type(bounds_type), intent(in) :: bounds
       type(test_type), INTENT(INOUT) :: mytype
+      type(patch_state_updater_type), intent(inout) :: patch_state_updater
 
       real(r8) :: input1, input2(bounds%begg:bounds%endg), input3
       real(r8) :: local_var
@@ -198,16 +381,22 @@ function constructor(bounds) result(this)
 
       associate( &
         hrv_deadstemn_to_prod10n  => col_nf%hrv_deadstemn_to_prod10n, &
+        psu => patch_state_updater, &
         field1 => mytype%field1 &
       )
 
       i_type = i_const - 3
 
+      psu%dwt(:) = 19.8
       if (use_fates) then 
          do i =1, elm_fates%num
             elm_fates%field(i) = field1(i)
          end do
         ft_index_bigleaf(c) = field1(c)
+      elseif(c == 4) then 
+         if (i_type == four) then 
+            soilc(1) = four
+         end if 
       end if
 
       select case (i_type)
@@ -239,6 +428,7 @@ function constructor(bounds) result(this)
 
       end associate
 
+      if(.true.) field1(c) = SHR_CONST_PI
    end subroutine call_sub
 
    subroutine trace_dtype_example(mytype2, col_nf_inst, flag)
@@ -249,6 +439,8 @@ function constructor(bounds) result(this)
       associate(&
           field1 => mytype2%field1,&
           field2 => mytype2%field2,&
+          !
+
           field3 => mytype2%field3,&
           field4 => mytype2%field4,&
           hrv => col_nf_inst%hrv_deadstemn_to_prod10n &

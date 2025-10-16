@@ -1,28 +1,10 @@
 import re
 import sys
 from logging import Logger
-from typing import Optional
 
-import scripts.dynamic_globals as dg
-from scripts.analyze_subroutines import Subroutine
-from scripts.fortran_parser.evaluate import check_keyword, parse_subroutine_call
-from scripts.mod_config import spel_output_dir
-from scripts.types import (
-    ArgLabel,
-    CallDesc,
-    FunctionReturn,
-    ParseState,
-    PreProcTuple,
-    ReadWrite,
-    SubInit,
-)
-from scripts.utilityFunctions import (
-    check_cpp_line,
-    comment_line,
-    intrinsic_type,
-    line_unwrapper,
-    split_func_line,
-)
+from scripts.config import spel_output_dir
+from scripts.types import FunctionReturn, ParseState, PreProcTuple, SubInit
+from scripts.utilityFunctions import intrinsic_type, split_func_line
 
 
 def check_function_start(
@@ -34,10 +16,10 @@ def check_function_start(
     Function to parse function start for result type and name
     """
 
-    func_name = "check_function_start::"
-
     split_line = split_func_line(line)
     regex = re.compile(r"(?<=\()[\w\s,]+(?=\))")
+    reg_res = re.compile(r"result\s*\(\w+\)")
+    regex_paren = re.compile(r"\((.+)\)")  # for removing array of struct index
 
     func_type, func_keyword, func_rest = split_line
     if func_type:
@@ -46,8 +28,17 @@ def check_function_start(
             func_type = regex.search(func_type).group()
         else:
             func_type = intrinsic_type.search(func_type).group()
+        args_and_res = regex.findall(func_rest)
+        m_ = reg_res.search(func_rest)
         func_name = func_rest.split("(")[0].strip()
-        func_result = func_name
+        if m_:
+            res = regex_paren.search(m_.group())
+            res = res.group().strip()
+            res = res[1:-1]
+            func_result = res
+        else:
+            func_result = func_name
+
     else:
         # is it worth getting this here or after local variables are parsed?
         func_type = ""

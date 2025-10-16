@@ -1,24 +1,16 @@
 import logging
-import sys
-from pprint import pprint
 
 import scripts.dynamic_globals as dg
 from scripts.aggregate import aggregate_dtype_vars
 from scripts.analyze_subroutines import Subroutine
+from scripts.config import (default_mods, scripts_dir, spel_mods_dir,
+                            spel_output_dir, unittests_dir)
 from scripts.DerivedType import DerivedType
 from scripts.fortran_modules import FortranModule, get_filename_from_module
 from scripts.helper_functions import construct_call_tree
 from scripts.logging_configs import get_logger
-from scripts.LoopConstructs import get_loops
-from scripts.mod_config import (
-    _bc,
-    default_mods,
-    scripts_dir,
-    spel_mods_dir,
-    spel_output_dir,
-    unittests_dir,
-)
-from scripts.refactor_tools import compress_on_filter, prune_associate_clause
+from scripts.nml.analyze_ifs import get_if_blocks
+from scripts.nml.analyze_namelist import find_all_namelist, find_nml_ifs
 from scripts.utilityFunctions import Variable
 from scripts.variable_analysis import determine_global_variable_status
 
@@ -115,6 +107,12 @@ def create_unit_test(sub_names: list[str], casename: str, keep: bool) -> None:
         for utype, dtype in mod.defined_types.items():
             type_dict[utype] = dtype
 
+    intrinsic_types = {"real", "integer", "character", "logical", "complex"}
+    for mod in mod_dict.values():
+        for var in mod.global_vars.values():
+            if var.type not in intrinsic_types and var.type in type_dict:
+                type_dict[var.type].instances[var.name] = var
+
     for dtype in type_dict.values():
         dtype.find_instances(mod_dict)
 
@@ -137,11 +135,6 @@ def create_unit_test(sub_names: list[str], casename: str, keep: bool) -> None:
         sub_dict=main_sub_dict,
         type_dict=type_dict,
     )
-
-    # if "lakefluxes" in main_sub_dict:
-    #     lakefluxes = main_sub_dict["lakefluxes"]
-    #     compress_on_filter(sub=lakefluxes)
-    #     sys.exit(0)
 
     aggregate_dtype_vars(
         sub_dict=main_sub_dict,
@@ -173,7 +166,6 @@ def create_unit_test(sub_names: list[str], casename: str, keep: bool) -> None:
     file_list = [get_filename_from_module(m) for m in ordered_mods]
     wr.generate_cmake(files=file_list, case_dir=case_dir)
 
-    logger.info(f"Call Tree for {case_dir}")
     for sub in subroutines.values():
         if sub.abstract_call_tree:
             sub.abstract_call_tree.print_tree()
@@ -193,7 +185,7 @@ def create_unit_test(sub_names: list[str], casename: str, keep: bool) -> None:
             childsub = main_sub_dict[subnode.node.subname]
             unittest_global_vars.update(childsub.active_global_vars)
 
-    # Generate/modify FORTRAN files needed to initialize and run Unit Test
+    # # Generate/modify FORTRAN files needed to initialize and run Unit Test
     wr.prepare_unit_test_files(
         type_dict=type_dict,
         case_dir=case_dir,
@@ -227,6 +219,8 @@ def create_unit_test(sub_names: list[str], casename: str, keep: bool) -> None:
         os.system(cmd)
 
     pickle_unit_test(mod_dict, main_sub_dict, type_dict)
+    # Clean-up
+    os.system(f"rm {spel_output_dir}/*.F90")
 
     return None
 
@@ -246,9 +240,18 @@ def process_subroutines_for_unit_test(
     fut_subs: set[str] = {
         sub.name for sub in sub_dict.values() if sub.unit_test_function
     }
+    nml_dict = find_all_namelist()
 
+    active_global_variables: dict[str, Variable] = {}
     for sub in sub_dict.values():
         determine_global_variable_status(mod_dict, sub)
+        active_global_variables.update(sub.active_global_vars)
+
+    nml_dict = {
+        k: nml_dict[k] for k in nml_dict.keys() & active_global_variables.keys()
+    }
+    for nml in nml_dict:
+        nml_dict[nml].variable = active_global_variables[nml]
 
     for dtype in type_dict.values():
         if dtype.init_sub_name:
@@ -274,10 +277,12 @@ def process_subroutines_for_unit_test(
                 childsub = sub_dict[subname]
                 if childsub.library:
                     continue
-                if not childsub.args_analyzed:
+                if not childsub.args_analyzed and childsub.arguments:
                     childsub.parse_arguments(sub_dict, type_dict)
                 if not childsub.global_analyzed:
                     childsub.analyze_variables(sub_dict, type_dict)
+                if not childsub.ifs_analyzed:
+                    get_if_blocks(childsub)
 
     for sub in sub_dict.values():
         sub.match_arg_to_inst(type_dict)
@@ -286,6 +291,8 @@ def process_subroutines_for_unit_test(
         if sub.elmtype_access_by_ln:
             sub.summarize_readwrite()
 
+    if nml_dict:
+        find_nml_ifs(sub_dict, nml_dict)
     # for subname in fut_subs:
     #     sub = sub_dict[subname]
     #     prune_associate_clause(sub)
@@ -295,7 +302,6 @@ def process_subroutines_for_unit_test(
 
 if __name__ == "__main__":
     try:
-        print("CALLING MAIN")
         create_unit_test()
     except Exception as e:
         import traceback

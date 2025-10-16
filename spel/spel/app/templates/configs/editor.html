@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block body %}
+{% include 'banner.html' %}
+<h1>Configuration: {{ config.name }}</h1>
+
+<div class="config-toolbar">
+  <button class="styled-button" hx-post="{% url 'recompute_if_evals' config.id %}" hx-swap="none">
+    Recompute IFs
+  </button>
+</div>
+
+<table class="config-table">
+  <thead>
+    <tr>
+      <th>Variable</th>
+      <th>Type</th>
+      <th>Module</th>
+      <th>Value</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    {% include "configs/row.html" with ig=row.ig key=row.key dtype=row.dtype current=row.current %}
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

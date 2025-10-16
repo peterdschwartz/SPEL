@@ -1,6 +1,6 @@
 """
-Python Module that collects functions that 
-have broad utility for several modules in SPEL 
+Python Module that collects functions that
+have broad utility for several modules in SPEL
 """
 
 from __future__ import annotations
@@ -10,18 +10,24 @@ import re
 import subprocess as sp
 import sys
 from collections import namedtuple
+from pprint import pprint
 from typing import TYPE_CHECKING, List, Pattern, Tuple
 
-from scripts.types import LineTuple
+from scripts.fortran_parser.lexer import Lexer
+from scripts.fortran_parser.spel_ast import VariableDecl
+from scripts.fortran_parser.spel_parser import Parser
+from scripts.types import LineTuple, LogicalLineIterator
 
 if TYPE_CHECKING:
     from scripts.analyze_subroutines import Subroutine
 
+from scripts.config import ELM_SRC, _bc
 from scripts.fortran_parser.tracing import Trace
-from scripts.mod_config import ELM_SRC, _bc
 
 # Regular Expressions
-find_type = re.compile(r"(?<=\()\s*\w+\s*(?=\))")  # Matches type(user-type) -> user-type
+find_type = re.compile(
+    r"(?<=\()\s*\w+\s*(?=\))"
+)  # Matches type(user-type) -> user-type
 # Match any variable declarations
 find_variables = re.compile(
     r"^(class\s*\(|type\s*\(|integer|real|logical|character|complex)", re.IGNORECASE
@@ -43,6 +49,7 @@ regex_bounds = re.compile(r"(?<=(\w|\s))\(.+\)")
 # for preprocessed and original files
 PreProcTuple = namedtuple("PreProcTuple", ["cpp_ln", "ln"])
 
+
 class Variable(object):
     """
     Class to hold information on the variable declarations in a subroutine
@@ -59,12 +66,12 @@ class Variable(object):
 
     def __init__(
         self,
-        type:str,
-        name:str,
+        type: str,
+        name: str,
         subgrid: str,
         ln: int,
         dim: int,
-        parameter:bool=False,
+        parameter: bool = False,
         declaration="",
         optional=False,
         keyword="",
@@ -74,6 +81,7 @@ class Variable(object):
         bounds="",
         ptrscalar=False,
         intent="",
+        value="",
     ):
         self.type: str = type
         self.name: str = name
@@ -95,7 +103,6 @@ class Variable(object):
             self.declaration: str = ""
         self.active: bool = active
         self.private: bool = private
-        self.default_value = None
         self.pointer: list[str] = pointer.copy()
         self.bounds: str = bounds
         self.ptrscalar = ptrscalar
@@ -104,6 +111,7 @@ class Variable(object):
         if self.dim > 0 and not self.bounds:
             self.allocatable = True
 
+        self.default_value = value
 
     def __eq__(self, other):
         if (
@@ -116,45 +124,17 @@ class Variable(object):
             return False
 
     def __str__(self):
-        if self.dim > 0:
-            return f"{self.type} {self.name} {self.bounds}"
-        else:
-            return f"{self.type} {self.name}"
+        return f"{self.type} {self.name} {self.dim}-D {self.bounds}"
 
     def __repr__(self):
-        if self.dim > 0:
-            return f"Variable({self.type} {self.name} {self.bounds})"
-        else:
-            return f"Variable({self.type} {self.name})"
-    
+        return f"Variable({self.type} {self.name} {self.bounds})"
+
     def copy(self):
         return copy.deepcopy(self)
 
     def printVariable(self, ofile=sys.stdout):
         ofile.write(f"{self}\n")
 
-
-def comment_line(lines: list[LineTuple], ct: int, verbose:bool=False):
-    """
-    Function comments out lines accounting for line continuation
-    """
-    newline = lines[ct]
-    # Get first non-whitespace character:
-    str_ = newline.strip()[0]
-    if not str_:
-        print("comment_line :: Error - Empty line")
-
-    newline = newline.replace(str_, comment_ + str_, 1)
-    lines[ct] = newline
-    continuation = bool(newline.strip("\n").strip().endswith("&"))
-    while continuation:
-        ct += 1
-        newline = lines[ct]
-        str_ = newline.split()[0]
-        newline = newline.replace(str_, comment_ + str_, 1)
-        lines[ct] = newline
-        continuation = bool(newline.strip("\n").strip().endswith("&"))
-    return lines, ct
 
 def split_func_line(line):
     """
@@ -166,7 +146,7 @@ def split_func_line(line):
 
     split_line = regex_func.split(line)
     split_line = [s.strip() for s in split_line]
-    split_line[0] = regex_remove.sub("",split_line[0]).strip()
+    split_line[0] = regex_remove.sub("", split_line[0]).strip()
 
     if len(split_line) != 3 or split_line[1].strip() != "function":
         print(f"{func_name}Split Failed", split_line)
@@ -187,9 +167,9 @@ def removeBounds(line, verbose=False):
     """
     cc = r"[ a-zA-Z0-9%\-\+]*?:[ a-zA-Z0-9%\-\+]*?"
     non_greedy1D = re.compile(r"\({}\)".format(cc))
-    non_greedy2D = re.compile(r"\({},{}\)".format(cc,cc))
-    non_greedy3D = re.compile(r"\({},{},{}\)".format(cc,cc,cc))
-    non_greedy4D = re.compile(r"\({},{},{},{}\)".format(cc,cc,cc,cc))
+    non_greedy2D = re.compile(r"\({},{}\)".format(cc, cc))
+    non_greedy3D = re.compile(r"\({},{},{}\)".format(cc, cc, cc))
+    non_greedy4D = re.compile(r"\({},{},{},{}\)".format(cc, cc, cc, cc))
     regex_array_as_index = re.compile(r"\w+\s*\([,\w+\*-]+\)", re.IGNORECASE)
     # ng_array_ind = re.compile(r'(?<=\w)\s*(\(.+?\))')
     ng_array_ind = re.compile(r"(?<=\w)\s*\(([^()]*|(?:\([^()]*\))*)\)")
@@ -241,7 +221,7 @@ def removeBounds(line, verbose=False):
 
 
 @Trace.trace_decorator("getArguments")
-def getArguments(full_line, verbose=False)->List[str]:
+def getArguments(full_line, verbose=False) -> List[str]:
     """
     Function that takes a string of the subroutine call
     as an argument and returns the variables
@@ -305,23 +285,25 @@ def lineContinuationAdjustment(lines, ln, verbose=False):
 
     return l, lines_to_skip
 
-def unwrap_section(lines: list[str], startln: int)->list[LineTuple]:
+
+def unwrap_section(lines: list[str], startln: int) -> list[LineTuple]:
     """
     lines: list of fortran lines to adjust for lineconinuation
     startln: line number for first line in lines in the file.
     """
     fline_list: list[LineTuple] = []
-    ln: int = 0
-    while ln < len(lines):
-        full_line, new_ln = line_unwrapper(lines, ln)
-        if(full_line):
-            statements = full_line.split(";")
-            for stmt in statements:
-                fline_list.append(LineTuple(line=stmt.strip(),ln=ln))
+    line_it = LogicalLineIterator(
+        lines=[LineTuple(line=line, ln=i) for i, line in enumerate(lines)]
+    )
+    for full_line, new_ln in line_it:
+        ln = line_it.get_start_ln()
+        if ln > startln and full_line:
+            for stmt in full_line.split(';'):
+                fline_list.append(LineTuple(line=stmt, ln=ln))
         ln = new_ln + 1
 
-    fline_list = [ LineTuple(line=f.line,ln=f.ln+startln) for f in fline_list ]
     return fline_list
+
 
 def find_end_subroutine(fn, startline):
     """
@@ -424,7 +406,7 @@ def get_interface_list():
     """
     returns a list of all interfaces
 
-    NOTE:  Should store it in mod_config so it's only run once per
+    NOTE:  Should store it in config so it's only run once per
            Unit Test creation
     """
 
@@ -440,172 +422,19 @@ def get_interface_list():
     return interface_list
 
 
-def getLocalVariables(sub: Subroutine, verbose=False, class_var=False):
-    """
-    this function will retrieve  the local variables from
-    the subroutine at startline, endline in the given file
+def get_local_variables(sub: Subroutine):
+    lines = sub.sub_lines[1:]
+    local_var_lines = [
+        lpair for lpair in filter(lambda x: find_variables.search(x.line), lines)
+    ]
+    local_variables = parse_variable_decl(local_var_lines, mod_name=sub.name)
 
-    """
-    func_name = "getLocalVariables"
-
-    lines = sub.sub_lines
-
-    args_present = bool(sub.dummy_args_list)
-    if verbose:
-        fileinfo = sub.get_file_info()
-        print(f"{func_name}::{fileinfo}")
-
-    cc = "."
-    # non-greedy capture
-    ng_regex_array = re.compile(r"\w+?\s*\({}+?\)".format(cc))
-    if args_present:
-        arg_string = "|".join(sub.dummy_args_list)
-        find_arg = re.compile(r"\b({})\b".format(arg_string), re.IGNORECASE)
-        if verbose:
-            print(f"{func_name}::arg_string\n{arg_string}")
-    else:
-        match_arg = None
-
-    class_var = re.compile(r"^(class\s*\()", re.IGNORECASE)
-    find_variables = re.compile(
-        r"^(class\s*\(|type\s*\(|integer|real|logical|character)", re.IGNORECASE
-    )
-    regex_var = re.compile(r"\w+")
-    regex_subgrid_index = re.compile(r"(?<=bounds\%beg)[a-z]", re.IGNORECASE)
-    # test for intrinsic data types or user defined
-    intrinsic_type = re.compile(r"^(integer|real|logical|character)", re.IGNORECASE)
-    user_type = re.compile(r"^(class\s*\(|type\s*\()", re.IGNORECASE)
-    ng_array_ind = re.compile(r"(?<=\w)\s*(\(.+?\))")
-
-    for line_pair in lines:
-        ln = line_pair.ln
-        line = line_pair.line
-
-        match_variable = find_variables.search(line)
-
-        if match_variable:
-            # Track variable declaration start / end
-            if sub.var_declaration_startl == 0:
-                sub.var_declaration_startl = ln
-            # store everytime we find a variable declaration
-            sub.var_declaration_endl = ln
-            if "::" not in line:
-                # Repeated code here, could be simplified? Need to check if variable declarations w/o '::'
-                # have more syntax restrictions.
-                m_type = intrinsic_type.search(line)
-                if m_type:
-                    data_type = m_type.group()
-                else:  # user-defined type
-                    m_type = user_type.search(line)
-                    if not m_type:
-                        sub.logger.error(f"{func_name}::Error Can't Identify Data Type for {line}")
-                        sys.exit(1)
-                    data_type = find_type.search(line).group()
-
-                temp_vars = intrinsic_type.sub("", line)
-                temp_decl = line.replace(temp_vars,"")
-            else:
-                # Could be a list of variables
-                temp_decl = line.split("::")[0]
-                temp_vars = line.split("::")[1]
-
-                # Get data type first
-                m_type = intrinsic_type.search(temp_decl)
-                if m_type:
-                    data_type = m_type.group()
-                else:  # user-defined type
-                    m_type = user_type.search(temp_decl)
-                    if not m_type:
-                        print(
-                            f"{func_name}::Error: Can't Identify Data Type for {line}"
-                        )
-                        sys.exit(1)
-                    data_type = find_type.search(temp_decl).group()
-            match_class = class_var.search(line)
-            if match_class:
-                sub.class_method = True
-                sub.class_type = data_type
-
-            parameter = bool("parameter" in temp_decl.lower())
-            #
-            # Go through and replace all arrays first
-            #
-            match_arrays = ng_regex_array.findall(temp_vars)
-            if match_arrays:
-                for arr in match_arrays:
-                    bounds = ng_array_ind.search(arr).group()
-                    varname = regex_var.search(arr).group()
-                    index = regex_subgrid_index.search(arr)
-                    if index:
-                        subgrid = index.group()
-                    else:
-                        subgrid = "?"
-                    # Storing line number of declaration
-                    dim = arr.count(",") + 1
-                    # Test if variable is same as a dummy argument
-                    if args_present:
-                        match_arg = find_arg.search(varname)
-                    if match_arg:
-                        if "optional" in temp_decl:
-                            optional = True
-                        else:
-                            optional = False
-                        if parameter:
-                            print("ERROR:Arguments can't be parameters")
-                            sys.exit(1)
-                        sub.arguments[varname] = Variable(
-                            data_type,
-                            varname,
-                            subgrid,
-                            ln,
-                            dim,
-                            parameter=parameter,
-                            optional=optional,
-                            bounds=bounds,
-                        )
-                    else:
-                        sub.local_variables[varname] = Variable(
-                            data_type,
-                            varname,
-                            subgrid,
-                            ln,
-                            dim,
-                            parameter,
-                            bounds=bounds,
-                        )
-                        sub.local_variables[varname].declaration = line
-                    # This removes the array from the list of variables
-                    temp_vars = temp_vars.replace(arr, "")
-
-            # Get the scalar arguments
-            temp_vars = temp_vars.split(",")
-            temp_vars = [x.strip() for x in temp_vars if x.strip()]
-            for var in temp_vars:
-                if args_present:
-                    match_arg = find_arg.search(var)
-                if match_arg:
-                    if "optional" in temp_decl:
-                        optional = True
-                    else:
-                        optional = False
-                    sub.arguments[var] = Variable(
-                        data_type,
-                        var,
-                        "",
-                        ln,
-                        dim=0,
-                        parameter=parameter,
-                        optional=optional,
-                    )
-                else:
-                    if "=" in var:
-                        var = var.split("=")[0].strip()
-                    sub.local_variables[var] = Variable(
-                        data_type, var, "", ln, dim=0, parameter=parameter
-                    )
-        ln += 1
-
-    return
+    for var in local_variables:
+        var.declaration = sub.module
+        if var.name in sub.dummy_args_list:
+            sub.arguments[var.name] = var
+        else:
+            sub.local_variables[var.name] = var
 
 
 def determine_class_instance(sub, verbose=False):
@@ -685,7 +514,7 @@ def adjust_array_access_and_allocation(local_arrs, sub, dargs=False, verbose=Fal
     import os.path
     import re
 
-    from mod_config import _bc, elm_files, spel_dir
+    from config import _bc, elm_files, spel_dir
 
     # Get lines of this file:
     ifile = open(elm_files + sub.filepath, "r")
@@ -795,18 +624,23 @@ def adjust_array_access_and_allocation(local_arrs, sub, dargs=False, verbose=Fal
 
                         # Make replacement in line: (assumes subgrid is first index!!)
                         # lnew = lnew.replace(f"{v}({subgrid}",f"{v}(f{subgrid}")
-                        lnew = re.sub(r"{}\s*\({}".format(v,subgrid), r"{}(f{}".format(v,subgrid), lnew)
+                        lnew = re.sub(
+                            r"{}\s*\({}".format(v, subgrid),
+                            r"{}(f{}".format(v, subgrid),
+                            lnew,
+                        )
                         replaced = True
 
                     regex_check_index = re.compile(
-                        r"\w+\([,a-z0-9*-]*(({})\(.\))[,a-z+0-9-]*\)".format(v), re.IGNORECASE
+                        r"\w+\([,a-z0-9*-]*(({})\(.\))[,a-z+0-9-]*\)".format(v),
+                        re.IGNORECASE,
                     )
                     match = regex_check_index.search(temp_line)
                     if match:  # array {v} is being used as an index
                         # substitute from the entire line
                         i = regex_indices.search(arr).group()
                         i = r"\({}\)".format(i)
-                        temp_line = re.sub(r"{}{}".format(v,i), v, temp_line)
+                        temp_line = re.sub(r"{}{}".format(v, i), v, temp_line)
                         removing = True
                 m_arr = ng_regex_array.findall(temp_line)
 
@@ -859,11 +693,13 @@ def adjust_array_access_and_allocation(local_arrs, sub, dargs=False, verbose=Fal
             local_var = local_arrs[loc_]
             filter_used = local_var.filter_used + arg.subgrid
             # bounds string:
-            bounds_string = r"(\s*bounds%beg{}\s*:\s*bounds%end{}\s*|\s*beg{}\s*:\s*end{}\s*)".format(arg.subgrid,arg.subgrid,arg.subgrid,arg.subgrid)
+            bounds_string = r"(\s*bounds%beg{}\s*:\s*bounds%end{}\s*|\s*beg{}\s*:\s*end{}\s*)".format(
+                arg.subgrid, arg.subgrid, arg.subgrid, arg.subgrid
+            )
             # string to replace bounds with
             num_filter = "num_" + filter_used.replace("filter_", "")
             num_filter = f"1:{num_filter}"
-            regex_array_arg = re.compile(r"{}\s*\({}".format(arg.name,bounds_string))
+            regex_array_arg = re.compile(r"{}\s*\({}".format(arg.name, bounds_string))
 
             for ln in range(sub.startline, sub.endline):
                 line = lines[ln]
@@ -950,7 +786,7 @@ def adjust_child_sub_arguments(sub, file, lstart, lend, args):
     """
     import os
 
-    from mod_config import _bc, spel_dir
+    from config import _bc, spel_dir
 
     if os.path.exists(spel_dir + f"modified-files/{file}"):
         print(file, "has already been modified")
@@ -971,11 +807,13 @@ def adjust_child_sub_arguments(sub, file, lstart, lend, args):
         regex_arg_type = re.compile(f"{arg.type}", re.IGNORECASE)
         regex_arg_name = re.compile(r"{}\s*\(".format(kw), re.IGNORECASE)
         regex_bounds_full = re.compile(
-            r"({}\s*\()(bounds%beg{})\s*(:)\s*(bounds%end{})\s*(\))".format(kw,arg.subgrid,arg.subgrid),
+            r"({}\s*\()(bounds%beg{})\s*(:)\s*(bounds%end{})\s*(\))".format(
+                kw, arg.subgrid, arg.subgrid
+            ),
             re.IGNORECASE,
         )
         regex_bounds = re.compile(
-            r"({}\s*\(\s*bounds%beg{}[\s:]+\))".format(kw,arg.subgrid), re.IGNORECASE
+            r"({}\s*\(\s*bounds%beg{}[\s:]+\))".format(kw, arg.subgrid), re.IGNORECASE
         )
         for ct in range(lstart - 1, lend):
             #
@@ -1108,7 +946,7 @@ def determine_filter_access(sub, verbose=False):
         )
 
 
-def line_unwrapper(lines: list[str], ct: int, verbose: bool=False) -> Tuple[str, int]:
+def line_unwrapper(lines: list[str], ct: int, verbose: bool = False) -> Tuple[str, int]:
     """
     Function that takes code segment that has line continuations
     and returns it all on one line.
@@ -1134,13 +972,75 @@ def line_unwrapper(lines: list[str], ct: int, verbose: bool=False) -> Tuple[str,
         full_line = full_line[:-1] + simple_l.strip().lower()
         continuation = bool(full_line.endswith("&"))
 
-    # Debug check:
-    if verbose:
-        print("Original lines:\n", lines[ct:newct+1])
-        print("Single line\n:", full_line)
-        print("old, new ln:", ct, newct)
-
     return full_line, newct
+
+
+def parse_variable_decl(lines: list[LineTuple], mod_name: str) -> list[Variable]:
+    """
+    Function
+    """
+    fn = "(parse_variable_decl)"
+    variables = []
+    if not lines:
+        return variables
+    line_it = LogicalLineIterator(lines=lines, log_name="parse_variable_decl")
+    lexer = Lexer(line_it)
+    parser = Parser(lexer, logger=mod_name)
+    program = parser.parse_program()
+    for stmt in program.statements:
+        assert isinstance(stmt, VariableDecl), "Not variable decl"
+        variables.extend(create_var_from_decl(stmt))
+    for v in variables:
+        v.declaration = mod_name
+    return variables
+
+
+def create_var_from_decl(stmt: VariableDecl) -> list[Variable]:
+    """
+    Function that traverses an VariableDecl AST Node and returns and
+    list of Variable instances
+    """
+    variables: list[Variable] = []
+    data_type = stmt.var_type.token_literal()
+    attr_spec = stmt.get_attr_list()
+    parameter = "parameter" in attr_spec
+    private = "private" in attr_spec
+    pointer = "pointer" in attr_spec
+    dim_attr = "dimension" in attr_spec
+    optional = "optional" in attr_spec
+    intent = next((att for att in attr_spec if att.startswith("intent")), "")
+
+    for ent in stmt.entities:
+        bounds = ent.bounds
+        bounds_str = ""
+        init: str = str(ent.init)
+        dim = 0
+        subgrid = "?"
+        if bounds:
+            dim = len(bounds)
+            bounds_str = ent.get_bounds_str()
+            m_subgrid = regex_subgrid_index.search(bounds_str)
+            if m_subgrid:
+                subgrid = m_subgrid.group()
+        elif dim_attr:
+            dim = stmt.attrs.get_dim()
+        variables.append(
+            Variable(
+                type=data_type,
+                name=ent.token_literal(),
+                subgrid=subgrid,
+                ln=stmt.lineno,
+                dim=dim,
+                parameter=parameter,
+                private=private,
+                ptrscalar=pointer,
+                value=init,
+                optional=optional,
+                bounds=bounds_str,
+                intent=intent,
+            )
+        )
+    return variables
 
 
 def parse_line_for_variables(ifile, l, ln, ptr=False, verbose=False):
@@ -1158,7 +1058,7 @@ def parse_line_for_variables(ifile, l, ln, ptr=False, verbose=False):
             # regex to separate type from variable when there is no '::' separator
             ng_type = re.compile(r"^\w+?\s*\(.+?\)")
             match_type = ng_type.search(l)
-            if (match_type):
+            if match_type:
                 # Means there exists a character(len=) or type(.) or real(r8)
                 temp_decl = match_type.group()
                 temp_vars = l.split(temp_decl)[1]
@@ -1174,25 +1074,15 @@ def parse_line_for_variables(ifile, l, ln, ptr=False, verbose=False):
                 sys.exit(1)
             temp_decl = l.split("::")[0]
             temp_vars = l.split("::")[1]
-            if verbose:
-                print(f"temp_decl: {temp_decl} temp_vars: {temp_vars}")
 
         # Get data type of variable by checking for intrinsic types
         # and then user-defined types separately
         m_type = intrinsic_type.search(temp_decl)
         if m_type:
             data_type = m_type.group()
-            if verbose:
-                print(f"{func_name}::matched data type: ", data_type)
         else:  # User-Defined Type
             m_type = user_type.search(temp_decl)
-            if not m_type:
-                print(f"Error: Can't Identify Data Type for {ifile}::L{ln+1}\n {l}")
-                print(f"decl: {temp_decl}")
-                sys.exit(1)
             data_type = find_type.search(temp_decl).group()
-            if verbose:
-                print(f"{func_name}::matched user data type: ", data_type)
 
         # Go through and replace all arrays first
         #
@@ -1215,10 +1105,12 @@ def parse_line_for_variables(ifile, l, ln, ptr=False, verbose=False):
             #       initialization for other variables. May change if
             #       desired use case wants initial values.
             ptrscalar = False
+            default_value: str = ""
             if "=" in var:
+                default_value = var.split("=")[1].strip()
                 var = var.split("=")[0].strip()
             # Check if current variable is an array
-            ng_var_array = re.compile(r"{}?\s*\(.+?\)".format(var), re.IGNORECASE)
+            ng_var_array = re.compile(rf"{var}?\s*\(.+?\)", re.IGNORECASE)
             match_array = ng_var_array.search(temp_vars)
             if match_array:
                 arr = match_array.group()
@@ -1226,13 +1118,9 @@ def parse_line_for_variables(ifile, l, ln, ptr=False, verbose=False):
                 if index:
                     subgrid = index.group()
                 else:
-                    if verbose:
-                        print(f"{arr} Not allocated by bounds")
                     subgrid = "?"
                 # Storing line number of declaration
                 dim = arr.count(",") + 1
-                if verbose:
-                    print(f"var = {var}; subgrid = {subgrid}; {dim}-D")
             else:
                 subgrid = ""
                 dim = 0
@@ -1251,10 +1139,12 @@ def parse_line_for_variables(ifile, l, ln, ptr=False, verbose=False):
                     parameter=parameter,
                     private=private,
                     ptrscalar=ptrscalar,
+                    value=default_value,
                 )
             )
 
     return variable_list
+
 
 def check_cpp_line(base_fn, og_lines, cpp_lines, cpp_ln, og_ln, verbose=False):
     """Function to check if the compiler preprocessor (cpp) line
@@ -1269,7 +1159,7 @@ def check_cpp_line(base_fn, og_lines, cpp_lines, cpp_ln, og_ln, verbose=False):
     # Store current lines to check
     cpp_line = cpp_lines[cpp_ln]
     line = og_lines[og_ln]
-    line = line.split("!")[0].strip()
+    # line = line.split("!")[0].strip()
 
     # (NOTE: this is unnecessary and overly specific to elm use case?)
     regex_include_assert = re.compile(r"^(#include)\s+[\"\'](shr_assert.h)[\'\"]")
@@ -1288,7 +1178,7 @@ def check_cpp_line(base_fn, og_lines, cpp_lines, cpp_ln, og_ln, verbose=False):
 
     # Check if the line is a preprocessor comment
     m_cpp = regex_cpp_comment.search(cpp_line)
-    while(m_cpp):
+    while m_cpp:
         # Check if the comment refers to the mod_file
         match_file = regex_file.search(cpp_line)
         if match_file:
@@ -1306,7 +1196,12 @@ def check_cpp_line(base_fn, og_lines, cpp_lines, cpp_ln, og_ln, verbose=False):
     return cpp_ln, og_ln, og_lines
 
 
-def search_in_file_section(fpath: str, start_ln:int, end_ln: int, pattern: Pattern,):
+def search_in_file_section(
+    fpath: str,
+    start_ln: int,
+    end_ln: int,
+    pattern: Pattern,
+):
     """
     Function that iterates through the lines in a file using filter builtin.
     """
@@ -1316,4 +1211,3 @@ def search_in_file_section(fpath: str, start_ln:int, end_ln: int, pattern: Patte
         matches = [line[1] for line in filter(lambda x: pattern.search(x[1]), section)]
 
     return matches
-

@@ -1,0 +1,25 @@
+{% if dtype_var_groups %}
+<h3>Active Derived Types</h3>
+{% for grp in dtype_var_groups %}
+<ul class="header-list">
+  <span class="toggler checkbox" aria-expanded="false">{{grp.type_name}} {{ grp.instance }}</span>
+  <ul class="child ">
+    {% for item in grp.members %}
+    <li class="var-row">
+      <span class="parent">
+        <code>{{ item.type }} {{ item.name }}</code>
+      </span>
+      <span class="badge badge-{{ item.status }}">{{ item.status }}</span>
+      <button class="trace-btn" aria-label="Trace variable"
+        hx-get="{% url 'trace' grp.instance|add:'%'|add:item.name %}" hx-target="#left-panel" hx-trigger="click"
+        hx-swap="innerHTML">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" />
+          <circle cx="12" cy="12" r="3" fill="currentColor" />
+        </svg>
+      </button>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endfor %}
+  {% endif %}

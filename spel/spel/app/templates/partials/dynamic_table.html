@@ -4,10 +4,8 @@
       {% for field_name in field_names %}
       <th>
         <button class="sort-button {% if request.POST.sort_by == field_name %}active{% endif %}"
-          hx-post="{% url 'view_table' table_name=table_name %}" 
-          hx-vals='{"sort_by": "{{ field_name }}" }' 
-          hx-target="closest table"
-          hx-swap="outerHTML">
+          hx-post="{% url 'view_table' table_name=table_name %}" hx-vals='{"sort_by": "{{ field_name }}" }'
+          hx-target="closest table" hx-swap="outerHTML">
           {{ field_name|capfirst }}
         </button>
       </th>
@@ -24,4 +22,3 @@
     {% endfor %}
   </tbody>
 </table>
-

@@ -1,0 +1,25 @@
+{% if nml_vars %}
+<ul class="header-list">
+  <div class="toggler caret">
+    <span class="toggler-label">Namelist Variables</span>
+  </div>
+  <ul class="child">
+    {% for var in nml_vars %}
+    <li><span class="parent">{{ var }}</span></li>
+    {% endfor %}
+  </ul>
+</ul>
+{% endif %}
+
+{% if globals %}
+<ul class="header-list">
+  <div class="toggler caret">
+    <span class="toggler-label">Global Variables</span>
+  </div>
+  <ul class="child">
+    {% for var in globals %}
+    <li><span class="parent">{{ var }}</span></li>
+    {% endfor %}
+  </ul>
+</ul>
+{% endif %}

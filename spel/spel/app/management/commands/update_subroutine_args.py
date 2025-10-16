@@ -44,16 +44,4 @@ class Command(BaseCommand):
                     arg_name=arg_name,
                     dim=dim,
                 )
-                if created:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Created SubroutineArgs - {module_name}::{subroutine}, type({arg_type})::{arg_name}"
-                        )
-                    )
-                else:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Updated {module_name}::{subroutine}, type({arg_type})::{arg_name}"
-                        )
-                    )
-        self.stdout.write(self.style.SUCCESS("Data update complete."))
+        self.stdout.write(self.style.SUCCESS("Subroutine Args Data update complete."))

@@ -1,0 +1,10 @@
+<h3>Variable Trace: {{ instance }}%{{ member }}</h3>
+  {% if tree %}
+  <ul id="SubTree">
+    {% for n in tree %}
+    {% include "partials/trace_details/trace_node.html" with node=n is_root=True %}
+    {% endfor %}
+  </ul>
+  {% else %}
+  <em>No matches.</em>
+  {% endif %}

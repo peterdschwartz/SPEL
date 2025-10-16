@@ -1,0 +1,131 @@
+<dialog id="nml-modal" class="nml-modal" open>
+  <form method="dialog" class="nml-modal__header">
+    <h3 style="margin:0;">Namelist values — {{ active_label }}{% if active_kind %} ({{ active_kind }}){% endif %}</h3>
+    <button class="nml-close" value="close" aria-label="Close">&times;</button>
+  </form>
+
+  <div class="nml-modal__body">
+    <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem;">
+      <button class="styled-button" onclick="nmlCopyJSON(event)">Copy overrides JSON</button>
+      <small style="opacity:.8;">Only keys set by the active config are included in JSON; others use defaults.</small>
+    </div>
+
+    <div class="nml-table-wrap">
+      <table class="nml-table">
+        <thead>
+          <tr>
+            <th >Variable</th>
+            <th >Value</th>
+            <th >Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td>{{ r.module }}::{{ r.name }}</td>
+            <td><code>{{ r.value }}</code></td>
+            <td>
+              {% if r.source == "config" %}
+              <span class="badge badge-config">config</span>
+              {% else %}
+              <span class="badge badge-default">default</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <pre id="nml-json" class="nml-json" style="display:none;">{{ json_payload|safe }}</pre>
+  </div>
+</dialog>
+
+<script>
+  function nmlCopyJSON(e) {
+    e.preventDefault();
+    const el = document.getElementById('nml-json');
+    const text = el ? el.textContent : '{}';
+    navigator.clipboard.writeText(text).then(() => {
+      // tiny feedback
+      const btn = e.currentTarget;
+      const old = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => {btn.textContent = old;}, 1200);
+    });
+  }
+</script>
+
+<style>
+  .nml-modal {
+    width: min(960px, 95vw);
+    border: none;
+    border-radius: 10px;
+    padding: 0;
+  }
+
+  .nml-modal::backdrop {
+    background: rgba(0, 0, 0, .35);
+  }
+
+  .nml-modal__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: .75rem 1rem;
+    background: #007baa;
+    color: white;
+    border-radius: 10px 10px 0 0;
+  }
+
+  .nml-modal__body {
+    padding: 1rem;
+  }
+
+  .nml-close {
+    background: transparent;
+    color: white;
+    font-size: 1.5rem;
+    border: none;
+    cursor: pointer;
+  }
+
+  .nml-table-wrap {
+    max-height: 60vh;
+    overflow: auto;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+  }
+
+  .nml-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .nml-table th,
+  .nml-table td {
+    padding: .5rem .6rem;
+    border-bottom: 1px solid #eee;
+    vertical-align: top;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: .15rem .45rem;
+    border-radius: 999px;
+    font-size: .75rem;
+    line-height: 1;
+  }
+
+  .badge-config {
+    background: #e8f4ff;
+    color: #0b63a7;
+    border: 1px solid #cfe7ff;
+  }
+
+  .badge-default {
+    background: #f3f3f3;
+    color: #444;
+    border: 1px solid #e6e6e6;
+  }
+</style>

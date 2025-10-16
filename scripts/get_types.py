@@ -3,37 +3,42 @@ import re
 import sys
 import time
 
-from scripts.DerivedType import get_derived_type_definition
+from scripts.config import ELM_SRC, unittests_dir
 from scripts.fortran_modules import get_filename_from_module, get_module_name_from_file
-from scripts.mod_config import ELM_SRC, unittests_dir
 from scripts.utilityFunctions import line_unwrapper
 from scripts.write_routines import create_deepcopy_module
 
 regex_contains = re.compile(r"^(contains)", re.IGNORECASE)
 
 
-def progressbar(it, prefix="", size=60, out=sys.stdout):
-    count = len(it)
+def progressbar(it, prefix="", size=60, out=sys.stdout, total=None):
+    # count = len(it)
     start = time.time()  # time estimate start
 
-    def show(j):
-        x = int(size * j / count)
-        # time estimate calculation and string
-        remaining = ((time.time() - start) / j) * (count - j)
-        mins, sec = divmod(remaining, 60)  # limited to minutes
-        time_str = f"{int(mins):02}:{sec:03.1f}"
-        print(
-            f"{prefix:>10.10}[{u'█'*x}{('.'*(size-x))}] {j}/{count} Est wait {time_str}",
-            end="\r",
-            file=out,
-            flush=True,
-        )
+    def show(j, count):
+        if count:
+            x = int(size * j / count)
+            # time estimate calculation and string
+            remaining = ((time.time() - start) / j) * (count - j)
+            mins, sec = divmod(remaining, 60)  # limited to minutes
+            time_str = f"{int(mins):02}:{sec:03.1f}"
+            bar = (
+                f"{prefix:>10.10}[{u'█'*x}{('.'*(size-x))}] {j}/{count} Est wait {time_str}",
+            )
+        else:
+            # No total: just show items processed + spinner
+            spinner = r"\|/-"[int(j) % 4]
+            elapsed = time.time() - start
+            mins, sec = divmod(elapsed, 60)
+            time_str = f"{int(mins):02}:{sec:03.1f}"
+            bar = f"{spinner} {j} items, elapsed {time_str}"
+        print(f"{prefix:>10.10}{bar}", end="\r", file=out, flush=True)
 
-    show(0.1)  # avoid div/0
+    show(0.1, total)  # avoid div/0
     for i, item in enumerate(it):
         yield item
-        prefix = item.split("/")[-1]
-        show(i + 1)
+        prefix = str(item)
+        show(i + 1, total)
     print("\n", flush=True, file=out)
 
 

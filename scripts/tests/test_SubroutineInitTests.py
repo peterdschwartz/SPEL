@@ -32,8 +32,8 @@ class SubroutineTests(unittest.TestCase):
         """
         Test to verfiy that modules are parsed correctly
         """
+        from scripts.config import E3SM_SRCROOT
         from scripts.fortran_modules import get_filename_from_module
-        from scripts.mod_config import E3SM_SRCROOT
 
         module_name = "shr_kind_mod"
         file_path = get_filename_from_module(module_name, verbose=True)

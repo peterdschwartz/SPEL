@@ -1,0 +1,14 @@
+{% if args %}
+<ul class="header-list">
+  <!-- <li> -->
+  <div class="toggler caret">
+    <span class="toggler-label">Arguments</span>
+  </div>
+  <ul class="child">
+    {% for arg_type, arg_name, dim in args %}
+    <li><span class="parent">{{arg_type}} {{ arg_name }} {{ dim }}-D</span></li>
+    {% endfor %}
+  </ul>
+  <!-- </li> -->
+</ul>
+{% endif %}

@@ -1,5 +1,7 @@
 import logging
 
+import colorlog
+
 
 def set_logger_level(logger: logging.Logger, level: int):
     logger.setLevel(level)
@@ -16,13 +18,28 @@ def get_logger(name: str, level=logging.INFO) -> logging.Logger:
     # Only add a handler if none exist
     if not logger.handlers:
         logger.setLevel(level)
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        handler = colorlog.StreamHandler()
+        handler.setFormatter(
+            colorlog.ColoredFormatter(
+                "%(log_color)s$ %(name)s - %(levelname)s: %(message)s",
+                log_colors={
+                    "ERROR": "red",
+                    "WARNING": "yellow",
+                    "INFO": "green",
+                    "DEBUG": "cyan",
+                },
+            )
         )
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
+
+        # ch = logging.StreamHandler()
+        # ch.setLevel(logging.DEBUG)
+        # formatter = logging.Formatter(
+        #     "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        # )
+        # ch.setFormatter(formatter)
+
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
         logger.propagate = False  # prevent bubbling to root logger
     else:
         # update existing handler levels too

@@ -1,30 +1,28 @@
-from mod_config import ELM_SRC
 import re
 import subprocess
 
-from .analyze_ifs import set_default
-from .analyze_elm import binary_search, flatten
-from .analyze_elm import single_line_unwrapper
+from scripts.analyze_subroutines import Subroutine
+from scripts.config import ELM_SRC
+from scripts.nml.analyze_elm import single_line_unwrapper
+from scripts.nml.analyze_ifs import set_default
+from scripts.types import NameList
 
 
-class NameList:
-    def __init__(self) -> None:
-        """
-        Class to hold infomation on namelist variables:
-        * self.name : namelist name
-        * self.group : the group the namelist variable belongs to
-        * self.if_blocks : list of number lines that if statments where the namelist variable is present in
-        * self.variable : a pointer to a Variable class
-        * self.filepath : file where namelist variable was found
-        """
-        self.name: str = ""
-        self.group: str = ""
-        self.if_blocks = []
-        self.variable: str = ""
-        self.filepath: str = ""
+def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList]):
+    nml_str = "|".join(list(nml_dict.keys()))
+    regex_nml = re.compile(rf"\b({nml_str})\b")
+
+    for sub in sub_dict.values():
+        for if_node in sub.flat_ifs:
+            cond = str(if_node.condition)
+            nml_vars = regex_nml.findall(cond)
+            temp = {v: nml_dict[v] for v in nml_vars}
+            if_node.nml_vars.update(temp)
+
+    return
 
 
-def find_all_namelist():
+def find_all_namelist() -> dict[str, NameList]:
     """
     Find all namelist variables across ELM
     """
@@ -33,6 +31,8 @@ def find_all_namelist():
         f'grep -rin --include=*.F90 --exclude-dir=external_modules/ "namelist\s*\/" {ELM_SRC}'
     )
     namelist_dict = {}
+    if output.strip() == "":
+        return namelist_dict
     for line in output.split("\n"):
         line = line.split(":")
         filename = line[0]
@@ -46,8 +46,8 @@ def find_all_namelist():
             f = NameList()
             f.name = flag.strip()
             f.group = group
-            f.file = filename
-            f.name_declaration_line_number = line_number
+            f.filepath = filename
+            f.ln = line_number
 
             namelist_dict[flag.strip()] = f
     return namelist_dict
@@ -94,6 +94,3 @@ def change_default(if_block, namelist, namelist_variable, value):
     """
     namelist[namelist_variable].variable.default_value = value
     set_default(if_block, namelist)
-
-
-

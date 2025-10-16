@@ -10,6 +10,23 @@ module nc_io
   integer, parameter :: create_file = 2
   real(8), parameter :: fill_double = 1.d+36
   integer, parameter :: fill_int = -9999
+  type, public :: spel_io_type
+    character(len=256) :: fn
+    integer :: timestep
+    integer :: max_timesteps_per_file
+    integer :: filenum
+    logical :: new_file
+    logical :: created = .false.
+    logical :: read_mode = .false.
+    logical :: end_run = .False.
+    integer :: dt_in_file=99999 !used for reading files only
+  contains
+    procedure, public :: get_fn
+    procedure, public :: init
+    procedure, private :: check_file_exists
+    procedure, private :: need_new_file
+  end type spel_io_type
+  type(spel_io_type), public :: io_constants, io_inputs, io_outputs
   interface nc_write_var_array
     module procedure nc_write_double
     module procedure nc_write_integer
@@ -59,6 +76,54 @@ integer function nc_create_or_open_file(fn, mode) result(ncid)
    end if
 end function nc_create_or_open_file
 
+
+subroutine init(this,base_fn,max_tpf,read_io)
+  class(spel_io_type), intent(inout) :: this
+  character(len=*), intent(in) :: base_fn
+  integer, intent(in) :: max_tpf
+  logical, intent(in) :: read_io
+  if(this%created) error stop "(spel_io_type::init) Error -- io_inst already initialized"
+  this%read_mode = read_io
+  this%max_timesteps_per_file = max_tpf
+  this%new_file = .true.
+  this%fn = trim(base_fn)
+  this%timestep = 0
+  this%new_file = .true.
+  this%filenum = 0
+  this%created = .true.
+end subroutine init
+
+logical function need_new_file(this) result(flag)
+  class(spel_io_type), intent(inout) :: this
+  if(this%read_mode) then 
+      flag = (this%timestep > this%dt_in_file)
+  else
+      flag = (this%timestep > this%max_timesteps_per_file)
+  end if
+end function need_new_file
+
+logical function check_file_exists(this,fn) result(exists)
+    class(spel_io_type), intent(inout) :: this
+    character(len=*), intent(in) :: fn
+    inquire(file=trim(fn), exist=exists)
+end function check_file_exists
+
+character(len=256) function get_fn(this) result(new_fn)
+  class(spel_io_type), intent(inout) :: this
+  character(len=10) :: ch_num
+  integer :: max_time_steps
+  this%timestep = this%timestep + 1
+  this%new_file = .False.
+  if(this%need_new_file() .or. this%timestep == 1) then
+    this%filenum = this%filenum + 1
+    this%timestep = 1
+    this%new_file = .true.
+    if(this%read_mode) this%dt_in_file = 99999
+  end if
+  write(unit=ch_num,fmt='(I0.4)') this%filenum
+  new_fn = trim(this%fn)//trim(ch_num)//'.nc'
+  if(this%read_mode) this%end_run = .not. (this%check_file_exists(new_fn))
+end function get_fn
 
 subroutine nc_define_var(ncid, ndim, dims, dim_names, varname, xtype, var_id, time)
    integer, intent(in) :: ncid, ndim

@@ -1,0 +1,22 @@
+{# Context: node (Node), is_root (bool) #}
+<li class="node">
+  {% if node.children %}
+  <span class="toggler checkbox {% if is_root %}is-open{% endif %}"
+    aria-expanded="{% if is_root %}true{% else %}false{% endif %}">
+    {{ node.name }}
+  </span>
+
+  <ul class="child {% if is_root %}active{% endif %}">
+    {% for ch in node.children %}
+    {% include "partials/trace_details/trace_node.html" with node=ch is_root=False %}
+    {% endfor %}
+  </ul>
+  {% else %}
+  <span class="parent {% if not node.is_hit %}ghost{% endif %}">
+    {{ node.name }}
+  </span>
+  {% endif %}
+
+  <button class="details-btn" aria-label="View Details" hx-get="/subroutine-details/{{ node.name|urlencode }}/"
+    hx-target="#right-panel" hx-trigger="click" hx-swap="innerHTML"></button>
+</li>

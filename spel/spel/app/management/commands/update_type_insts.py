@@ -48,16 +48,4 @@ class Command(BaseCommand):
                     instance_name=inst_name,
                 )
 
-                if created:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Adding {module_name}::type({type_name}) {inst_name}"
-                        )
-                    )
-                else:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Adding {module_name}::type({type_name}) {inst_name}"
-                        )
-                    )
-        self.stdout.write(self.style.SUCCESS("Data update complete."))
+        self.stdout.write(self.style.SUCCESS(" Type Insts Data update complete."))

@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 import json
+from collections import defaultdict
+from typing import Optional
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import connection
 
-from .models import SubroutineActiveGlobalVars, SubroutineCalltree
+from .models import SubroutineActiveGlobalVars, SubroutineCalltree, Subroutines
 
 DB_NAME = settings.DATABASES["default"]["NAME"]
 
@@ -11,81 +16,67 @@ modules = {}
 
 
 class Node:
-    def __init__(self, name, dependency=None):
-        if dependency is None:
-            dependency = []
-        self.name = name
-        self.children = dependency
+    __slots__ = ("name", "children", "is_hit")
+
+    def __init__(
+        self,
+        name: str,
+        is_hit: bool = False,
+    ):
+        self.name: str = name
+        self.children: list[Node] = []
+        self.is_hit: bool = is_hit
 
     def __repr__(self):
         return f"Node(name:{self.name},dep:{self.children})"
 
-    # def print_tree(self, level: int = 0):
-    #     """Recursively prints the tree in a hierarchical format."""
-    #     if level == 0:
-    #         print("CallTree for ", self.node.subname)
-    #     indent = "|--" * level
-    #     print(f"{indent}>{self.node.subname}")
-    #
-    #     for child in self.children:
-    #         child.print_tree(level + 1)
 
+def prune_tree(
+    roots: list[Node],
+    hit_set: set[str],
+) -> list[Node]:
 
-def modules_dfs(mod_id, node):
-    if mod_id == 0 or mod_id == 2:
-        return
+    seen_map: dict[str, Optional[Node] | object] = {}
+    IN_PROGRESS = object()
 
-    visited = []
-    m = None
-    with connection.cursor() as cur:
-        cur.execute(
-            f"SELECT * FROM module_dependency WHERE module_id={mod_id} order by dependency_id"
-        )
-        m = cur.fetchall()
-    for i in m:
-        dep = i[2]
-        if dep not in visited:
-            n = Node(modules[dep])
-            node.children.append(n)
-            modules_dfs(dep, n)
+    def search_children(node: Node) -> Optional[Node]:
+        val = seen_map.get(node.name, None)
+        if val is not None:
+            if val is IN_PROGRESS:
+                new_node = (
+                    Node(node.name, is_hit=(node.name in hit_set))
+                    if (node.name in hit_set)
+                    else None
+                )
+                seen_map[node.name] = new_node
+                return new_node
+            else:
+                return val
 
-        visited.append(dep)
+        kept_children: list[Node] = []
+        seen_map[node.name] = IN_PROGRESS
+        for child in node.children:
+            kc = search_children(child)
+            if kc is not None:
+                kept_children.append(kc)
 
+        is_hit = node.name in hit_set
+        if is_hit or kept_children:
+            new_node = Node(name=node.name, is_hit=is_hit)
+            new_node.children = kept_children.copy()
+            seen_map[node.name] = new_node
+            return new_node
 
-def jsonify(node, d):
-    d["node"] = {"name": node.name, "children": []}
-    for child in node.children:
-        if child.name != "shr_kind_mod" and child.name != "NULL":
-            child_dict = {}
-            jsonify(child, child_dict)
-            d["node"]["children"].append(child_dict)
+        seen_map[node.name] = None
+        return None
 
+    ptree: list[Node] = []
+    for root in roots:
+        new_root = search_children(root)
+        if new_root is not None:
+            ptree.append(new_root)
 
-def module_calltree_helper():
-    root = Node("")
-    m = None
-    with connection.cursor() as cur:
-        cur.execute("SELECT * FROM modules")
-        m = cur.fetchall()
-    for i in m:
-        modules[i[0]] = i[1]
-
-    return root, modules
-
-
-def get_module_calltree(mod_name):
-    root, modules = module_calltree_helper()
-    root.name = mod_name
-    key = None
-    try:
-        key = list(modules.keys())[list(modules.values()).index(mod_name)]
-
-    except ValueError as e:
-        return "n/a"
-    modules_dfs(key, root)
-    r = {}
-    jsonify(root, r)
-    return json.dumps(r)
+    return ptree
 
 
 def get_subroutine_details(instance, member, mode):
@@ -155,7 +146,6 @@ def build_calltree(root_subroutine_name, active_subs=None):
         return None
 
     # Create a mapping: parent_subroutine_id -> list of child Subroutines
-    # Instead of doing many queries, we fetch all edges in one go.
     edges = SubroutineCalltree.objects.select_related(
         "parent_subroutine", "child_subroutine"
     ).all()
@@ -200,22 +190,60 @@ def build_calltree(root_subroutine_name, active_subs=None):
     return root_node
 
 
-def subroutine_calltree_helper():
-    subroutines = {}
-    with connection.cursor() as cur:
-        cur.execute("SELECT * FROM subroutines")
-        s = cur.fetchall()
-    for i in s:
-        subroutines[i[0]] = i[1]
+def create_calltree_from_sub(sub_name: str) -> list[Node]:
+    try:
+        root_sub = Subroutines.objects.get(subroutine_name=sub_name)
+    except Subroutines.DoesNotExist:
+        return None
 
-    sub_to_id = {val: key for key, val in subroutines.items()}
-    return subroutines, sub_to_id
+    # Pull just what we need, already sorted by parent then lineno
+    edges = SubroutineCalltree.objects.values(
+        "parent_subroutine__subroutine_name",
+        "child_subroutine__subroutine_name",
+        "lineno",
+    ).order_by(
+        "parent_subroutine__subroutine_name",
+        "lineno",
+        "child_subroutine__subroutine_name",
+    )
+
+    calltree_map: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for e in edges:
+        p = e["parent_subroutine__subroutine_name"]
+        c = e["child_subroutine__subroutine_name"]
+        ln = e["lineno"]
+        calltree_map[p].append((c, ln))
+
+    root = Node(root_sub.subroutine_name)
+    queue = [(root_sub.subroutine_name, root)]
+
+    # Build the tree using a queue (BFS) to avoid recursion.
+    # Expand each subroutine at most once to avoid infinite loops on recursion.
+    expanded: set[str] = set()
+
+    while queue:
+        cur_name, cur_node = queue.pop(0)
+        if cur_name in expanded:
+            continue
+        expanded.add(cur_name)
+
+        # children are already ordered by lineno due to the queryset order_by
+        for child_name, ln in calltree_map.get(cur_name, []):
+            child_node = Node(child_name)
+            cur_node.children.append(child_node)
+
+            # enqueue for expansion unless we've already expanded that subroutine elsewhere
+            if child_name not in expanded:
+                queue.append((child_name, child_node))
+
+    return [root]
 
 
-def get_subroutine_calltree(instance, member):
+def get_calltree_for_var(instance, member, active_only=True):
     tree = []
 
-    active_vars_query = get_subroutine_details(instance, member, mode="")
+    if active_only:
+        active_vars_query = get_subroutine_details(instance, member, mode="")
     parent_subs = get_subroutine_details(instance, member, mode="head")
 
     parent_sub_names = []

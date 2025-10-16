@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import bisect
+import re
 import subprocess as sp
 import sys
+from collections import namedtuple
 from copy import deepcopy
 from typing import TYPE_CHECKING, Optional
 
@@ -12,7 +15,7 @@ if TYPE_CHECKING:
     from scripts.DerivedType import DerivedType
 
 import scripts.dynamic_globals as dg
-from scripts.mod_config import ELM_SRC, SHR_SRC, _bc
+from scripts.config import ELM_SRC, SHR_SRC, _bc
 from scripts.types import LineTuple, ModUsage, PointerAlias
 
 
@@ -64,6 +67,8 @@ def get_filename_from_module(module_name: str, verbose: bool = False):
     else:
         file_path = elm_output.split("\n")[0].split(":")[0]
 
+    if file_path and file_path.split(".")[-1].lower() != "f90":
+        file_path = None
     dg.map_module_name_to_fpath[module_name] = file_path
 
     return file_path
@@ -219,7 +224,6 @@ class FortranModule:
     def get_mod_lines(self):
         return self.module_lines
 
-
     def add_dependency(self, mod: str, line: str, ln: int):
         """
         Adds module dependency and either only the items accessed
@@ -265,43 +269,73 @@ class FortranModule:
 
         return sorted_dict
 
-    def print_module_info(self, ofile=sys.stdout):
-        """
-        Function to print summary of FortranModule object
-        """
-        base_fn = "/".join(self.filepath.split("/")[-2:])
-        ofile.write(
-            _bc.BOLD + _bc.HEADER + f"Module Name: {self.name} {base_fn}\n" + _bc.ENDC
-        )
-        ofile.write(_bc.WARNING + "Module Depedencies:\n" + _bc.ENDC)
+    def find_allocations(self, sub_dict: dict[str, Subroutine]):
 
-        for module, onlyclause in self.modules.items():
-            if ofile:
-                ofile.write(
-                    _bc.WARNING
-                    + "use "
-                    + _bc.ENDC
-                    + _bc.OKCYAN
-                    + f"{module}"
-                    + _bc.ENDC
-                )
-                if onlyclause == "all":
-                    ofile.write("-> all\n")
-                else:
-                    ofile.write("->")
-                    for ptrobj in onlyclause:
-                        ofile.write(_bc.OKGREEN + f" {ptrobj.obj}," + _bc.ENDC)
-                    ofile.write("\n")
+        if self.name == "columndatatype":
+            print(self.defined_types)
+        regex_alloc = re.compile(r"^(allocate\b)")
+        fline_list = self.module_lines
+        alloc_lines = [
+            line for line in filter(lambda x: regex_alloc.search(x.line), fline_list)
+        ]
 
-        ofile.write(_bc.BOLD + _bc.WARNING + "Variables:\n" + _bc.ENDC)
-        for variable in self.global_vars.values():
-            print(_bc.OKGREEN + f"{variable}" + _bc.ENDC)
+        mod_subs = [sub_dict[subname] for subname in self.subroutines]
+        Interval = namedtuple("Interval", "tag, xi, xf")
+        intervals: list[Interval] = [
+            Interval(tag=sub.name, xi=sub.startline, xf=sub.endline) for sub in mod_subs
+        ]
+        intervals.sort(key=lambda x: x.xi)
+        starts = [x.xi for x in intervals]
 
-        ofile.write(_bc.WARNING + "User Types:\n" + _bc.ENDC)
-        for utype in self.defined_types:
-            ofile.write(_bc.OKGREEN + f"{self.defined_types[utype]}\n" + _bc.ENDC)
+        def get_init_sub(ln: int) -> Optional[str]:
+            idx = bisect.bisect_right(starts, ln) - 1
+            if idx >= 0:
+                dx = intervals[idx]
+                if dx.xi <= ln <= dx.xf:
+                    return dx.tag
+            return None
 
-        return None
+        for dtype in self.defined_types.values():
+            debug = False
+            if dtype.type_name == "column_water_state":
+                debug = True
+            vars = [
+                rf"%{field.name}"
+                for field in dtype.components.values()
+                if field.dim > 0
+            ]
+            # Find Allocations
+            if not vars:
+                continue
+            var_str = "|".join(vars)
+            regex_var = re.compile(rf"\b({var_str})\b")
+            var_lines = [
+                line for line in filter(lambda x: regex_var.search(x.line), alloc_lines)
+            ]
+            for lpair in var_lines:
+                line = lpair.line.strip()
+                regex_var_and_bounds = re.compile(rf"({var_str})\s*(\(.+?\))")
+                for match in regex_var_and_bounds.finditer(line):
+                    varname = match.group(1).lstrip("%")
+                    bounds = match.group(2)
+                    dtype.components[varname].bounds = bounds[1:-1]
+                    dtype.init_sub_name = get_init_sub(lpair.ln)
+
+            # Find potential targets for pointers
+            regex_ptr_init = re.compile(rf"({var_str})\b\s*(=>)(.+)")
+            var_lines = [
+                line
+                for line in filter(lambda x: regex_ptr_init.search(x.line), fline_list)
+            ]
+            for lpair in var_lines:
+                match_ptrinit = regex_ptr_init.search(lpair.line)
+                target = match_ptrinit.groups()[2].strip()
+                varname = match_ptrinit.groups()[0].strip().replace("%", "")
+                if target not in dtype.components[varname].pointer:
+                    dtype.components[varname].pointer.append(target)
+                    dtype.init_sub_name = get_init_sub(lpair.ln)
+
+        return
 
 
 class ModTree:

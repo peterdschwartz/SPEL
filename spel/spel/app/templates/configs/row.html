@@ -1,0 +1,25 @@
+<tr id="row-{{ ig.var_id }}">
+  <td>{{ ig.gv_module.module_name }}</td>
+  <td>{{ dtype }}</td>
+  <td>
+    <strong>{{ ig.var_name }}</strong><br>
+  </td>
+  <td>
+    <form hx-post="{% url 'set_config_value' config.id ig.var_id %}" hx-target="#row-{{ ig.var_id }}"
+      hx-swap="outerHTML">
+      <input type="text" name="value" value="{{ current }}">
+
+      <button type="submit" class="styled-button">Save</button>
+      {% if error %}
+      <div class="error" style="color:#b00020; font-size:.9rem; margin-top:.25rem;">{{ error }}</div>
+      {% endif %}
+    </form>
+  </td>
+  <td>
+    <form hx-post="{% url 'set_config_value' config.id ig.var_id %}" hx-target="#row-{{ ig.var_id }}"
+      hx-swap="outerHTML">
+      <input type="hidden" name="value" value="{{ ig.value }}">
+      <button type="submit" class="styled-button">Reset</button>
+    </form>
+  </td>
+</tr>

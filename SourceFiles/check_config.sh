@@ -2,7 +2,7 @@
 # config
 BUILD_DIR="build"
 debug=ON
-compiler="nvfortran"
+compiler="gfortran"
 gpu=OFF
 
 DESIRED_COMPILER=$(which $compiler)

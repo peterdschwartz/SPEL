@@ -30,6 +30,7 @@ class Command(BaseCommand):
                 member_type = row["member_type"].strip()
                 member_name = row["member_name"].strip()
                 status = row["status"].strip()
+                ln = row["ln"].strip()
 
                 try:
                     sub_mod_obj = Modules.objects.get(module_name=sub_module_name)
@@ -102,19 +103,7 @@ class Command(BaseCommand):
                     subroutine=subroutine_obj,
                     instance=instance_obj,
                     member=type_def_obj,
-                    defaults={"status": status},
+                    defaults={"status": status, "ln": ln},
                 )
 
-                if created:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Created active global var for subroutine {subroutine_name}."
-                        )
-                    )
-                else:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Updated active global var for subroutine {subroutine_name}."
-                        )
-                    )
-        self.stdout.write(self.style.SUCCESS("Update complete."))
+        self.stdout.write(self.style.SUCCESS("Global Derived Types Update complete."))

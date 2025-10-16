@@ -1,14 +1,18 @@
+import os
 import pickle
 import sys
 
 import pandas as pd
 
 from scripts.analyze_subroutines import Subroutine
+from scripts.config import E3SM_SRCROOT, django_database, scripts_dir
 from scripts.DerivedType import DerivedType
 from scripts.fortran_modules import FortranModule
-from scripts.mod_config import E3SM_SRCROOT, django_database, scripts_dir
 from scripts.utilityFunctions import Variable
 
+TypeDict = dict[str,DerivedType]
+SubDict = dict[str,Subroutine]
+ModDict = dict[str,FortranModule]
 
 def pickle_unit_test(
     mod_dict: dict[str, FortranModule],
@@ -54,7 +58,7 @@ def pickle_unit_test(
     dbfile.close()
 
 
-def unpickle_unit_test(commit):
+def unpickle_unit_test(commit)->tuple[ModDict, SubDict, TypeDict]:
     """
     Function to load SPEL's output from pickled files.
     """
@@ -99,6 +103,9 @@ def export_table_csv(commit: str):
     inst_to_dtype["bounds"] = type_dict["bounds_type"]
 
     prefix = django_database
+    if not os.path.isdir(django_database):
+        os.system(f"mkdir {django_database}")
+
     export_module_usage(mod_dict, prefix)
     export_subroutines(sub_dict, prefix)
     export_subroutine_args(sub_dict, prefix)
@@ -106,6 +113,92 @@ def export_table_csv(commit: str):
     export_type_insts(type_dict, prefix)
     export_type_defs(type_dict, prefix)
     export_sub_active_dtypes(sub_dict, inst_to_dtype, prefix)
+    export_intrinsic_globals(sub_dict, prefix)
+    export_nml_ifs(sub_dict, prefix)
+    return
+
+
+def export_intrinsic_globals(sub_dict: dict[str, Subroutine], prefix: str):
+    field_names = [
+        "module",
+        "var_name",
+        "var_type",
+        "dim",
+        "bounds",
+        "value",
+        "sub_module",
+        "sub_name",
+    ]
+    data = {f: [] for f in field_names}
+    csv_file = f"{prefix}intrinsic_globals.csv"
+
+    def add_row(var: Variable, sub_mod: str, sub_name: str):
+        data["module"].append(var.declaration)
+        data["var_name"].append(var.name)
+        data["var_type"].append(var.type)
+        data["dim"].append(var.dim)
+        data["bounds"].append(var.bounds)
+        data["value"].append(var.default_value.replace("(", "").replace(")", ""))
+        data["sub_module"].append(sub_mod)
+        data["sub_name"].append(sub_name)
+
+    for sub in sub_dict.values():
+        for var in sub.active_global_vars.values():
+            add_row(var, sub.module, sub.name)
+
+    write_dict_to_csv(data, field_names, csv_file)
+    return
+
+
+def export_nml_ifs(sub_dict: dict[str, Subroutine], prefix: str):
+    field_names = [
+        "sub_module",
+        "subroutine",
+        "nml_var_name",
+        "nml_var_type",
+        "nml_var_dim",
+        "nml_var_bounds",
+        "nml_var_module",
+        "if_start",
+        "if_end",
+        "if_cond",
+        "value",
+    ]
+    data = {f: [] for f in field_names}
+    csv_file = f"{prefix}nml_ifs.csv"
+
+    def add_row(
+        modname: str,
+        sub_name: str,
+        nml_var: Variable,
+        if_start: int,
+        if_end: int,
+        cond: str,
+    ):
+        data["sub_module"].append(modname)
+        data["subroutine"].append(sub_name)
+        data["nml_var_name"].append(nml_var.name)
+        data["nml_var_type"].append(nml_var.type)
+        data["nml_var_dim"].append(nml_var.dim)
+        data["nml_var_bounds"].append(nml_var.bounds)
+        data["nml_var_module"].append(nml_var.declaration)
+        data["if_start"].append(if_start)
+        data["if_end"].append(if_end)
+        data["if_cond"].append(cond)
+        data["value"].append(nml_var.default_value.replace("(", "").replace(")", ""))
+
+    for sub in sub_dict.values():
+        for ifnode in sub.flat_ifs:
+            for nml_var in ifnode.nml_vars.values():
+                add_row(
+                    sub.module,
+                    sub.name,
+                    nml_var.variable,
+                    ifnode.start_ln,
+                    ifnode.end_ln,
+                    f"{ifnode.condition}",
+                )
+    write_dict_to_csv(data, field_names, csv_file)
     return
 
 
@@ -172,6 +265,7 @@ def export_sub_active_dtypes(
         "member_type",
         "member_name",
         "status",
+        "ln",
     ]
     data = {f: [] for f in field_names}
     csv_file = f"{prefix}active_dtype_vars.csv"
@@ -184,6 +278,7 @@ def export_sub_active_dtypes(
         inst_name,
         field_var,
         status,
+        ln,
     ):
         data["sub_module"].append(mod_name)
         data["subroutine"].append(sub_name)
@@ -193,12 +288,13 @@ def export_sub_active_dtypes(
         data["member_type"].append(field_var.type)
         data["member_name"].append(field_var.name)
         data["status"].append(status)
+        data["ln"].append(ln)
         return
 
     for sub in sub_dict.values():
         module = sub.module
         sub_name = sub.name
-        for dtype_var, stat in sub.elmtype_access_sum.items():
+        for dtype_var, rw_list in sub.elmtype_access_by_ln.items():
             if "%" not in dtype_var:
                 continue
             inst, field = dtype_var.split("%")
@@ -206,15 +302,20 @@ def export_sub_active_dtypes(
             field_var = dtype.components[field]
             if "%" in field_var.name:
                 field_var.name = field_var.name.split("%")[1]
-            add_row(
-                module,
-                sub_name,
-                dtype.declaration,
-                dtype.type_name,
-                inst,
-                field_var,
-                stat,
-            )
+
+            for rw in rw_list:
+                stat = rw.status
+                ln = rw.ln
+                add_row(
+                    module,
+                    sub_name,
+                    dtype.declaration,
+                    dtype.type_name,
+                    inst,
+                    field_var,
+                    stat,
+                    ln,
+                )
 
     write_dict_to_csv(data, field_names, csv_file)
 
@@ -243,24 +344,32 @@ def export_type_insts(type_dict: dict[str, DerivedType], prefix: str):
 
 
 def export_sub_call_tree(sub_dict: dict[str, Subroutine], prefix: str):
-    field_names = ["mod_parent", "parent_subroutine", "mod_child", "child_subroutine"]
+    field_names = [
+        "mod_parent",
+        "parent_subroutine",
+        "mod_child",
+        "child_subroutine",
+        "ln",
+    ]
     data = {f: [] for f in field_names}
 
     csv_file = f"{prefix}subroutine_calltree.csv"
 
-    def add_row(mod_parent, parent, mod_child, child):
+    def add_row(mod_parent, parent, mod_child, child, ln):
         data["mod_parent"].append(mod_parent)
         data["parent_subroutine"].append(parent)
         data["mod_child"].append(mod_child)
         data["child_subroutine"].append(child)
+        data["ln"].append(ln)
         return
 
     for sub in sub_dict.values():
         parent = sub.name
         mod_p = sub.module
-        for child in sub.child_subroutines:
+        for ln, call_desc in sub.sub_call_desc.items():
+            child = call_desc.fn
             mod_c = sub_dict[child].module
-            add_row(mod_p, parent, mod_c, child)
+            add_row(mod_p, parent, mod_c, child, ln)
 
     write_dict_to_csv(data, field_names, csv_file)
     return

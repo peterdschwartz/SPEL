@@ -223,7 +223,7 @@ def main(num_blocks, max_depth):
 
     _, _ = ae.elmtypes(sub_dict, parent_ifs, "test", {}, noif)
 
-    ae.insert("analysis/unitTest.F90", parent_ifs)
+    ae.insert_stop("analysis/unitTest.F90", parent_ifs)
 
     output = sp.getoutput(
         "gfortran analysis/unitTest.F90 -o analysis/unitTest && ./analysis/unitTest"

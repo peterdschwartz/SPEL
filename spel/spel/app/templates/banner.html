@@ -1,0 +1,58 @@
+{% load static %}
+<h1 class="project-title">
+  <img src="{% static 'images/earth-2228.svg' %}" alt="Earth Icon">
+  E3SM Land Model - Code Explorer <a href="{% url 'home' %}" class="return-link">Home</a>
+</h1>
+<div class="banner">
+  <details id="db-toolbar" class="toolbar-details" closed>
+    <summary class="toolbar-summary">
+      <span class="banner-title">
+        <img src="{% static 'images/database-icon.svg' %}" alt="DB Icon">
+        Tables in the Database
+      </span>
+      <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 9l6 6 6-6" />
+      </svg>
+    </summary>
+    <nav class="button-group">
+      <a href="{% url 'view_table' table_name='subroutine_calltree' %}"><button class="styled-button">Subroutine
+          CallTree</button></a>
+      <a href="{% url 'view_table' table_name='types' %}"><button class="styled-button">User Types</button></a>
+      <a href="{% url 'view_table' table_name='dependency' %}"><button class="styled-button">Module
+          Dependency</button></a>
+      <a href="{% url 'view_table' table_name='instances' %}"><button class="styled-button">Type Instances</button></a>
+      <a href="{% url 'view_table' table_name='modules' %}"><button class="styled-button">Modules</button></a>
+      <a href="{% url 'view_table' table_name='subroutines' %}"><button class="styled-button">Subroutines</button></a>
+      <a href="{% url 'view_table' table_name='subroutineargs' %}"><button class="styled-button">Subroutine
+          Arguments</button></a>
+      <a href="{% url 'view_table' table_name='activeglobalvars' %}"><button class="styled-button">Active Derived
+          Types</button></a>
+      <a href="{% url 'view_table' table_name='intrinsicglobalvars' %}"><button class="styled-button">Non-UDT
+          Vars</button></a>
+      <a href="{% url 'view_table' table_name='subroutineintrinsicglobals' %}"><button class="styled-button">Active
+          Intrinsics</button></a>
+      <a href="{% url 'view_table' table_name='namelistvars' %}"><button class="styled-button">Namelist
+          Vars</button></a>
+      <a href="{% url 'view_table' table_name='if_nml' %}"><button class="styled-button">If w/ NML</button></a>
+      <a href="{% url 'view_table' table_name='flat_ifs' %}"><button class="styled-button">If Blocks</button></a>
+    </nav>
+  </details>
+  <a class="editor-button" href="{% url 'config_start' %}">
+    Namelist Editor
+  </a>
+</div>
+<div id="config-picker" hx-get="{% url 'config_picker' %}" hx-trigger="load" hx-swap="outerHTML"></div>
+<button class="icon-button" hx-get="{% url 'nml_values' %}" hx-target="body" hx-swap="beforeend" hx-on="htmx:afterOnLoad: 
+          (function(){
+            var dlg = document.getElementById('nml-modal');
+            if (dlg && !dlg.open) dlg.showModal();
+          })()" title="View namelist values">
+  <!-- Magnifying glass icon (inline SVG) -->
+  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none">
+    <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" />
+    <line x1="16.65" y1="16.65" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+  </svg>
+</button>
+<button class="styled-button" hx-post="{% url 'recompute_if_evals_global' %}" hx-swap="none">
+  Recompute IFs
+</button>

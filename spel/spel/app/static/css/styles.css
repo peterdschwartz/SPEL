@@ -76,6 +76,37 @@ tr:nth-child(even) {
     margin-right: 6px;
 }
 
+
+.toggler {
+    cursor: pointer;
+    user-select: none;
+}
+
+.toggler.checkbox[aria-expanded="false"]::before {
+    content: "\2610"; /* empty box */
+    margin-right: 6px;
+}
+.toggler.checkbox[aria-expanded="true"]::before {
+    content: "\2611"; /* checked box */
+    color: dodgerblue;
+}
+
+
+/* Caret style */
+.toggler.caret::before {
+    content: "\25B6";  /* ► right-pointing */
+    margin-right: 6px;
+}
+.toggler.caret.active-toggler::before {
+    content: "\25BC";  /* ▼ down-pointing */
+}
+
+.toggler h3 {
+  display: inline;   /* prevent line break */
+  margin: 0;         /* remove default margin */
+  font-size: 1.1rem; /* keep h3 look, adjust as needed */
+}
+
 .child {
     display: none;
 }
@@ -85,19 +116,19 @@ tr:nth-child(even) {
     display: block;
 }
 
-.box {
-    cursor: pointer;
-    user-select: none;
-    color: black;
-    text-decoration: underline;
-}
-
-.box::before {
-  content: "\2610";
-  color: black;
-  display: inline-block;
-  margin-right: 6px;
-}
+/* .box { */
+/*     cursor: pointer; */
+/*     user-select: none; */
+/*     color: black; */
+/*     text-decoration: underline; */
+/* } */
+/**/
+/* .box::before { */
+/*   content: "\2610"; */
+/*   color: black; */
+/*   display: inline-block; */
+/*   margin-right: 6px; */
+/* } */
 
 .check-box::before {
   content: "\2611"; 
@@ -136,44 +167,108 @@ tr:nth-child(even) {
 text-align: left;
 }
 
-.button-container {
-    background-color: #007baa; /* Banner background color */
-    color: white; /* Text color */
-    padding: 20px; /* Space around the content */
-    text-align: center; /* Center text */
-    border-radius: 10px; /* Rounded corners */
-    margin: 20px 0; /* Space above and below the banner */
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between; /* title on left, buttons on right */
+  background-color: #007baa;
+  color: white;
+  border-radius: 10px;
+  padding: 0.5rem 1rem; /* breathing room */
+  flex-wrap: wrap; /* wrap buttons on smaller screens */
+  width: 100%; /* full width across container */
+  box-sizing: border-box; /* padding doesn’t shrink width */
 }
 
-/* Styling for the header */
-.button-container h2 {
-    margin: 0 0 15px; /* Margin below the heading */
+.banner-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1.1rem;
+  font-weight: 600;
 }
 
-/* Button group styles */
+
+.banner-title img {
+  height: 20px;
+  width: 20px;
+}
+
 .button-group {
-    display: flex; /* Use flexbox for layout */
-    justify-content: center; /* Center buttons */
-    flex-wrap: wrap; /* Allow buttons to wrap to the next line */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
-/* General button styles */
+
 .styled-button {
-    background-color: #f5f5f5; /* Button background color */
-    color: #007baa; /* Button text color */
-    border: none; /* No border */
-    border-radius: 5px; /* Rounded corners for buttons */
-    padding: 10px 15px; /* Space inside the button */
-    margin: 5px; /* Space between buttons */
-    cursor: pointer; /* Pointer cursor on hover */
-    transition: background-color 0.3s ease; /* Smooth background color transition */
+  background-color: #007baa;
+  color: white;
+  border: 1px solid #005f80; /* subtle darker border */
+  border-radius: 5px;
+  padding: 8px 14px;
+  margin: 0 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background-color 0.3s ease, transform 0.1s ease;
 }
 
-/* Hover effect for buttons */
 .styled-button:hover {
-    background-color: #ddd; /* Change background on hover */
+  background-color: #005f80; /* darker blue */
+  transform: translateY(-1px); /* slight lift */
+}
+.project-title {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.4rem;
+  font-weight: 700;
+}
+.project-title img { 
+  height: 30px;
+  width: 30px;
+}
+.toolbar-summary::-webkit-details-marker { display: none; }
+.toolbar-summary { list-style: none; }
+
+.toolbar-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .5rem .75rem;   /* compact toolbar height */
+  cursor: pointer;
 }
 
+.chevron {
+  width: 20px; height: 20px;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  transition: transform .2s ease;
+}
+.toolbar-details[open] .chevron { transform: rotate(180deg); }
+.banner .editor-button {
+  background-color: #ff9800; /* a contrasting accent color */
+  color: black;
+  border: none;
+  border-radius: 20px; /* pill shape */
+  padding: 8px 18px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background-color 0.3s ease, transform 0.1s ease;
+  text-decoration: underline;
+}
+
+.banner .editor-button:hover {
+  background-color: #e68900;
+  transform: translateY(-1px);
+}
+.banner .editor-button::before {
+  content: "\2699";
+  font-weight: 900;
+  margin-right: 6px;
+  text-decoration: none;
+  display: inline-block;
+}
 
 .split-container {
     display: flex;
@@ -203,6 +298,22 @@ text-align: left;
 }
 .right-panel table {
     width : 100%;
+}
+
+#sub-split-view.split-container {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  align-items: stretch;
+  gap: 0; /* optional divider spacing if you want */
+}
+
+/* Make both panels share space and allow content to shrink */
+#sub-split-view .left-panel,
+#sub-split-view .right-panel {
+  flex: 1 1 0;
+  min-width: 0;     /* prevents overflow pushing to a new line */
+  min-height: 0;    /* avoids scroll quirks inside flex children */
 }
 
 
@@ -295,4 +406,90 @@ text-align: left;
 .close-btn:hover {
   background: #0056b3;
 }
+.badge {
+  display: inline-block;
+  padding: 0 .4em;
+  font-size: .75rem;
+  border-radius: .25rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+/* Read */
+.badge-r {
+  background: #2563eb;   /* bright blue */
+}
+
+/* Write */
+.badge-w {
+  background: #dc2626;   /* strong red */
+}
+
+/* Read/Write */
+.badge-rw {
+  background: linear-gradient(135deg, #2563eb 0%, #dc2626 100%);
+}
+
+/* No status */
+.badge-dash {
+  background: #9ca3af;   /* gray */
+}
+
+  code {
+    padding: 0 .25rem;
+    background: #f6f8fa;
+    border-radius: 4px;
+  }
+
+.header-list, .header-list ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 0;
+}
+.header-list > li { margin: .25rem 0; }
+.header-list .child { margin-left: 1rem; }
+
+/* layout for a node row + its child list */
+li.node {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  grid-template-areas:
+    "label button ."
+    "child child child";
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* map each element to the grid areas */
+li.node > .toggler { grid-area: label; cursor: pointer; }
+li.node > .details-btn { grid-area: button; }
+li.node > .child { grid-area: child; margin: 0.25rem 0 0 1.25rem; }
+
+li.var-row {
+  display: grid;                  /* still block-level, so one per line */
+  grid-template-columns: auto auto auto;  /* hug content */
+  grid-template-areas: "label status button";
+  gap: 0.5rem;
+  justify-content: start;         /* keep the grid cells clustered left */
+  width: max-content;             /* shrink grid track box, but li stays block */
+  max-width: 100%;                /* safety: don’t overflow container */
+}
+
+li.var-row > .parent { grid-area: label; cursor: pointer; }
+li.var-row > .badge {grid-area: status; cursor: pointer;}
+li.var-row > .trace-btn { grid-area: button}
+
+.trace-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 .25rem;
+  line-height:1;
+}
+.trace-btn svg { pointer-events: none; } /* clicks hit the button */
+.trace-btn:hover { color: dodgerblue; }
+
+/* example */
+.parent.ghost { opacity: 0.55; font-style: italic; }
+/* .hit-badge { margin-left: .4rem; font-size: .8em; border: 1px solid currentColor; padding: 0 .25rem; border-radius: .25rem; } */
 

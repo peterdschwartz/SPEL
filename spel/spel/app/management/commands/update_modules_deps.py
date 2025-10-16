@@ -25,9 +25,6 @@ class Command(BaseCommand):
                 module_name = row.get("module_name").strip()
                 dep_module_name = row.get("dep_module_name").strip()
                 object_used = row.get("object_used").strip()
-                self.stdout.write(
-                    f"Adding {module_name}, {dep_module_name}, {object_used}"
-                )
 
                 # Update or create the module record
                 module, _ = Modules.objects.update_or_create(
@@ -46,16 +43,4 @@ class Command(BaseCommand):
                     object_used=object_used,
                     defaults={"object_used": object_used},
                 )
-                if created:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Created dependency: {module_name} -> {dep_module_name}"
-                        )
-                    )
-                else:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Updated dependency: {module_name} -> {dep_module_name}"
-                        )
-                    )
-        self.stdout.write(self.style.SUCCESS("Data update complete."))
+        self.stdout.write(self.style.SUCCESS("Module Dependency update complete."))

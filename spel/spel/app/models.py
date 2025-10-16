@@ -1,5 +1,9 @@
+from django.contrib.auth import get_user_model
 from django.db import models
 from django.db.models import UniqueConstraint
+from django.utils import timezone
+
+from .utils.helper import compute_config_hash
 
 
 class Modules(models.Model):
@@ -152,11 +156,14 @@ class SubroutineCalltree(models.Model):
         related_name="child_subroutine",
     )
 
+    lineno = models.IntegerField()
+
     class Meta:
         db_table = "subroutine_calltree"
         constraints = [
             UniqueConstraint(
-                fields=("parent_subroutine", "child_subroutine"), name="unique_calltree"
+                fields=("parent_subroutine", "child_subroutine", "lineno"),
+                name="unique_calltree",
             ),
         ]
 
@@ -200,12 +207,187 @@ class SubroutineActiveGlobalVars(models.Model):
         related_name="active_member",
     )
     status = models.CharField(max_length=2)
+    ln = models.IntegerField(default=-1)
 
     class Meta:
         db_table = "subroutine_active_global_vars"
         constraints = [
             UniqueConstraint(
-                fields=("subroutine", "instance", "member", "status"),
+                fields=("subroutine", "instance", "member", "status", "ln"),
                 name="unique_sub_dtype",
             )
         ]
+
+
+class IntrinsicGlobals(models.Model):
+    objects = models.Manager()
+    var_id = models.AutoField(primary_key=True)
+    gv_module = models.ForeignKey(
+        "Modules",
+        on_delete=models.CASCADE,
+        related_name="global_var",
+    )
+    dim = models.IntegerField()
+    var_type = models.CharField(max_length=50)
+    var_name = models.CharField(max_length=100)
+    bounds = models.CharField(max_length=100)
+    value = models.TextField()
+
+    class Meta:
+        db_table = "intrinsic_globals"
+        constraints = [
+            UniqueConstraint(
+                fields=(
+                    "gv_module",
+                    "var_name",
+                ),
+                name="unique_globals",
+            )
+        ]
+        indexes = [
+            models.Index(fields=("gv_module", "var_name")),
+        ]
+
+
+class SubroutineIntrinsicGlobals(models.Model):
+    objects = models.Manager()
+    sub_gv_id = models.AutoField(primary_key=True)
+    gv_id = models.ForeignKey(
+        "IntrinsicGlobals",
+        on_delete=models.CASCADE,
+        related_name="active_intrinsic",
+    )
+    sub_id = models.ForeignKey(
+        "Subroutines",
+        on_delete=models.CASCADE,
+        related_name="subroutine_global_vars",
+    )
+    gv_ln = models.IntegerField(default=-1)
+
+    class Meta:
+        db_table = "subroutine_intrinsic_globals"
+        constraints = [
+            UniqueConstraint(fields=("gv_id", "sub_id"), name="unique_sub_intrinsic")
+        ]
+
+
+class NamelistVariable(models.Model):
+    objects = models.Manager()
+    nml_id = models.AutoField(primary_key=True)
+    active_var_id = models.ForeignKey(
+        "IntrinsicGlobals",
+        on_delete=models.CASCADE,
+        related_name="namelist",
+    )
+
+    class Meta:
+        db_table = "namelist_variables"
+        constraints = [
+            UniqueConstraint(fields=("active_var_id",), name="unique_nml_var")
+        ]
+
+
+class FlatIf(models.Model):
+    objects = models.Manager()
+    flatif_id = models.AutoField(primary_key=True)
+
+    subroutine = models.ForeignKey(
+        "Subroutines",
+        on_delete=models.CASCADE,
+        related_name="flat_ifs",
+    )
+
+    start_ln = models.IntegerField()
+    end_ln = models.IntegerField()
+    condition = models.TextField()
+    active = models.BooleanField()
+
+    class Meta:
+        db_table = "flat_if_blocks"
+        constraints = [
+            UniqueConstraint(
+                fields=(
+                    "flatif_id",
+                    "start_ln",
+                    "subroutine",
+                    "end_ln",
+                ),
+                name="unique_ifs",
+            )
+        ]
+
+
+class FlatIfNamelistVar(models.Model):
+    objects = models.Manager()
+    id = models.AutoField(primary_key=True)
+    flatif = models.ForeignKey(FlatIf, on_delete=models.CASCADE)
+    namelist_var = models.ForeignKey(NamelistVariable, on_delete=models.CASCADE)
+
+    class Meta:
+        db_table = "flat_if_namelist"
+        constraints = [
+            UniqueConstraint(
+                fields=("id", "flatif", "namelist_var"), name="unique_flatif_var"
+            )
+        ]
+
+
+User = get_user_model()
+
+class ConfigProfile(models.Model):
+    objects = models.Manager()
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="configs")
+    name = models.CharField(max_length=128)
+    data = models.JSONField(default=dict)
+    user_hash = models.CharField(max_length=64, db_index=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "config_profile"
+        indexes = [models.Index(fields=["owner", "user_hash"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "name"], name="uniq_configprofile_name_per_owner"
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.config_hash = compute_config_hash(self.data)
+        super().save(*args, **kwargs)
+
+
+class PresetConfig(models.Model):
+    objects = models.Manager()
+    slug = models.SlugField(unique=True)
+    name = models.CharField(max_length=128)
+    data = models.JSONField(default=dict)
+    preset_hash = models.CharField(max_length=64, db_index=True, blank=True)
+    is_default = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "preset_configs"
+        indexes = [models.Index(fields=["preset_hash"])]
+
+    def save(self, *args, **kwargs):
+        self.config_hash = compute_config_hash(self.data)
+        super().save(*args, **kwargs)
+
+
+class IfEvaluationByHash(models.Model):
+    objects = models.Manager()
+    config_hash = models.CharField(max_length=64, db_index=True)
+    flatif = models.ForeignKey("FlatIf", on_delete=models.CASCADE)
+    subroutine = models.ForeignKey("Subroutines", on_delete=models.CASCADE, db_index=True)
+    start_ln = models.IntegerField()
+    end_ln   = models.IntegerField()
+    is_active = models.BooleanField()
+
+    class Meta:
+        db_table = "if_eval_by_hash"
+        constraints = [
+            models.UniqueConstraint(fields=["config_hash", "flatif"], name="uniq_if_eval_hash_flatif")
+        ]
+        indexes = [
+            models.Index(fields=["config_hash", "subroutine", "is_active", "start_ln", "end_ln"]),
+        ]
+

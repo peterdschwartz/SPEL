@@ -1,0 +1,12 @@
+{% if callees %}
+<ul class="header-list">
+  <div class="toggler caret">
+    <span class="toggler-label">Child Subroutines</span>
+  </div>
+  <ul class="child">
+    {% for entry in callees %}
+    <li><span class="parent"> {{ entry }}</span></li>
+    {% endfor %}
+  </ul>
+</ul>
+{% endif %}

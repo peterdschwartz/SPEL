@@ -1,37 +1,11 @@
-<div class="modal-content">
+<div class="details-pane">
   <h3>{{module}}::{{ subroutine }}</h3>
 
-  <h4>Arguments</h4>
-  <ul class="info-list">
-    {% for arg_type, arg_name, dim in args %}
-      <li><a href="/type-details/{{ arg_type }}/" 
-   hx-get="/type-details/{{ arg_type }}/"
-   hx-target="#modalContent"
-   hx-replace-url="true">
-  {{ arg_type }}
-</a>:
-    {{ arg_name }} {{ dim }}-D</li>
-    {% endfor %}
-  </ul>
+   {% include "partials/details/callees.html" %}
+   {% include "partials/details/arguments.html" %}
+   {% include "partials/details/global_vars.html" %}
 
-  <h4>Child Subroutines</h4>
-  <ul class="info-list">
-    {% for entry in callees %}
-      <li>{{ entry }}</li>
-    {% endfor %}
-  </ul>
+   {% include "partials/details/dtype_vars.html" %}
 
-  <h4>Active Derived Types</h4>
-  <div class="scrollable-section">
-    <ul class="info-list">
-      {% for entry in dtype_vars %}
-        <li>{{ entry }}</li>
-      {% endfor %}
-    </ul>
-  </div>
-
-  <button class="close-btn" onclick="document.getElementById('modalOverlay').style.display = 'none'">
-    Close
-  </button>
 </div>
 

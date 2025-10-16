@@ -1,8 +1,8 @@
-import linecache
-from os import name
-import re
 import difflib
+import linecache
+import re
 import sys
+from os import name
 
 from .analyze_ifs import flatten
 
@@ -168,7 +168,7 @@ def subroutineCalls(sub_dict, parent_ifs, subroutine):
 
 
 def generate_html_comparison(file1, file2, output_path="comparison.html"):
-    html_content = f"""
+    html_content = """
     <html>
     <head>
         <style>
@@ -324,10 +324,8 @@ def cross_test(list1, list2):
         if not test_equality(i, j):
             print(f"different at list1: {i.start} list2: {j.start}")
 
-    print("same")
 
-
-def insert(filename, parent_ifs):
+def insert_stop(filename, parent_ifs):
     flat = flatten(parent_ifs)
     lines = []
     for block in flat:
@@ -361,7 +359,7 @@ def generate_noifs(sub_dict, subroutine, parent_ifs):
     for key in sub_dict[subroutine].elmtype_access_by_ln.keys():
         for k in sub_dict[subroutine].elmtype_access_by_ln[key]:
             index = binary_search(flat, k.ln, r=1)
-            
+
             if index == -1:
                 noif.setdefault(key, []).append(k)
     return noif

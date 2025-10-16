@@ -26,6 +26,7 @@ class Command(BaseCommand):
                 parent_sub = row.get("parent_subroutine")
                 mod_child = row.get("mod_child")
                 child_sub = row.get("child_subroutine")
+                ln = row.get("ln")
 
                 try:
                     parent_mod_obj = Modules.objects.get(module_name=mod_parent)
@@ -68,17 +69,6 @@ class Command(BaseCommand):
                 calltree_obj, created = SubroutineCalltree.objects.update_or_create(
                     parent_subroutine=parent_sub_obj,
                     child_subroutine=child_sub_obj,
+                    lineno=ln,
                 )
-                if created:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Created calltree: {parent_sub} calls {child_sub}"
-                        )
-                    )
-                else:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Updated calltree: {parent_sub} calls {child_sub}"
-                        )
-                    )
-        self.stdout.write(self.style.SUCCESS("Data update complete."))
+        self.stdout.write(self.style.SUCCESS("Call Tree Data update complete."))

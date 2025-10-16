@@ -53,16 +53,4 @@ class Command(BaseCommand):
                         "bounds": bounds,
                     },
                 )
-                if created:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Adding {module_name}, {type_name}% {member_type} {member_name} {dim} {bounds}"
-                        )
-                    )
-                else:
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Updated {module_name}, {type_name}% {member_type} {member_name} {dim} {bounds}"
-                        )
-                    )
-        self.stdout.write(self.style.SUCCESS("Data update complete."))
+        self.stdout.write(self.style.SUCCESS("Type Defs Data update complete."))
