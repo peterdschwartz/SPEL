@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import asdict, dataclass
-from enum import Enum, auto
+from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
-from scripts.fortran_parser.spel_ast import (DoLoop, ExpressionStatement,
-                                             FuncExpression, InfixExpression)
+from scripts.fortran_parser.spel_ast import (
+    DoLoop,
+    ExpressionStatement,
+    FuncExpression,
+    InfixExpression,
+)
 from scripts.fortran_parser.spel_parser import Parser
 from scripts.types import LineTuple, LogicalLineIterator, ReadWrite
 
@@ -21,8 +25,7 @@ if TYPE_CHECKING:
 
 from scripts.config import _bc
 from scripts.fortran_parser.lexer import Lexer
-from scripts.logging_configs import get_logger
-from scripts.utilityFunctions import Variable, lineContinuationAdjustment
+from scripts.utilityFunctions import Variable
 
 regex_do_start = re.compile(r"^\s*(\w+\s*:)?\s*do\b", re.IGNORECASE)
 regex_do_while = re.compile(r"do\s+while\b")
@@ -53,7 +56,6 @@ def in_loop(line_no: int, loop: Loop) -> bool:
     return loop.start < line_no < loop.end
 
 
-
 def get_do_blocks(sub: Subroutine):
     """
     Collects and groups the if-blocks (if, else if, else) within a Fortran subroutine into chains.
@@ -66,7 +68,8 @@ def get_do_blocks(sub: Subroutine):
     loops: list[Loop] = []
     line_it = LogicalLineIterator(lines, "DoIter")
 
-    for full_line, _ in line_it:
+    for fline in line_it:
+        full_line = fline.line
         start_index = line_it.start_index
         orig_ln = line_it.lines[start_index].ln
 
@@ -74,16 +77,18 @@ def get_do_blocks(sub: Subroutine):
         m_start = regex_do_start.search(full_line)
 
         if m_start:
-            # kind = IfType.IF if m_start.group(2) else IfType.SIMPLE
             if m_start.group(2):
                 _, cur_idx = line_it.consume_until(regex_do_end, regex_do_end)
-                block = [ lpair for lpair in line_it.lines[start_index:cur_idx+1]]
-                line_it = LogicalLineIterator(lines=block,log_name="get_do_loops")
+                block = [lpair for lpair in line_it.lines[start_index : cur_idx + 1]]
+                line_it = LogicalLineIterator(lines=block, log_name="get_do_loops")
                 lexer = Lexer(line_it)
                 parser = Parser(lexer)
                 program = parser.parse_program()
 
-                block = [ f"{lpair.ln}  {lpair.line}" for lpair in line_it.lines[start_index:cur_idx+1]]
+                block = [
+                    f"{lpair.ln}  {lpair.line}"
+                    for lpair in line_it.lines[start_index : cur_idx + 1]
+                ]
                 block_txt = "\n".join(block)
                 sub.logger.info(f"\n{block_txt}")
                 for stmt in program.statements:
@@ -104,7 +109,8 @@ def get_loops(sub: Subroutine):
     nested: int = 0
     start_lns: list[LoopStart] = []
     end_lns: list[int] = []
-    for full_line, _ in line_it:
+    for fline in line_it:
+        full_line = fline.line
         start_index = line_it.start_index
         orig_ln = line_it.lines[start_index].ln
         m_start = regex_do_start.search(full_line)
@@ -122,7 +128,7 @@ def get_loops(sub: Subroutine):
             start_ln = start_lns.pop()
             loops.append(Loop(do_line, start_ln.ln, end_ln, start_ln.kind, sub, nested))
 
-    input: list[str] = [ l.line for l in loops]
+    input: list[str] = [l.line for l in loops]
     input_str = "\n".join(input)
 
     lex = Lexer(input=input_str)
@@ -356,149 +362,6 @@ class Loop(object):
                     self.index_map[lhs_var] = rhs_array
         return
 
-    def parseVariablesinLoop(self, verbose=False):
-        """
-        Goes through loop line by line and
-        returns the self.vars dictionary that
-        holds the variables modified by this Loop
-        """
-
-        # non-greedy capture
-        # ng_regex_array = re.compile(f'\w+?\({cc}+?\)')
-        ng_regex_array = re.compile(r"\w+\s*\([,\w+\*-]+\)", re.IGNORECASE)
-
-        regex_if = re.compile(r"^(if|else if|elseif)")
-        regex_cond = re.compile(r"\((.+)\)")
-        regex_subcall = re.compile(r"^(call)")
-        #
-        # regex to match code that should be ignored
-        regex_skip = re.compile(r"^(write|print)")
-        regex_dowhile = re.compile(r"\s*(do while)", re.IGNORECASE)
-
-        # regex for scalar variables:
-        # since SPEL already has the loop indices, no need to hardcode this?
-        indices = [
-            "i",
-            "j",
-            "k",
-            "g",
-            "l",
-            "t",
-            "c",
-            "p",
-            "fc",
-            "fp",
-            "fl",
-            "ci",
-            "pi",
-            "n",
-            "m",
-            "s",
-        ]
-        if self.subcall.LocalVariables["scalars"]:
-            list_of_scalars = [
-                vname
-                for vname in self.subcall.LocalVariables["scalars"].keys()
-                if vname not in indices
-            ]
-            # print(_bc.OKBLUE+f"list of scalars for {self.subcall.name}\n {list_of_scalars}"+_bc.ENDC)
-            str_ = "|".join(list_of_scalars)
-            regex_scalars = re.compile(rf"(?<!\w)({str_})(?!\w)", re.IGNORECASE)
-        else:
-            list_of_scalars = []
-
-        # Initialize dictionary that will
-        # hold array variables used in the loop
-        variable_dict = {}
-
-        slice = self.lines[:]
-        lines_to_skip = 0
-        reprint = True
-        for ln, line in enumerate(slice):
-            if lines_to_skip > 0:
-                lines_to_skip -= 1
-                continue
-            l, lines_to_skip = lineContinuationAdjustment(slice, ln, verbose)
-
-            # match any functions or statements to be ignored
-            match_skip = regex_skip.search(l)
-            if match_skip:
-                continue
-
-            # match if statements
-            match_if = regex_if.search(l)
-            match_dowhile = regex_dowhile.search(l)
-            if match_if:
-                m = regex_cond.findall(l)
-                if "then" not in l:
-                    if verbose:
-                        print("single line if statement")
-                else:
-                    if verbose:
-                        print(ln, m)
-            elif not match_dowhile:
-
-                # Currently ignore subroutines called inside loops
-                match_subcall = regex_subcall.search(l)
-                if match_subcall:
-                    continue
-
-                # Find all array variables in the line
-                m_arr = ng_regex_array.findall(l)
-                if m_arr:
-                    lnew = l
-                    removing = True
-                    while removing:
-                        # temp, removing = self.removeArraysAsIndices(
-                        #     vdict=variable_dict,
-                        #     line=lnew,
-                        #     arrays=m_arr,
-                        #     verbose=verbose,
-                        # )
-                        lnew = temp
-                        m_arr = ng_regex_array.findall(lnew)
-                        if verbose:
-                            print("New findall is: ", m_arr)
-
-                    if m_arr:
-                        variable_dict, reprint = self._getArrayVariables(
-                            ln,
-                            l,
-                            m_arr,
-                            variable_dict,
-                            reprint=reprint,
-                            verbose=verbose,
-                        )
-
-                # Find all local scalar variables
-                if list_of_scalars:
-                    m_scalars = regex_scalars.findall(l)
-                    if m_scalars:
-                        self._get_scalars(
-                            ln, l, m_scalars, variable_dict, verbose=verbose
-                        )
-
-        if self.reduction:
-            print(
-                _bc.WARNING
-                + "This Loop may contain a race-condition for the variables \n",
-                f"{self.reduce_vars}" + _bc.ENDC,
-            )
-
-        # clarify read/write status of each variable in the loop
-        for var, status in variable_dict.items():
-            # remove duplicates
-            status = list(set(status))
-            # set read-only, write-only, rw status:
-            if "r" in status and "w" not in status:
-                variable_dict[var] = "ro"  # read only
-            elif "w" in status and "r" not in status:
-                variable_dict[var] = "wo"  # write only
-            elif "w" in status and "r" in status:
-                variable_dict[var] = "rw"  # read-write
-        self.vars = variable_dict.copy()
-        return
-
     def addOpenACCFlags(self, lines_adjusted, subline_adjust, id, verbose=False):
         """
         Function that will add openACC directives to loop
@@ -578,193 +441,3 @@ class Loop(object):
                 ofile.writelines(mod_lines)
         else:
             sys.exit()
-
-    def _getArrayVariables(
-        self, ln, l, m_arr, variable_dict, reprint=True, verbose=False, interact=False
-    ):
-        """
-        This function takes a given line in of a Loop
-        and identifies the read/write status of each array
-        variable present
-        """
-        # split the about the assignment
-        if "=" not in l:
-            print(f"Line does not contain an assignment -- Bug in code or regex?")
-            print(l)
-            sys.exit()
-
-        assignment = l.split("=")
-
-        if len(assignment) > 2:
-            print(l)
-            sys.exit("getArrayVariables::Too many equals in this case!")
-        lhs = assignment[0]
-        rhs = assignment[1]
-        #
-        regex_indices = re.compile(r"(?<=\()(.+)(?=\))")
-        regex_var = re.compile(r"\w+")
-
-        vars_already_examined = []
-        for var in m_arr:
-            # This means only the first instance of the variable is catalogued as
-            # write, read or reduction.
-            # get subgrid index from filter
-            varname = regex_var.search(var).group()
-            if varname in ["min", "max"]:
-                continue
-            if varname.lower() in vars_already_examined:
-                continue
-            vars_already_examined.append(varname.lower())
-
-            # matches only exactly "varname"
-            regex_varname = re.compile(rf"(?<!\w)({varname})(?!\w)", re.IGNORECASE)
-
-            if "filter" in var:
-                if "filter" in rhs:
-                    subgrid_indx = lhs.strip()
-                    fvar = regex_var.search(rhs).group()
-                    filter_indx = regex_indices.search(rhs).group()
-                    self.filter = [fvar, subgrid_indx, filter_indx]
-                else:
-                    # filter is being assigned -- no need to consider
-                    subgrid_indx = rhs.strip()
-                    fvar = regex_var.search(lhs).group()
-                    filter_indx = regex_indices.search(lhs).group()
-                    self.filter = [fvar, subgrid_indx, filter_indx]
-
-            in_lhs = regex_varname.search(lhs)
-            in_rhs = regex_varname.search(rhs)
-            if varname == "tx":
-                print(f"in LHS:", bool(in_lhs))
-                print(f"in RHS: {bool(in_rhs)}\n Line: {l}")
-            # check if var is only on assigned
-            if in_lhs and not in_rhs:
-                variable_dict.setdefault(varname, []).append("w")
-
-            elif in_rhs and not in_lhs:
-                variable_dict.setdefault(varname, []).append("r")
-
-            # Now check if variable appears on both sides
-            # Requires additional checking for race conditions/reduction operation
-            elif in_lhs and in_rhs:
-                m_indices = regex_indices.search(var).group()
-                indices = m_indices.split(",")
-
-                # variable appears on both sides and is missing at least one loop index
-                # Need to ask if the variable is being reduced
-                if verbose:
-                    print(indices, self.index)
-
-                # Since inner loops may not be tightly nested, we need to
-                # find out how many loops this line of code is inside.
-                loopcount = 0
-                for n, loopstart in enumerate(self.start):
-                    loopend = self.end[n]
-                    linecount = ln + self.start[0]
-                    if linecount > loopstart and linecount < loopend:
-                        loopcount += 1
-                if verbose:
-                    print(f"This line {ln} is inside {loopcount} Loops!")
-
-                if loopcount < 1:
-                    for n, loopstart in enumerate(self.start):
-                        print(loopstart, self.end[n])
-                    sys.exit("Error: Not in a Loop!?")
-
-                if len(indices) < loopcount:
-                    if reprint and interact:
-                        self.printLoop()
-                        reprint = False
-                    if var in self.reduce_vars:
-                        continue
-                    if interact:
-                        reduction = input(
-                            f"is {var} at line {ln} being reduced in this loop?"
-                        )
-                    else:
-                        reduction = "y"
-                    if reduction == "y":
-                        self.reduction = True
-                        self.reduce_vars.append(var)
-                elif len(indices) == loopcount:
-                    # Check if it's a lower-level subgrid to a higher level
-                    loopindex = False
-                    for i in self.index:
-                        if indices[0] in i:
-                            loopindex = True
-
-                    if not loopindex:
-                        print(f"reduction occuring between subgrids", l)
-                        self.reduction = True
-                        self.reduce_vars.append(var)
-                    else:
-                        # Check that both indices are the same
-                        # catch scenarios like (c,j) = (c,j-1)
-                        # where the order matters
-                        same_indices = True
-                        print(f"checking for same indices for :", l)
-                        # using varname here didn't work for some reason
-                        ng_regex_array = re.compile(
-                            r"\w+\s*\([,\w+\*-]+\)", re.IGNORECASE
-                        )
-
-                        # Get lhs indices:
-                        lhs_var = ng_regex_array.search(lhs).group()
-                        lhs_indx = regex_indices.search(lhs_var).group()
-                        lhs_indx = [m.replace(" ", "").lower() for m in lhs_indx]
-                        # Get indices for all rhs instances:
-                        rhs_vars = ng_regex_array.findall(rhs)
-                        for rv in rhs_vars:
-                            rvname = regex_var.search(rv).group()
-                            if rvname != varname:
-                                continue
-
-                            rhs_indx = regex_indices.search(rv).group()
-                            if len(rhs_indx) != len(lhs_indx):
-                                same_indices = False
-                                break
-                            # compare the lists. Does this need regex for robustness?
-                            rhs_indx = [m.replace(" ", "").lower() for m in rhs_indx]
-                            if rhs_indx != lhs_indx:
-                                same_indices = False
-                                break
-                        # May be an order dependent calculation. Flag as reduction
-                        if not same_indices:
-                            print(f"Order dependent calculation", l)
-                            self.reduction = True
-                            self.reduce_vars.append(var)
-
-                # variable_dict.setdefault(varname,[]).append('rw')
-                variable_dict.setdefault(varname, []).extend(["r", "w"])
-
-        return variable_dict, reprint
-
-    def _get_scalars(self, ln, l, m_scalars, variable_dict, verbose=True):
-        """
-        function that takes the local scalars matched in m_scalars
-        and determines the write/read status and reduction status
-        """
-        ltemp = l.split("=")
-        if len(ltemp) < 2:
-            print(f"Error no assignment at {l}")
-            sys.exit()
-        lhs = l.split("=")[0]
-        rhs = l.split("=")[1]
-
-        m_scalars = list(
-            dict.fromkeys(m_scalars).keys()
-        )  # remove duplicate but keep order
-        for lcl_var in m_scalars:
-            regex = re.compile(rf"(?<![\w]){lcl_var}(?![\w])")
-            m_lhs = regex.search(lhs)
-            m_rhs = regex.search(rhs)
-            if m_lhs and not m_rhs:  # only assigned
-                variable_dict.setdefault(lcl_var, []).append("w")
-            elif m_rhs and not m_lhs:
-                variable_dict.setdefault(lcl_var, []).append("r")
-            elif m_lhs and m_rhs:
-                self.reduction = True
-                self.reduce_vars.append(lcl_var)
-                variable_dict.setdefault(lcl_var, []).extend(["r", "w"])
-                print(f"{lcl_var} needs reduction operation in this Loop")
-        return

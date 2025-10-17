@@ -2,6 +2,7 @@ module constants_mod
 
   use spmdMod, only : bad1, &
         bad2
+   use shr_const_mod, only : test_type
 
   integer, parameter :: i_const = 5
   integer, parameter :: nlevdecomp_full = 10
@@ -10,6 +11,7 @@ module constants_mod
   real, allocatable :: notused(:)
 
   logical :: use_fates = .true.
+  type(test_type), public :: unused_inst
   contains
 
    subroutine get_elmlevel_gsmap (elmlevel, gsmap)

@@ -1,84 +1,69 @@
-// function attachToggleListeners() {
-//     const togglers = document.getElementsByClassName("toggler");
-//     for (let i = 0; i < togglers.length; i++) {
-//         togglers[i].addEventListener("click", function() {
-//             const child = this.parentElement.querySelector(".child");
-//             if (child) {
-//                 child.classList.toggle("active");
-//                 this.classList.toggle("active-toggler");
-//             }
-//         });
-//     }
-// }
-
-
-// Helper used by both individual toggles and Toggle All
-function setExpanded(togglerEl, expanded) {
-    const child = togglerEl.nextElementSibling;
-    if (!child || !child.classList.contains('child')) return;
-
-    child.classList.toggle('active', expanded);
-    togglerEl.classList.toggle('is-open', expanded);
-    togglerEl.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+function getChildByAria(toggler) {
+  const id = toggler.getAttribute('aria-controls');
+  return id ? document.getElementById(id) : null;
 }
 
-// Delegated handler for individual toggles (what you have now)
-document.addEventListener('click', function(e) {
-    const t = e.target.closest('.toggler');
-    if (!t) return;
-    setExpanded(t, !t.classList.contains('is-open'));
+function setExpanded(toggler, expanded) {
+  const child = getChildByAria(toggler);
+  const hasChild = !!child;
+
+  // Only flip the child when it exists
+  if (hasChild) child.classList.toggle('active', !!expanded);
+
+  // Sync visual state strictly to actual result
+  const isOpen = hasChild && !!expanded;
+  toggler.classList.toggle('is-open', isOpen);
+  toggler.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('.toggler[role="button"]');
+  if (!t) return;
+  setExpanded(t, t.getAttribute('aria-expanded') !== 'true');
 });
 
-// Delegated handler for the Toggle All button
-document.addEventListener('click', function(e) {
-    const btn = e.target.closest('#toggle-all-button');
-    if (!btn) return;
-
-    // Scope to a container, if provided (e.g., #SubTree or .details-pane)
-    const root = btn.dataset.target ? document.querySelector(btn.dataset.target) : document;
-
-    // Only togglers that actually control a .child right next to them
-    const togglers = [...root.querySelectorAll('.toggler')].filter(t => {
-        const sib = t.nextElementSibling;
-        return sib && sib.classList.contains('child');
-    });
-
-    if (togglers.length === 0) return;
-
-    // If ANY is collapsed, expand all; else collapse all
-    const anyCollapsed = togglers.some(t => !t.classList.contains('is-open'));
-    const newState = anyCollapsed; // true = expand all, false = collapse all
-
-    togglers.forEach(t => setExpanded(t, newState));
-
-    // Optional: update button label and aria-pressed
-    btn.textContent = newState ? 'Collapse all' : 'Expand all';
-    btn.setAttribute('aria-pressed', newState ? 'true' : 'false');
+document.addEventListener('keydown', (e) => {
+  const t = e.target.closest('.toggler[role="button"]');
+  if (!t) return;
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    setExpanded(t, t.getAttribute('aria-expanded') !== 'true');
+  }
 });
 
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-toggle-all]');
+  if (!btn) return;
 
-// document.addEventListener("DOMContentLoaded", (event) => {
-//     console.log("Attaching Toggle All Button")
-//     const toggleAllButton = document.getElementById('toggle-all-button');
-//     if (toggleAllButton) {
-//         toggleAllButton.addEventListener('click', () => {
-//             const children = document.querySelectorAll('.child');
-//             const boxes = document.querySelectorAll('.box');
-//             // make arrays
-//             const any_active = Array.from(children).some(child => child.classList.contains('active'));
-//             children.forEach(child => child.classList.toggle("active", !any_active))
-//             boxes.forEach(box => box.classList.toggle("check-box", !any_active))
-//         });
-//     }
-// })
+  const root = btn.dataset.target ? document.querySelector(btn.dataset.target) : document;
+  const togglers = Array
+    .from(root.querySelectorAll('.toggler[role="button"][aria-controls]'))
+    .filter(t => getChildByAria(t)); // must actually control something
 
-// document.addEventListener("DOMContentLoaded", attachToggleListeners);
-//
-// // Attach listeners after HTMX updates (if HTMX is used)
-// document.body.addEventListener('htmx:afterSwap', (evt) => {
-//     attachToggleListeners(evt.detail.target || document);
-// });
-// document.body.addEventListener('htmx:afterSwap', () => {
-//     attachToggleListeners();
-// });
+  if (!togglers.length) return;
 
+  // If ANY child is closed, we'll open everything; else close all
+  const anyClosed = togglers.some(t => !getChildByAria(t).classList.contains('active'));
+  const newState = anyClosed;
+
+  togglers.forEach(t => setExpanded(t, newState));
+
+  btn.textContent = newState ? 'Collapse all' : 'Expand all';
+  btn.setAttribute('aria-pressed', newState ? 'true' : 'false');
+});
+
+function syncTogglers(root = document) {
+  const togglers = root.querySelectorAll('.toggler[role="button"][aria-controls]');
+  togglers.forEach(t => {
+    const child = getChildByAria(t);
+    const isOpen = !!child && child.classList.contains('active');
+    t.classList.toggle('is-open', isOpen);
+    t.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => syncTogglers());
+document.body.addEventListener('htmx:afterSwap', (e) => {
+  // scope to the swapped fragment
+  syncTogglers(e.target);
+});

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
 from logging import Logger
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
@@ -12,15 +13,22 @@ from scripts.logging_configs import get_logger
 
 if TYPE_CHECKING:
     from scripts.analyze_subroutines import Subroutine
+    from scripts.fortran_modules import FortranModule
     from scripts.utilityFunctions import Variable
 
-regex_preand = re.compile(r'^\s*&')
+regex_preand = re.compile(r"^\s*&")
+
 
 class SubStart(NamedTuple):
     subname: str
     start_ln: int
     cpp_ln: Optional[int]
+    parent: str=""
 
+class ArgUsage(Enum):
+    DIRECT = auto()
+    INDIRECT = auto()
+    NESTED = auto()
 
 class ArgLabel(Enum):
     dummy = 1
@@ -78,18 +86,22 @@ class ArgNode:
     kind: IdentKind
     nested_level: int
     node: dict
+    arg_usage: ArgUsage
 
     def to_dict(self):
         return asdict(self)
 
 
 @dataclass
-class ArgVar:
-    node: ArgNode
+class VarNode:
+    arg_node: ArgNode
     var: Variable
 
     def to_dict(self):
         return asdict(self)
+
+    def __str__(self):
+        return str(self.var)
 
 
 @dataclass
@@ -99,9 +111,9 @@ class ArgDesc:
     keyword: bool  # passed as a keyword argument
     key_ident: str  # identifier of keyword
     argtype: ArgType  # overall type and dimension
-    locals: list[ArgVar]  # local variables passed to this argument
-    globals: list[ArgVar]  # global variables passed to this argument
-    dummy_args: list[ArgVar]  # track dummy arguments
+    locals: list[VarNode] = field(default_factory=list) # local variables passed to this argument
+    globals: list[VarNode] = field(default_factory=list)  # global variables passed to this argument
+    dummy_args: list[VarNode] = field(default_factory=list)  # track dummy arguments
 
     def to_dict(self):
         return asdict(self)
@@ -112,9 +124,9 @@ class ArgDesc:
         first argument
         """
 
-        def inc_list(argvar_list: list[ArgVar]):
+        def inc_list(argvar_list: list[VarNode]):
             for v in argvar_list:
-                v.node.argn += 1
+                v.arg_node.argn += 1
 
         self.argn += 1
         inc_list(self.locals)
@@ -128,10 +140,11 @@ class CallDesc:
     fn: str  # real Name of called subroutine
     args: list[ArgDesc]
     lpair: LineTuple
+    args_str: str
     # summary of the ArgDesc fields
-    globals: list[ArgVar]
-    locals: list[ArgVar]
-    dummy_args: list[ArgVar]
+    globals: list[VarNode] = field(default_factory=list)
+    locals: list[VarNode] = field(default_factory=list)
+    dummy_args: list[VarNode] = field(default_factory=list)
 
     def to_dict(self, long=False):
         if long:
@@ -139,7 +152,7 @@ class CallDesc:
         else:
             return {k: v for k, v in asdict(self).items() if k not in ["args"]}
 
-    def aggregate_vars(self) -> None:
+    def aggregate_vars(self,sub:Subroutine) -> None:
         """
         Populates the globals, locals, and dummy_args field for the entire CallDesc
         """
@@ -147,12 +160,120 @@ class CallDesc:
             temp = [v for v in arg.globals if v not in self.globals]
             self.globals.extend(temp)
 
-            temp = [v for v in arg.locals if v not in self.locals]
-            self.locals.extend(temp)
+            # temp = [v for v in arg.locals if v not in self.locals]
+            # self.locals.extend(temp)
+            for v in arg.locals:
+                varname = v.var.name
+                # check pointers
+                roots = sub._get_ptr_targets(varname)
+                if roots[0] != varname:
+                    for root in roots:
+                        new_v = deepcopy(v)
+                        new_v.var.name = root
+                        if root in sub.dtype_vars:
+                            self.globals.append(new_v)
+                        else:
+                            self.dummy_args.append(new_v)
+                else:
+                    self.locals.append(v)
 
             temp = [v for v in arg.dummy_args if v not in self.dummy_args]
             self.dummy_args.extend(temp)
         return
+
+    def globals_passed(self):
+        return [
+            (argvar.var, argvar.arg_node.argn)
+            for argvar in self.globals
+            if argvar.arg_node.nested_level == 0
+        ]
+
+    def locals_passed(self):
+        return [
+            (argvar.var, argvar.arg_node.argn)
+            for argvar in self.locals
+            if argvar.arg_node.nested_level == 0
+        ]
+
+    def export_bindings(self) -> list[CallBinding]:
+        def bind(vn: VarNode):
+            if "%" in vn.var.name:
+                var_name, member_path = vn.var.name.split("%", 1)
+                kind = Annotate.COMP
+            else:
+                var_name = vn.var.name
+                member_path = ""
+                kind = Annotate.VAR
+            return CallBinding(
+                var_name=var_name,
+                kind=kind,
+                argn=vn.arg_node.argn,
+                member_path=member_path,
+                nested_level=vn.arg_node.nested_level,
+                callee=self.fn,
+                scope=self.determine_scope(var_name),
+                arg_usage=vn.arg_node.arg_usage
+            )
+
+        symbols = self.globals + self.locals + self.dummy_args
+        return list(map(bind, symbols))
+
+    def determine_scope(self, var_name) -> Scope:
+        elmtypes = {v.var.name.split("%", 1)[0] for v in self.globals}
+        if var_name in elmtypes:
+            return Scope.ELMTYPE
+        args = {v.var.name.split("%", 1)[0] for v in self.dummy_args}
+        if var_name in args:
+            return Scope.ARG
+        locals = {v.var.name.split("%", 1)[0] for v in self.locals}
+        if var_name in locals:
+            return Scope.LOCAL
+
+        return Scope.UNKNOWN
+
+
+class CallTag(NamedTuple):
+    caller: str
+    callee: str
+    call_ln: int
+
+    def __repr__(self):
+        return f"{self.caller}@L{self.call_ln+1}"
+
+
+@dataclass
+class PropagatedAccess:
+    tag: CallTag
+    rw_statuses: list[ReadWrite]
+    scope: Scope  # 'ELMTYPE', 'ARG', 'LOCAL', 'GLOBAL'
+    dummy: str
+    binding: CallBinding
+
+    def __repr__(self) -> str:
+        return f"{self.scope}|Prop({self.tag}) {' ,'.join(map(str,self.rw_statuses))}"
+
+    def __str__(self) -> str:
+        return f"{self.scope}|Prop({self.tag}) {' ,'.join(map(str,self.rw_statuses))}"
+
+
+@dataclass
+class CallBinding:
+    var_name: str
+    kind: Annotate
+    scope: Scope
+    argn: int
+    member_path: str
+    nested_level: int
+    callee: str
+    arg_usage: ArgUsage
+
+
+class Scope(Enum):
+    ELMTYPE = auto()
+    ARG = auto()
+    LOCAL = auto()
+    GLOBAL = auto()
+    UNKNOWN = auto()
 
 
 class ObjType(Enum):
@@ -166,6 +287,13 @@ class ObjType(Enum):
     SUBROUTINE = auto()
     VARIABLE = auto()
     DTYPE = auto()
+
+
+class Annotate(Enum):
+    VAR = "VAR"
+    DUMMY = "DUMMY"
+    COMP = "COMPONENT"
+    TMP = "TEMP"
 
 
 @dataclass(frozen=True)
@@ -200,6 +328,7 @@ class FunctionReturn:
         result: str
         start_ln: int
         cpp_start: int
+        parent: str
     """
 
     return_type: str
@@ -207,6 +336,7 @@ class FunctionReturn:
     result: str
     start_ln: int
     cpp_start: Optional[int]
+    parent: str
 
 
 @dataclass
@@ -215,6 +345,7 @@ class SubInit:
     Dataclass to Initialize Subroutine
         name: str
         mod_name: str
+        fort_mod: FortranModule
         file: str
         cpp_fn: str
         mod_lines: list[LineTuple]
@@ -227,6 +358,7 @@ class SubInit:
 
     name: str
     mod_name: str
+    fort_mod: FortranModule
     file: str
     cpp_fn: str
     mod_lines: list[LineTuple]
@@ -235,6 +367,7 @@ class SubInit:
     cpp_start: Optional[int]
     cpp_end: Optional[int]
     function: Optional[FunctionReturn]
+    parent: str
 
 
 @dataclass
@@ -244,6 +377,7 @@ class ParseState:
     """
 
     module_name: str  # Module in file
+    fort_mod: FortranModule
     cpp_file: bool  # File contains compiler preprocessor flags
     work_lines: list[LineTuple]  # Lines to parse -- may be equivalent to orig_lines
     orig_lines: list[LineTuple]  # original line number
@@ -252,10 +386,12 @@ class ParseState:
     line_it: LogicalLineIterator  # Iterator for full fortran statements
     removed_subs: list[str]  # list of subroutines that have been completely removed
     sub_init_dict: dict[str, SubInit]  # Init objects for all subroutines in File
-    sub_start: Optional[SubStart]  # Holds start of subroutine info
-    func_init: Optional[FunctionReturn]  # holds start of function info
-    in_sub: bool = False  # flag if parser is currently in a subroutine
-    in_func: bool = False  # flag if parser is in a function
+    logger: Logger
+    sub_start: list[SubStart] = field(default_factory=list)  # Holds start of subroutine info
+    func_init: list[FunctionReturn] = field(default_factory=list) # holds start of function info
+    in_sub: int = 0  # flag if parser is currently in a subroutine
+    in_func: int = 0  # flag if parser is in a function
+    host_program: int = -1
 
     def get_start_index(self) -> int:
         return self.line_it.start_index
@@ -288,7 +424,6 @@ class LineTuple:
 
     line: str
     ln: int
-    # num_cont: int
     commented: bool = False
 
 
@@ -296,7 +431,7 @@ class ReadWrite(object):
     """
     - status
     - ln
-    - line
+    - ltuple
     """
 
     def __init__(
@@ -310,10 +445,18 @@ class ReadWrite(object):
         self.ltuple: LineTuple = line
 
     def __eq__(self, other):
+        if not isinstance(other, ReadWrite):
+            return False
         return self.status == other.status and self.ln == other.ln
 
     def __repr__(self):
-        return f"{self.status}@L{self.ln}"
+        return f"{self.status}@{self.ln}"
+
+    def __hash__(self):
+        return hash((self.status, self.ln))
+
+    def __str__(self):
+        return f"{self.status}@{self.ln}"
 
 
 class SubroutineCall:
@@ -386,6 +529,7 @@ class CallTree:
 
     def __repr__(self):
         return f"CallTree({self.node.subname}, children={len(self.children)})"
+
     def __str__(self):
         return self.node.subname
 
@@ -403,8 +547,8 @@ class CallTree:
 class LogicalLineIterator:
     def __init__(self, lines: list[LineTuple], log_name: str = ""):
         self.lines = lines
-        self.i = 0
-        self.start_index = 0
+        self.i: int = 0
+        self.start_index: int = 0
         self.curr_line: LineTuple = lines[0]
         if not log_name:
             self.logger: Logger = get_logger("LineIter", level=logging.INFO)
@@ -414,13 +558,16 @@ class LogicalLineIterator:
     def __iter__(self):
         return self
 
-    def reset(self):
-        self.i = 0
-        self.start_index = 0
+    def reset(self, ln: int = 0):
+        self.i = ln
+        self.start_index = ln
 
-    def get_start_ln(self)->int:
+    def get_start_ln(self) -> int:
         idx = self.start_index
         return self.lines[idx].ln
+
+    def get_curr_idx(self) -> int:
+        return self.i
 
     def strip_comment(self) -> str:
         in_string = None  # None, "'", or '"'
@@ -463,19 +610,18 @@ class LogicalLineIterator:
             if self.i >= len(self.lines):
                 self.logger.error("Error-- line incomplete!")
                 raise StopIteration
-            # new_line = self.lines[self.i].line.split("!")[0].strip()
             new_line = self.strip_comment().strip()
             # test if line is just a comment or otherwise empty
             if not new_line:
                 full_line += " &"  # re append & so loop goes to next line
             else:
-                new_line = regex_preand.sub(' ',new_line)
+                new_line = regex_preand.sub(" ", new_line)
                 full_line += " " + new_line.rstrip("\n")
 
-        result = (full_line.lower(), self.i)
+        # result = (full_line.lower(), self.i)
         self.i += 1
-        self.curr_line = LineTuple(line=full_line.lower(),ln=cur_ln)
-        return result
+        self.curr_line = LineTuple(line=full_line.lower(), ln=cur_ln)
+        return self.curr_line
 
     def next_n(self, n):
         """Get next n full logical lines."""
@@ -487,14 +633,14 @@ class LogicalLineIterator:
                 break
         return results
 
-    def insert_after(self,stmt: str):
+    def insert_after(self, stmt: str):
         """
         Inserts after current line and increments subsequent lns
         """
         cur_ln = self.i
-        self.lines.insert(cur_ln+1, LineTuple(line=stmt,ln=cur_ln+1))
+        self.lines.insert(cur_ln + 1, LineTuple(line=stmt, ln=cur_ln + 1))
         self.i += 1
-        for i in range(cur_ln+2,len(self.lines)):
+        for i in range(cur_ln + 2, len(self.lines)):
             self.lines[i].ln += 1
 
         return
@@ -509,7 +655,6 @@ class LogicalLineIterator:
 
     def comment_cont_block(self, index: Optional[int] = None):
         old_index = index if index else self.start_index
-        self.logger.debug(f"Commenting {old_index} -> {self.i}(excl)")
         for ln in range(old_index, self.i):
             self.lines[ln].commented = True
 
@@ -517,15 +662,16 @@ class LogicalLineIterator:
         self,
         end_pattern: re.Pattern,
         start_pattern: Optional[re.Pattern],
-    ) -> tuple[list[LineTuple],int]:
+    ) -> tuple[list[LineTuple], int]:
 
         results: list[LineTuple] = [self.curr_line]
         ln: int = -1
         nesting = 0
         while self.has_next():
-            full_line, ln = next(self)
+            curr_line = next(self)
+            full_line = curr_line.line
             start_ln = self.get_start_ln()
-            results.append(LineTuple(line=full_line,ln=start_ln))
+            results.append(LineTuple(line=full_line, ln=start_ln))
             if start_pattern and start_pattern.match(full_line):
                 nesting += 1
             if end_pattern.match(full_line):
@@ -551,9 +697,9 @@ class LogicalLineIterator:
             logger = self.logger
         for ln in lns:
             self.i = ln
-            full_line, adj_ln = next(self)
-            delta_ln = adj_ln - ln
-            m_ = pattern.search(full_line)
+            full_line = next(self)
+            delta_ln = self.i - ln
+            m_ = pattern.search(full_line.line)
             if m_:
                 for i in range(0, delta_ln + 1):
                     curr_line = self.lines[ln + i].line
@@ -565,12 +711,19 @@ class LogicalLineIterator:
 
         return
 
+    def get_lines(self, regex: re.Pattern) -> list[LineTuple]:
+        self.reset()
+        res = [lpair for lpair in self if regex.search(lpair.line)]
+        self.reset()
+        return res
+
 
 @dataclass
 class Pass:
     pattern: re.Pattern
     fn: Callable[[ParseState, logging.Logger], None]
     name: Optional[str] = None
+
 
 class IfType(Enum):
     UNKNOWN = -1
@@ -587,9 +740,23 @@ class FlatIfs:
         self.condition: Expression = cond
         self.kind: IfType = kind
         self.nml_vars: dict[str, NameList] = {}
+        self.nml_cascades: dict[str, Dependence] = {}
 
     def __str__(self):
         return f"{self.kind.name} L{self.start_ln}-{self.end_ln} {self.condition}"
+
+
+class Pairs(NamedTuple):
+    nml_val: Any
+    cascade_val: Any
+
+
+class Dependence:
+    def __init__(self, cascade_var, trigger, val_pairs: list[Pairs]):
+        self.var: str = cascade_var
+        self.trigger: str = trigger
+        self.pairs = val_pairs
+
 
 class PassManager:
     """
@@ -612,7 +779,8 @@ class PassManager:
         self.passes = [p for p in self.passes if p.name != name]
 
     def run(self, state: ParseState):
-        for full_line, _ in state.line_it:
+        for fline in state.line_it:
+            full_line = fline.line
             # ln in LineTuple always points to original loc. line_it.i is cpp_ln if applicable
             # seems a little circuitous but makes state management easy
             start_index = state.line_it.start_index
@@ -626,6 +794,7 @@ class PassManager:
                     p.fn(state, self.logger)
                     break  # first match wins
 
+
 class NameList:
     def __init__(self) -> None:
         """
@@ -638,7 +807,6 @@ class NameList:
         """
         self.name: str = ""
         self.group: str = ""
-        self.if_blocks: list[FlatIfs] = []
         self.variable: Optional[Variable] = None
         self.ln: int = -1
         self.filepath: str = ""
@@ -652,7 +820,7 @@ class NameList:
         type_str = self.variable.type if self.variable else ""
         return f"Namelist(type={type_str},name={self.name},group={self.group})"
 
-    def __eq__(self,other) -> bool:
+    def __eq__(self, other) -> bool:
         return self.name == other.name
 
 
@@ -666,4 +834,9 @@ class Precedence(Enum):
     PREFIX = 6
     BOUNDS = 7
     CALL = 8
+
+@dataclass
+class DTypeVariable:
+    instance: Variable
+    member_path: Variable
 

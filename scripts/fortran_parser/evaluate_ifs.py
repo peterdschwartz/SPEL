@@ -109,7 +109,6 @@ def cmp_tv(op, L, R):
 
 
 def eval_expr(node, env):
-    # Identifier
     if isinstance(node, Identifier):
         v = get(env, node.value)
         return to_tv(v)

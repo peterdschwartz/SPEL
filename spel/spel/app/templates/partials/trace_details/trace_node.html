@@ -1,22 +1,64 @@
-{# Context: node (Node), is_root (bool) #}
-<li class="node">
+{% load mapping logic %}
+<li class="node" data-toggle>
   {% if node.children %}
-  <span class="toggler checkbox {% if is_root %}is-open{% endif %}"
-    aria-expanded="{% if is_root %}true{% else %}false{% endif %}">
-    {{ node.name }}
-  </span>
+  {% with is_open=current_depth|lt:expand_to %}
+  <div class="row">
+    <span
+      class="toggler checkbox"
+      role="button"
+      tabindex="0"
+      aria-expanded="{{ is_open|yesno:'true,false' }}"
+      aria-controls="child-{{ node.id|slugify }}-{{ node.uid|slugify }}">
+      {{ node.name }}
+    </span>
 
-  <ul class="child {% if is_root %}active{% endif %}">
+    {% if statuses %}
+      {% with status=statuses|get_item:node.name %}
+      <span class="badge badge-{{ status|default:"dash" }}">{{ status|default:"-" }}</span>
+      {% endwith %}
+    {% endif %}
+
+    <button
+      type="button"
+      class="details-btn"
+      aria-label="View Details"
+      hx-get="/subroutine-details/{{ node.name|urlencode }}/"
+      hx-target="#right-panel"
+      hx-trigger="click"
+      hx-swap="innerHTML">
+    </button>
+  </div>
+
+  <ul
+    id="child-{{ node.id|slugify }}-{{ node.uid|slugify }}"
+    class="child {% if is_open %}active{% endif %}">
     {% for ch in node.children %}
-    {% include "partials/trace_details/trace_node.html" with node=ch is_root=False %}
+      {% include "partials/trace_details/trace_node.html" with node=ch current_depth=current_depth|add:"1" expand_to=expand_to statuses=statuses %}
     {% endfor %}
   </ul>
-  {% else %}
-  <span class="parent {% if not node.is_hit %}ghost{% endif %}">
-    {{ node.name }}
-  </span>
-  {% endif %}
+  {% endwith %}
 
-  <button class="details-btn" aria-label="View Details" hx-get="/subroutine-details/{{ node.name|urlencode }}/"
-    hx-target="#right-panel" hx-trigger="click" hx-swap="innerHTML"></button>
+  {% else %}
+  <div class="row">
+    <span class="parent {% if not node.is_hit %}ghost{% endif %}">
+      {{ node.name }}
+    </span>
+
+    {% if statuses %}
+      {% with status=statuses|get_item:node.name %}
+      <span class="badge badge-{{ status|default:"dash" }}">{{ status|default:"-" }}</span>
+      {% endwith %}
+    {% endif %}
+
+    <button
+      type="button"
+      class="details-btn"
+      aria-label="View Details"
+      hx-get="/subroutine-details/{{ node.name|urlencode }}/"
+      hx-target="#right-panel"
+      hx-trigger="click"
+      hx-swap="innerHTML">
+    </button>
+  </div>
+  {% endif %}
 </li>

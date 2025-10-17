@@ -10,14 +10,22 @@
 {% include 'banner.html' %}
 
 <br />
-<button id="toggle-all-button">Expand All</button>
+<button
+  id="toggle-all-button"
+  data-toggle-all
+  data-target="#left-panel"
+  aria-pressed="false"
+  class="expand-all"
+>
+  Expand all
+</button>
 <br />
 
 <div id="sub-split-view" class="split-container">
-  <div class="left-panel" id="left-panel" hx-get="{% url 'calltree' sub_name=sub_name %}" hx-trigger="load"
+  <div class="left-panel" id="left-panel" hx-get="{% url 'calltree' sub_name=sub_name %}" hx-trigger="load, configChanged from:body"
     hx-swap="innerHTML">
   </div>
-  <div class="right-panel" id="right-panel" hx-get="{% url 'subroutine_details' sub_name=sub_name %}" hx-trigger="load"
+  <div class="right-panel" id="right-panel" hx-get="{% url 'subroutine_details' sub_name=sub_name %}" hx-trigger="load, configChanged from:body"
     hx-target="#right-panel" hx-swap="innerHTML">
     {% include "partials/subroutine_details.html" with sub_name=sub_name %}
   </div>

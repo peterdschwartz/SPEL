@@ -2,6 +2,7 @@ import re
 import sys
 from enum import Enum
 
+from scripts.DerivedType import DerivedType
 from scripts.utilityFunctions import Variable
 
 TAB_WIDTH = 2
@@ -48,21 +49,27 @@ def get_subgrid(dim_str: str) -> str:
             sys.exit(1)
 
 
-def var_use_statements(var_dict: dict[str, Variable]) -> list[str]:
+def var_use_statements(var_dict: dict[str, Variable],type_dict:dict[str,DerivedType]={}) -> tuple[list[str], list[tuple[str,Variable]]]:
     """
     generate use statments for dict
     """
     lines: set[str] = set()
     tabs = indent()
+    elm_inst_vars: list[tuple[str,Variable]] = []
 
     for var in var_dict.values():
         if var.name == "bounds":
             stmt = f"{tabs}use {var.declaration}, only : {var.type}\n"
         else:
-            stmt = f"{tabs}use {var.declaration}, only : {var.name}\n"
+            if var.declaration == "elm_instmod":
+                type_mod = type_dict[var.type].declaration
+                elm_inst_vars.append((type_mod, var))
+                stmt = f"{tabs}use {type_mod}, only: {var.type}\n"
+            else:
+                stmt = f"{tabs}use {var.declaration}, only : {var.name}\n"
         lines.add(stmt)
 
-    return list(lines)
+    return (list(lines), elm_inst_vars)
 
 
 def indent(mode: Tab = Tab.get):

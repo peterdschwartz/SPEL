@@ -5,7 +5,8 @@ from . import views
 
 urlpatterns = [
     path("", views.home, name="home"),
-    path("modules_calltree", views.modules_calltree, name="modules_calltree"),
+    path("sub_search/", views.sub_active_search, name="sub_active_search"),
+    path("var_search/", views.var_active_search, name="var_active_search"),
     path("sub_view/<str:sub_name>", views.sub_view, name="sub_view"),
     path("subcall/", views.subcall, name="subcall"),
     path("calltree/<str:sub_name>", views.render_calltree, name="calltree"),
@@ -20,7 +21,8 @@ urlpatterns = [
         views.type_details,
         name="type_details",
     ),
-    path("trace/<str:key>/", views.trace_dtype_var, name="trace"),
+    path("trace_view/<str:var_name>", views.trace_view, name="trace_view"),
+    path("trace/<str:key>/", views.trace_vars, name="trace"),
     path("configs/", views.config_start, name="config_start"),
     path("configs/<int:config_id>/", views.config_editor, name="config_editor"),
     path(

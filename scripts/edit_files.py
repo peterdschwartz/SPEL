@@ -6,22 +6,40 @@ import re
 import subprocess as sp
 import sys
 from logging import Logger
+from pprint import pprint
 from typing import Optional
 
 from scripts.analyze_subroutines import Subroutine
 from scripts.check_sections import check_function_start, create_init_obj
 from scripts.config import E3SM_SRCROOT, spel_output_dir
 from scripts.DerivedType import DerivedType, parse_derived_type_definition
-from scripts.fortran_modules import (FortranModule, ModTree, build_module_tree,
-                                     get_filename_from_module,
-                                     get_module_name_from_file)
+from scripts.fortran_modules import (
+    FortranModule,
+    ModTree,
+    build_module_tree,
+    get_filename_from_module,
+    get_module_name_from_file,
+    parse_use_stmts,
+)
+from scripts.fortran_parser.spel_ast import GenericOperatorExpression
 from scripts.logging_configs import get_logger, set_logger_level
 from scripts.profiler_context import profile_ctx
-from scripts.types import (LineTuple, LogicalLineIterator, ParseState,
-                           PassManager, PreProcTuple, SubInit, SubStart)
-from scripts.utilityFunctions import (find_file_for_subroutine, find_variables,
-                                      line_unwrapper, parse_variable_decl,
-                                      unwrap_section)
+from scripts.types import (
+    LineTuple,
+    LogicalLineIterator,
+    ParseState,
+    PassManager,
+    PreProcTuple,
+    SubInit,
+    SubStart,
+)
+from scripts.utilityFunctions import (
+    find_file_for_subroutine,
+    find_variables,
+    line_unwrapper,
+    parse_variable_decl,
+    unwrap_section,
+)
 
 # Define Return types
 ModParseResult = tuple[dict[str, SubInit], list[str]]
@@ -33,18 +51,13 @@ bad_modules = {
     "shr_log_mod",
     "elm_time_manager",
     "shr_infnan_mod",
-    "clm_time_manager",
     "pio",
     "shr_sys_mod",
     "perf_mod",
     "shr_assert_mod",
     "spmdmod",
     "restutilmod",
-    "reweightmod",
-    "fanmod",
-    "fanupdatemod",
     "vocemissionmod",
-    "hydrologynodrainagemod",
     "restfilemod",
     "histfilemod",
     "accumulmod",
@@ -63,17 +76,18 @@ bad_modules = {
     "externalmodelinterfacemod",
     "waterstatetype",
     "seq_drydep_mod",
-    # "temperaturetype",
-    # "waterfluxtype",
     "shr_file_mod",
     "mct_mod",
     "spmdgathscatmod",
     "perfmod_gpu",
-    'dynpftfilemod',
-    'dyncropfilemod',
-    'dynharvestmod',
-    'dynsubgriddrivermod',
+    "dynpftfilemod",
+    "dyncropfilemod",
+    "dynharvestmod",
+    "dynfateslandusechangemod",
     "cnallocationbetrmod",
+    "dynedmod",
+    "elm_interface_pflotranmod",
+    "elm_interface_funcsmod",
 }
 
 fates_mod = ["elmfatesinterfacemod"]
@@ -130,6 +144,7 @@ parse_func_start = "parse_func_start"
 parse_func_end = "parse_func_end"
 parse_shr_assert = "parse_shr_assert"
 parse_inc_shr_assert = "parse_inc_shr_assert"
+host_program = "check_host_program"
 
 # These are required to be re-compiled after an initial pass through file
 parse_bad_inst = "parse_bad_inst"
@@ -150,10 +165,19 @@ SubDict = dict[str, Subroutine]
 TypeDict = dict[str, DerivedType]
 
 
-def set_comment(state: ParseState, logger: Logger=None):
+def set_comment(state: ParseState, logger: Logger = None):
     state.line_it.comment_cont_block()
     return
 
+def check_contains(state: ParseState, logger: Logger = None):
+    if state.in_sub == 0 and state.in_func == 0: 
+        return
+    state.host_program = state.line_it.i
+
+    if state.in_sub > 0:
+        finalize_subroutine(state,logger)
+    elif state.in_func > 0:
+        finalize_function(state,logger)
 
 def set_in_subroutine(state: ParseState, logger: Logger):
     """
@@ -161,11 +185,13 @@ def set_in_subroutine(state: ParseState, logger: Logger):
     f desired, will comment out the entire subroutine, else return it's name and starting lineno
     """
     func_name = "( set_in_subroutine )"
-    if state.in_sub:
+    parent = ""
+    if state.in_sub > 0:
         logger.info("Sub module subroutine!")
+        parent = state.sub_start[-1].subname
 
     assert state.curr_line
-    state.in_sub = True
+    state.in_sub += 1
     ct = state.get_start_index()
 
     full_line = state.curr_line.line
@@ -175,11 +201,13 @@ def set_in_subroutine(state: ParseState, logger: Logger):
     if "_oacc" in subname:
         logger.info(f"{func_name} skipping {subname}")
         return
-    logger.debug(f"{func_name}found subroutine {subname} at {ct+1}")
 
     cpp_ln = ct if state.cpp_file else None
     sub_start: Optional[SubStart] = SubStart(
-        subname=subname, start_ln=start_ln, cpp_ln=cpp_ln
+        subname=subname,
+        start_ln=start_ln,
+        cpp_ln=cpp_ln,
+        parent=parent,
     )
 
     # Check if subroutine needs to be removed before processing
@@ -190,35 +218,28 @@ def set_in_subroutine(state: ParseState, logger: Logger):
     # Remove if it's an IO routine
     test_decompinit = bool(subname.lower() == "decompinit_lnd_using_gp")
     remove = bool((match_remove and test_init) or match_gsmap or test_decompinit)
-    logger.debug(
-        f"Match gsmap {match_gsmap} with pattern: {regex_gsmap.pattern} on {subname}\n"
-        f"remove: {remove}"
-    )
     if remove:
         _, _ = state.line_it.consume_until(
             end_pattern=regex_end_sub, start_pattern=None
         )
         state.removed_subs.append(subname)
-        state.in_sub = False
+        state.in_sub -= 1
         state.line_it.comment_cont_block(index=ct)
-        sub_start = None
-    state.sub_start = sub_start
-    state.func_init = None
+        return
 
+    state.sub_start.append(sub_start)
     return
 
 
 def finalize_subroutine(state: ParseState, logger: Logger):
     func_name = "( finalize_subroutine )"
-    if not state.in_sub:
-        print(
-            f"{func_name}::ERROR: Matched subroutine end without matching the start! {state.curr_line}"
-        )
-        sys.exit(1)
-    create_init_obj(state=state, logger=logger)
+    if state.in_sub == 0:
+        return
+    sub_start = state.sub_start.pop()
+    create_init_obj(state=state, logger=logger, sub_start=sub_start)
     # Reset subroutine state
-    state.in_sub = False
-    state.sub_start = None
+    state.in_sub -= 1
+    assert state.in_sub == len(state.sub_start)
     return
 
 
@@ -241,31 +262,30 @@ def set_in_function(state: ParseState, logger: Logger):
             f"result match: {regex_result.search(state.curr_line.line)}\n"
         )
         return
-    if state.in_sub:
-        logger.error(
-            f"{func_name}::Error-Encountered function decl in subroutine!\n{state.curr_line}"
-        )
-        sys.exit(1)
+    parent = ""
+    if state.in_sub > 0:
+        assert len(state.sub_start) == 1
+        parent = state.sub_start[0].subname
 
-    state.in_func = True
+    state.in_func += 1
     cpp_ln = state.get_start_index() if state.cpp_file else None
     start_ln_pair = PreProcTuple(ln=state.curr_line.ln, cpp_ln=cpp_ln)
-    func_init = check_function_start(state.curr_line.line, start_ln_pair, logger)
-    state.func_init = func_init
+    func_init = check_function_start(state.curr_line.line, start_ln_pair, parent)
+    state.func_init.append(func_init)
     return
 
 
 def finalize_function(state: ParseState, logger: Logger):
     func_name = "( finalize_function )"
-    if not state.in_func or not state.func_init:
+    if not state.in_func > 0 or not state.func_init:
         logger.error(
             f"{func_name}::ERROR: Matched function end without matching the start!\n{state.curr_line}"
         )
         sys.exit(1)
-    create_init_obj(state=state, logger=logger)
+    func_init = state.func_init.pop()
+    create_init_obj(state=state, logger=logger,func_init=func_init)
     # reset function state:
-    state.in_func = False
-    state.func_init = None
+    state.in_func -= 1
     return
 
 
@@ -292,7 +312,7 @@ def handle_bad_inst(state: ParseState, logger: Logger):
         else:
             # simple statement just remove
             set_comment(state, logger)
-    elif match_decl and not state.in_sub:
+    elif match_decl and not state.in_sub > 0:
         # global variable, just remove
         set_comment(state, logger)
     return
@@ -326,7 +346,8 @@ def parse_bad_modules(
     bad_mod_string = "|".join(bad_modules)
     module_pattern = re.compile(rf"\s*use\s+\b({bad_mod_string})\b", re.IGNORECASE)
 
-    for full_line, _ in state.line_it:
+    for fline in state.line_it:
+        full_line = fline.line
         start_index = state.line_it.start_index
         orig_ln = state.line_it.lines[start_index].ln
         m = module_pattern.search(full_line)
@@ -443,6 +464,7 @@ def get_used_mods(
     if fort_mod.name in mod_dict:
         return mods, mod_dict
 
+    lower_mods = [get_module_name_from_file(m)[1] for m in mods]
     # Read file
     needed_mods = []
     ct = 0
@@ -451,9 +473,10 @@ def get_used_mods(
     lines = file.readlines()
     file.close()
 
-    lpairs = [LineTuple(line=line,ln=i) for i,line in enumerate(lines)]
-    line_it = LogicalLineIterator(lines=lpairs,log_name="get_used_mods")
+    lpairs = [LineTuple(line=line, ln=i) for i, line in enumerate(lines)]
+    line_it = LogicalLineIterator(lines=lpairs, log_name="get_used_mods")
     fort_mod.num_lines = len(lines)
+    fort_mod.module_lines = [LineTuple(line=line, ln=i) for i, line in enumerate(lines)]
 
     regex_type_start = re.compile(r"^\s*type\s*(?!\()", re.IGNORECASE)
     regex_skip = re.compile(r"^type\s*\(")
@@ -463,18 +486,34 @@ def get_used_mods(
     regex_contains = re.compile(r"^(contains)", re.IGNORECASE)
     in_type: bool = False
 
+    match_use = re.compile(r"^(use)\s+")
+    use_lines = line_it.get_lines(match_use)
+    use_stmts = parse_use_stmts(use_lines)
+    for stmt in use_stmts:
+        mod = stmt.module
+        if mod in bad_modules or re.search(r'betr',mod.lower()):
+            continue
+        needed_modfile = get_filename_from_module(mod, verbose=verbose)
+        if needed_modfile is None:
+            bad_modules.add(mod)
+        else:
+            fort_mod.add_dependency(stmt)
+            if (
+                mod not in needed_mods
+                and mod not in lower_mods
+                and mod not in ["cudafor", "verificationmod"]
+            ):
+                needed_mods.append(mod)
+
     var_decls_lines: list[LineTuple] = []
     module_head = True
-    for full_line, _ in line_it:
+    for fline in line_it:
+        full_line = fline.line
         ct = line_it.get_start_ln()
-
-        # l, ct = line_unwrapper(lines=lines, ct=ct)
-        # l = l.strip().lower()
         match_contains = regex_contains.search(full_line)
-        if match_contains:
+        if match_contains and not in_type:
             module_head = False
             fort_mod.end_of_head_ln = ct
-            # Nothing else to check in this line
             continue
 
         if module_head:
@@ -489,23 +528,6 @@ def get_used_mods(
             if not in_type and find_variables.search(full_line):
                 var_decls_lines.append(LineTuple(ln=ct, line=full_line))
 
-        match_use = re.search(r"^(use)[\s]+", full_line)
-        if match_use:
-            # Get rid of comma if no space
-            templ = full_line.replace(",", " ")
-            mod = templ.split()[1]
-            mod = mod.strip()
-            mod = mod.lower()
-            if mod not in bad_modules:
-                fort_mod.add_dependency(mod=mod, line=full_line, ln=ct)
-                lower_mods = [get_module_name_from_file(m)[1] for m in mods]
-                if (
-                    mod not in needed_mods
-                    and mod not in lower_mods
-                    and mod not in [ "cudafor", "verificationmod"]
-                ):
-                    needed_mods.append(mod)
-
     if module_head:
         fort_mod.end_of_head_ln = len(lines) - 1
     head_lines = [
@@ -517,18 +539,8 @@ def get_used_mods(
     # Check against already used Mods
     files_to_parse = []
     for m in needed_mods:
-        if m in bad_modules:
-            continue
         needed_modfile = get_filename_from_module(m, verbose=verbose)
-        if needed_modfile is None:
-            bad_modules.add(m)
-            regex_modkey = re.compile(rf"{m}@\d+")
-            keys_to_remove = [
-                key for key in fort_mod.modules_by_ln if regex_modkey.search(key)
-            ]
-            for key in keys_to_remove:
-                fort_mod.modules_by_ln.pop(key)
-        elif needed_modfile not in mods:
+        if needed_modfile not in mods:
             files_to_parse.append(needed_modfile)
             mods.append(needed_modfile)
 
@@ -543,7 +555,6 @@ def get_used_mods(
             if gvar.name not in fort_mod.defined_types[gvar.type].instances:
                 fort_mod.defined_types[gvar.type].instances[gvar.name] = gvar
 
-    fort_mod.module_lines = [LineTuple(line=line,ln=i) for i, line in enumerate(lines)]
     mod_dict[fort_mod.name] = fort_mod
     if ifile not in mods:
         mods.append(ifile)
@@ -644,13 +655,6 @@ def modify_file(
     func_name = "( modify_file )"
     fn: str = fort_mod.filepath
     mod_name: str = fort_mod.name
-    iter_logger = get_logger(mod_name)
-    set_logger_level(logger=iter_logger, level=logging.INFO)
-    set_logger_level(logger=pass_manager.logger, level=logging.INFO)
-    mod_debug = "phenologyfluxlimitmod"
-    if mod_name == mod_debug:
-        set_logger_level(logger=pass_manager.logger, level=logging.DEBUG)
-        set_logger_level(logger=iter_logger, level=logging.DEBUG)
 
     logger = pass_manager.logger
     # Test if the file in question contains any ifdef statements:
@@ -662,30 +666,31 @@ def modify_file(
     cpp_lines = apply_preprocessor(fn)
     lines = [line.line for line in orig_lines]
 
-    # orig_lines = [LineTuple(line=text, ln=i) for i, text in enumerate(lines)]
     work_lines = remove_cpp_directives(cpp_lines, fn, logger)
     ### SANITY CHECK ####
     for lt in work_lines:
         if lt.line.rstrip("\n").strip():
-            if not re.search(r"(__file__|__line__|include|assert)", lines[lt.ln].lower()):
+            if not re.search(
+                r"(__file__|__line__|include|assert)", lines[lt.ln].lower()
+            ):
                 assert (
-                    lt.line == lines[lt.ln]
-                ), f"Couldn't map cpp lines for {base_fn}\n{lt.line} /= {lines[lt.ln]}"
+                    lt.line.rstrip("\n").strip() == lines[lt.ln].rstrip("\n").strip()
+                ), f"Couldn't map cpp lines for {base_fn}\n{lt.line}\n /=\n{lines[lt.ln]}"
 
     state = ParseState(
         module_name=mod_name,
+        fort_mod=fort_mod,
         cpp_file=cpp_file,
         work_lines=work_lines,
         orig_lines=orig_lines,
         path=fn,
         curr_line=None,
         line_it=LogicalLineIterator(work_lines),
+        logger=logger,
         sub_init_dict={},
         removed_subs=[],
-        in_sub=False,
-        in_func=False,
-        sub_start=None,
-        func_init=None,
+        in_sub=0,
+        in_func=0,
     )
     parse_bad_modules(state, logger)
 
@@ -710,12 +715,6 @@ def modify_file(
     )
     pass_manager.run(state)
 
-    if mod_name == mod_debug:
-        pass_manager.logger.info("Commented out the following lines: ")
-        for lt in state.work_lines:
-            if lt.commented:
-                pass_manager.logger.info(f"{lt}")
-
     remove_reference_to_subroutine(state, fort_mod.end_of_head_ln)
 
     if cpp_file:
@@ -735,7 +734,6 @@ def modify_file(
 
     if overwrite:
         out_fn = f"{case_dir}/{fn.split('/')[-1]}"
-        logger.debug("Writing to file: %s", out_fn)
         with open(out_fn, "w") as ofile:
             ofile.writelines(write_lines)
 
@@ -797,10 +795,21 @@ def process_for_unit_test(
         name=parse_inc_shr_assert,
     )
 
+    pass_manager.add_pass(
+        pattern=re.compile(r"^(contains)", re.IGNORECASE),
+        fn=check_contains,
+        name=host_program,
+    )
+
     with profile_ctx(enabled=False, section="get_used_mods") as pc:
         # Find if this file has any not-processed mods
         for s in sub_name_list:
-            fname, _, _ = find_file_for_subroutine(name=s)
+            if "::" in s:
+                mod_name, sub_name = s.split("::")
+                fname = get_filename_from_module(mod_name)
+                assert fname, f"Error -- couldn't find file for {s}"
+            else:
+                fname, _, _ = find_file_for_subroutine(name=s)
             mods, mod_dict = get_used_mods(
                 ifile=fname,
                 mods=mods,
@@ -855,9 +864,7 @@ def process_for_unit_test(
                 overwrite=overwrite,
             )
             sub_init_dict.update(temp_objs)
-            mod_dict[mod_name].subroutines = {
-                sub.split("::")[-1] for sub in temp_objs.keys()
-            }
+            mod_dict[mod_name].subroutines = {sub for sub in temp_objs.keys()}
             mod_lines_unwrp = unwrap_section(lines=parsed_lines, startln=0)
             mod_dict[mod_name].module_lines = mod_lines_unwrp
             mod_dict[mod_name].modified = True
@@ -869,7 +876,7 @@ def process_for_unit_test(
         m_lines = mod_dict[initobj.mod_name].get_mod_lines()
         initobj.mod_lines = m_lines
         subname = initobj.name
-        sub_dict[subname] = Subroutine(initobj)
+        sub_dict[f"{initobj.mod_name}::{subname}"] = Subroutine(initobj)
 
     for fort_mod in mod_dict.values():
         fort_mod.find_allocations(sub_dict)
@@ -877,7 +884,7 @@ def process_for_unit_test(
     return ordered_mods
 
 
-def remove_reference_to_subroutine(state: ParseState,head_ln: int):
+def remove_reference_to_subroutine(state: ParseState, head_ln: int):
     """
     Given list of subroutine names, this function goes back and
     comments out declarations and other references
@@ -888,7 +895,8 @@ def remove_reference_to_subroutine(state: ParseState,head_ln: int):
 
     regex_sub_decl = re.compile(rf"\b({sname_string})\b")
     state.line_it.reset()
-    for full_line, _ in state.line_it:
+    for fline in state.line_it:
+        full_line = fline.line
         if state.line_it.get_orig_ln() > head_ln:
             break
         if regex_sub_decl.search(full_line):

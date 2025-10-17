@@ -1,14 +1,14 @@
 {% if args %}
 <ul class="header-list">
-  <!-- <li> -->
-  <div class="toggler caret">
-    <span class="toggler-label">Arguments</span>
-  </div>
-  <ul class="child">
-    {% for arg_type, arg_name, dim in args %}
-    <li><span class="parent">{{arg_type}} {{ arg_name }} {{ dim }}-D</span></li>
-    {% endfor %}
-  </ul>
-  <!-- </li> -->
+  <li class="header-group" data-toggle>
+    <span class="toggler caret" role="button" tabindex="0" aria-expanded="false"
+      aria-controls="arguments">Arguments</span>
+
+    <ul class="child" id="arguments">
+      {% for arg_type, arg_name, dim in args %}
+      <li><pre><code class="hljs language-fortran">{{arg_type}} :: {{ arg_name }}</code></pre></li>
+      {% endfor %}
+    </ul>
+  </li>
 </ul>
 {% endif %}

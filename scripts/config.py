@@ -10,7 +10,7 @@ spel_mods_dir = spel_dir + "SourceFiles/"
 spel_output_dir = scripts_dir + "/script-output/"
 
 # E3SM root directory.
-E3SM_SRCROOT = spel_dir + "../repo/E3SM"
+E3SM_SRCROOT = spel_dir + "../E3SM"
 # path for modules shared by components (eg, shr_kind_mod)
 SHR_SRC = E3SM_SRCROOT + "/share/util/"
 ELM_SRC = E3SM_SRCROOT + "/components/elm/src/"  # elm source directory
@@ -44,13 +44,7 @@ default_mods = ["subgridmod", "filtermod"]
 
 # list of files neeeded for all unit-tests
 unit_test_files = [
-    "H5InterfaceMod.o",
     "decompInitMod.o",
-    "elm_instMod.o",
-    # "fileio_mod.o",
-    # "initializeParameters.o",
-    # "UnitTestAllocatorMod.o",
-    # "update_accMod.o",
     "FUTConstantsMod.o",
     "ReadWriteMod.o",
     "duplicateMod.o",
@@ -60,6 +54,12 @@ unit_test_files = [
     "main.o",
 ]
 
+
+class Options:
+    def __init__(self):
+        self.db_mode: bool = False
+
+options = Options()
 
 class BColors:
     HEADER = "\033[95m"

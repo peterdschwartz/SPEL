@@ -1,0 +1,14 @@
+{% if items %}
+<div class="dropdown" role="listbox" aria-label="Variable matches">
+  {% for item in items %}
+  <a href="{% url 'trace_view' item.qualified %}" role="option" tabindex="0" hx-boost="true" data-kind="{{ item.kind }}"
+    data-qualified="{{ item.qualified }}">
+    {{ item.label }}
+  </a>
+  {% endfor %}
+</div>
+{% elif query %}
+<div class="dropdown" role="listbox">
+  <div class="empty">No matches for “{{ query }}”.</div>
+</div>
+{% endif %}

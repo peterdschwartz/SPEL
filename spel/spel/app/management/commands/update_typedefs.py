@@ -30,13 +30,7 @@ class Command(BaseCommand):
                 bounds = row.get("bounds").strip()
                 dim = int(dim)
                 # Lookup the Module record.
-                try:
-                    module_obj = Modules.objects.get(module_name=module_name)
-                except Modules.DoesNotExist:
-                    self.stdout.write(
-                        self.style.ERROR(f"Module {module_name} not found.")
-                    )
-                    sys.exit(1)
+                module_obj = Modules.objects.get(module_name=module_name)
 
                 user_type_obj, created = UserTypes.objects.update_or_create(
                     module=module_obj,

@@ -1,12 +1,19 @@
 {% if callees %}
 <ul class="header-list">
-  <div class="toggler caret">
-    <span class="toggler-label">Child Subroutines</span>
-  </div>
-  <ul class="child">
-    {% for entry in callees %}
-    <li><span class="parent"> {{ entry }}</span></li>
-    {% endfor %}
-  </ul>
+  <li class="header-group" data-toggle>
+    <span class="toggler caret"
+          role="button" tabindex="0"
+          aria-expanded="false"
+          aria-controls="child-callees">
+      Child Subroutines
+    </span>
+
+    <ul id="child-callees" class="child">
+      {% for entry in callees %}
+      <li><span class="parent"><code>{{ entry }}</code></span></li>
+      {% endfor %}
+    </ul>
+  </li>
 </ul>
 {% endif %}
+

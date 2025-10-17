@@ -1,15 +1,10 @@
-<dialog id="nml-modal" class="nml-modal" open>
+<dialog id="nml-modal" class="nml-modal">
   <form method="dialog" class="nml-modal__header">
     <h3 style="margin:0;">Namelist values — {{ active_label }}{% if active_kind %} ({{ active_kind }}){% endif %}</h3>
     <button class="nml-close" value="close" aria-label="Close">&times;</button>
   </form>
 
   <div class="nml-modal__body">
-    <div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem;">
-      <button class="styled-button" onclick="nmlCopyJSON(event)">Copy overrides JSON</button>
-      <small style="opacity:.8;">Only keys set by the active config are included in JSON; others use defaults.</small>
-    </div>
-
     <div class="nml-table-wrap">
       <table class="nml-table">
         <thead>
@@ -20,40 +15,37 @@
           </tr>
         </thead>
         <tbody>
-          {% for r in rows %}
+          {% for r in config_rows %}
           <tr>
             <td>{{ r.module }}::{{ r.name }}</td>
             <td><code>{{ r.value }}</code></td>
             <td>
-              {% if r.source == "config" %}
               <span class="badge badge-config">config</span>
-              {% else %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% for r in default_rows %}
+          <tr>
+            <td>{{ r.module }}::{{ r.name }}</td>
+            <td><code>{{ r.value }}</code></td>
+            <td>
               <span class="badge badge-default">default</span>
-              {% endif %}
             </td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
-
-    <pre id="nml-json" class="nml-json" style="display:none;">{{ json_payload|safe }}</pre>
   </div>
 </dialog>
-
 <script>
-  function nmlCopyJSON(e) {
-    e.preventDefault();
-    const el = document.getElementById('nml-json');
-    const text = el ? el.textContent : '{}';
-    navigator.clipboard.writeText(text).then(() => {
-      // tiny feedback
-      const btn = e.currentTarget;
-      const old = btn.textContent;
-      btn.textContent = 'Copied!';
-      setTimeout(() => {btn.textContent = old;}, 1200);
-    });
-  }
+  // Open the dialog as soon as this fragment is inserted into the DOM
+  (function () {
+    var dlg = document.getElementById('nml-modal');
+    if (dlg && typeof dlg.showModal === 'function') {
+      dlg.showModal();
+    }
+  })();
 </script>
 
 <style>

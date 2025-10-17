@@ -29,6 +29,7 @@ module test_sub_parse
    if (.true.) then 
       print*, 'what'
    end if
+
 #endif
 
  type bounds_type
@@ -49,6 +50,8 @@ module test_sub_parse
       real(r8), pointer :: hrv_deadstemn_to_prod100n(:) => null() ! dead stem N harvest mortality to 100-year product pool (gN/m2/s)
       real(r8), pointer :: m_n_to_litr_met_fire(:, :) => null() ! N from leaf, froot, xfer and storage N to litter labile N by fire (gN/m3/s)
       real(r8), pointer :: m_n_to_litr_lig_fire(:, :) => null() ! N from leaf, froot, xfer and storage N to litter labile N by fire (gN/m3/s)
+      real(r8), pointer :: col_nf%decomp_npools_sourcesink
+      real(r8), pointer :: col_nf%decomp_npools_transport_tendency
       contains
          procedure, public :: Init  => col_nf_init
    end type
@@ -68,7 +71,6 @@ module test_sub_parse
      procedure(soil_suction_inverse_interface), deferred :: soil_suction_inverse
   end type soil_water_retention_curve_type
 
-   type(column_nitrogen_flux), target :: col_nf
 
   type, public :: ConcTransportType
      !! Type that points to decomposition pools for vertical transport calculations
@@ -119,6 +121,12 @@ module test_sub_parse
     module procedure Tridiagonal_mr
   end interface Tridiagonal
 
+   type(column_nitrogen_flux), target :: col_nf, & 
+      !! hekadfklalkljasddf;lfkjasadldlfkjkj
+      col_nf_middle, &
+      !
+      col_nf_last
+
 contains
    subroutine createLitterTransportList()
       ! This subroutine creates a list that will point to the
@@ -138,42 +146,8 @@ contains
       endif
 
       allocate(transport_ptr_list(ntype))
-      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-      ! C
-      transport_ptr_list(1)%conc_ptr        => col_cs%decomp_cpools_vr
-      transport_ptr_list(1)%src_ptr         => col_cf%decomp_cpools_sourcesink
-      transport_ptr_list(1)%trcr_tend_ptr   => col_cf%decomp_cpools_transport_tendency
-      ! N
-      transport_ptr_list(2)%conc_ptr        => col_ns%decomp_npools_vr
       transport_ptr_list(2)%src_ptr         => col_nf%decomp_npools_sourcesink
       transport_ptr_list(2)%trcr_tend_ptr   => col_nf%decomp_npools_transport_tendency
-      ! P
-      transport_ptr_list(3)%conc_ptr        => col_ps%decomp_ppools_vr
-      transport_ptr_list(3)%src_ptr         => col_pf%decomp_ppools_sourcesink
-      transport_ptr_list(3)%trcr_tend_ptr   => col_pf%decomp_ppools_transport_tendency
-      ! c13 and c14 if there
-      if(use_c14 .and. use_c13) then
-         !
-         transport_ptr_list(4)%conc_ptr       => c13_col_cs%decomp_cpools_vr
-         transport_ptr_list(4)%src_ptr        => c13_col_cf%decomp_cpools_sourcesink
-         transport_ptr_list(4)%trcr_tend_ptr  => c13_col_cf%decomp_cpools_transport_tendency
-         !
-         transport_ptr_list(5)%conc_ptr       => c14_col_cs%decomp_cpools_vr
-         transport_ptr_list(5)%src_ptr        => c14_col_cf%decomp_cpools_sourcesink
-         transport_ptr_list(5)%trcr_tend_ptr  => c14_col_cf%decomp_cpools_transport_tendency
-      else
-         if(use_c13) then
-            transport_ptr_list(4)%conc_ptr       => c13_col_cs%decomp_cpools_vr
-            transport_ptr_list(4)%src_ptr        => c13_col_cf%decomp_cpools_sourcesink
-            transport_ptr_list(4)%trcr_tend_ptr  => c13_col_cf%decomp_cpools_transport_tendency
-         end if
-         if (use_c14) then
-            transport_ptr_list(4)%conc_ptr       => c14_col_cs%decomp_cpools_vr
-            transport_ptr_list(4)%src_ptr        => c14_col_cf%decomp_cpools_sourcesink
-            transport_ptr_list(4)%trcr_tend_ptr  => c14_col_cf%decomp_cpools_transport_tendency
-         end if
-      end if
-
    end subroutine createLitterTransportList
 
    subroutine allocInit(bounds)
@@ -280,16 +254,6 @@ function constructor(bounds) result(this)
    end function shr_pio_getindex_fromname
 
   function get_gamma_A(ivt_in, elai240_in,elai_in,nclass_in)
-
-    ! Activity factor for leaf age (Guenther et al., 2006)
-    !-----------------------------
-    ! If bgc not active, then elai is constant therefore gamma_a=1.0
-    ! gamma_a set to unity for evergreens (Patches 1, 2, 4, 5)
-    ! Note that we assume here that the time step is shorter than the number of 
-    !days after budbreak required to induce isoprene emissions (ti=12 days) and 
-    ! the number of days after budbreak to reach peak emission (tm=28 days)
-    !
-    ! !ARGUMENTS:
     implicit none
     integer,intent(in)  :: ivt_in
     integer,intent(in)  :: nclass_in
@@ -359,7 +323,7 @@ function constructor(bounds) result(this)
 
    subroutine call_sub(numf, bounds, mytype, patch_state_updater)
       use shr_const_mod, only : test_type
-      use constants_mod, only : i_const, param2
+      use constants_mod, only : i_const, param2, unused_inst
 
       integer, intent(in) :: numf
       type(bounds_type), intent(in) :: bounds
@@ -414,7 +378,7 @@ function constructor(bounds) result(this)
       field1(c) = shr_const_pi*mytype%field2(c)
 
       call test_parsing_sub(bounds, max(input1*shr_const_pi, local_var+input2(g)), &
-         col_nf%m_n_to_litr_met_fire(c,1:N), landunit_is_special(g),var3=input3)
+         col_nf%m_n_to_litr_met_fire(c,1:N), landunit_is_special(g),var3=field1(c))
 
       call Tridiagonal(bounds, -lbj+1, four, jtop, numf, soilc, a_tri, b_tri, c_tri, r_tri, u_tri)
       call col_nf%Init(bounds%begc, bounds%endc)
@@ -422,25 +386,43 @@ function constructor(bounds) result(this)
       call ptr_test_sub(filter(i_type)%num_soilc, filter(i_type)%soilc, test_ptr)
 
       call trace_dtype_example(mytype, col_nf, .true.)
+      call trace_dtype_example(mytype,col_nf_middle,.true.)
+      call trace_dtype_example(mytype,col_nf_last,.true.)
+
+      call parent_sub()
+
       veg_rootc_bigleaf(:,:) = 2
 
       test_ptr(:,:) = SHR_CONST_SPVAL
 
+      if(.true.) field1(c) = SHR_CONST_PI
       end associate
 
-      if(.true.) field1(c) = SHR_CONST_PI
    end subroutine call_sub
 
+   subroutine parent_sub()
+      ! mytype_inst is declared in a module
+      call test_nested(mytype_inst)
+   end subroutine parent_sub
+
+   subroutine test_nested(pass_vars)
+      type(test_type), intent(inout) :: pass_vars
+      call photosynthesis(pass_vars)
+   end subroutine test_nested
+
+   subroutine photosynthesis(photosyns_vars)
+      type(test_type), intent(inout) :: photosyns_vars
+      photosyns_vars%field1 = photosyns_vars%field2 + photosyns_vars%field3
+   end subroutine photosynthesis
+
    subroutine trace_dtype_example(mytype2, col_nf_inst, flag)
-      type(test_type) , INTENT(INOUT) :: mytype2
-      type(column_nitrogen_flux), INTENT(INOUT) :: col_nf_inst
+      type(test_type) , intent(inout) :: mytype2
+      type(column_nitrogen_flux), intent(inout) :: col_nf_inst
       logical, intent(in) :: flag
       integer :: i
       associate(&
           field1 => mytype2%field1,&
           field2 => mytype2%field2,&
-          !
-
           field3 => mytype2%field3,&
           field4 => mytype2%field4,&
           hrv => col_nf_inst%hrv_deadstemn_to_prod10n &
@@ -740,11 +722,35 @@ function constructor(bounds) result(this)
   end subroutine Tridiagonal_mr
 
   subroutine add(x,y)
-   real(r8), intent(in) :: x
-   real(r8), intent(inout) :: y
+    real(r8), intent(in) :: x
+    real(r8), intent(inout) :: y
+    real(r8), parameter :: alpha
 
-   y = x+y
+    y = x+y
 
    end subroutine add
+
+   subroutine host_subroutine(x,y,z)
+      real(r8), intent(in) :: x,y,z
+      real(r8) :: test, fxy
+
+      call sub_program1(x,y,test)
+      fxy = sub_func1(x,y)
+
+   contains
+
+      subroutine sub_program(a0,a1,a2)
+         real(r8), intent(in) :: a0,a1
+         real(r8), intent(out) :: a2
+         a2 = a0+alpha*a1
+      end subroutine sub_program
+
+      function sub_func1(b1,b2) result(res)
+         real(r8), intent(in) :: b1, b2
+         real(r8) :: res
+         res = b1/b2*alpha
+      end function sub_func1
+
+   end subroutine host_subroutine
 
 end module test_sub_parse

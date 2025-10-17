@@ -40,8 +40,10 @@ class Command(BaseCommand):
 
                 arg_obj, created = SubroutineArgs.objects.update_or_create(
                     subroutine=subroutine_obj,
-                    arg_type=arg_type,
                     arg_name=arg_name,
-                    dim=dim,
+                    defaults={
+                    "arg_type":arg_type,
+                    "dim":dim,
+                    },
                 )
         self.stdout.write(self.style.SUCCESS("Subroutine Args Data update complete."))

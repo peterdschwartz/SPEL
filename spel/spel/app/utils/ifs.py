@@ -5,14 +5,20 @@ from django.db.models import Exists, OuterRef, Prefetch
 
 from scripts.fortran_parser import lexer
 from scripts.fortran_parser.evaluate_ifs import eval_if_condition
-from scripts.fortran_parser.spel_ast import (ExpressionStatement,
-                                             PrefixExpression)
+from scripts.fortran_parser.spel_ast import PrefixExpression, expr_from_dict
 from scripts.fortran_parser.spel_parser import Parser
 from scripts.types import LineTuple, LogicalLineIterator
 
-from ..models import (FlatIf, FlatIfNamelistVar, IfEvaluationByHash,
-                      IntrinsicGlobals, NamelistVariable)
-
+from ..models import (
+    CascadeDependence,
+    CascadePair,
+    FlatIf,
+    FlatIFCascadeVar,
+    FlatIfNamelistVar,
+    IfEvaluationByHash,
+    NamelistVariable,
+    Subroutines,
+)
 
 def build_env_from_active(active_data) -> dict[str, str]:
     """
@@ -22,18 +28,25 @@ def build_env_from_active(active_data) -> dict[str, str]:
     """
     # Pull the variables of interest with their module/name/defaults
     rows = NamelistVariable.objects.select_related("active_var_id").values_list(
-        "active_var_id__var_id",
         "active_var_id__var_name",
         "active_var_id__value",
     )
-
     env: dict[str, str] = {}
 
-    for var_id, var_name, default_value in rows:
-        key = str(var_id)
-        # Use override if present; otherwise default from IntrinsicGlobals.value
-        val = active_data.get(key, default_value).lower()
+    for var_name, default_value in rows:
+        val = active_data.get(var_name, default_value).lower()
         env[var_name] = val
+
+    cascade_rows = CascadePair.objects.select_related("dependence", "dependence__trigger_var").values_list(
+        "dependence__cascade_var",
+        "dependence__trigger_var__active_var_id__var_name",
+        "nml_val",
+        "cascade_val",
+    )
+    for cascade_var, nml_var, nml_val, cascade_val in cascade_rows:
+        set_nml_val = env[nml_var]
+        if set_nml_val == nml_val:
+            env[cascade_var] = cascade_val
     return env
 
 
@@ -48,18 +61,8 @@ def _get_expr_value(expr):
         return expr.value
 
 
-@lru_cache(maxsize=1_000)
-def parse_condition_ast(norm_cond: str):
-    print(f"parsing {norm_cond}")
-    li = LogicalLineIterator([LineTuple(line=norm_cond, ln=1)])
-    lex = lexer.Lexer(li)
-    p = Parser(lex=lex)
-    program = p.parse_program()
-    return program.statements.pop()
-
-
 @transaction.atomic
-def recompute_if_evals_for_hash(config_hash: str, active_data) -> int:
+def compute_if_evals_for_hash(config_hash: str, active_data: dict, overwrite:bool=False) -> int:
     """
     Recompute and store FlatIf evaluations for the given config hash.
     Returns number of rows written.
@@ -72,12 +75,17 @@ def recompute_if_evals_for_hash(config_hash: str, active_data) -> int:
             Prefetch(
                 "flatifnamelistvar_set",
                 queryset=FlatIfNamelistVar.objects.select_related("namelist_var"),
-            )
+            ),
         )
         .only("flatif_id", "subroutine_id", "start_ln", "end_ln", "condition")
     )
 
-    IfEvaluationByHash.objects.filter(config_hash=config_hash).delete()
+    if overwrite:
+        IfEvaluationByHash.objects.filter(config_hash=config_hash).delete()
+
+    qs = IfEvaluationByHash.objects.filter(config_hash=config_hash)
+    if qs.exists():
+        return qs.count()
 
     lines = [f"{k} = {v}" for k, v in env.items()]
     lex = lexer.Lexer(LogicalLineIterator([LineTuple(line=s, ln=1) for s in lines]))
@@ -90,8 +98,8 @@ def recompute_if_evals_for_hash(config_hash: str, active_data) -> int:
     }
     batch = []
     for fi in flatifs.iterator(chunk_size=1000):
-        cond_ast = parse_condition_ast(fi.condition)
-        is_active = bool(eval_if_condition(cond_ast, eval_env))
+        cond_ast = expr_from_dict(fi.condition)
+        is_active = eval_if_condition(cond_ast, eval_env)
         batch.append(
             IfEvaluationByHash(
                 config_hash=config_hash,
@@ -102,7 +110,6 @@ def recompute_if_evals_for_hash(config_hash: str, active_data) -> int:
                 is_active=is_active,
             )
         )
-
     IfEvaluationByHash.objects.bulk_create(batch, ignore_conflicts=True)
     return len(batch)
 
@@ -136,6 +143,59 @@ def filter_dtype_vars_by_hash(qs, config_hash: str):
         start_ln__lte=OuterRef("ln"),
         end_ln__gte=OuterRef("ln"),
     )
+    return qs.annotate(in_inactive=Exists(inactive_var_ranges)).filter(in_inactive=False)
+
+
+def filter_access_lns_by_hash(qs, sub_field: str, lineno_field: str, config_hash: str):
+    """
+    NOTE:  Could probably reuse the filter_dtype_vars_by_hash for this
+    if I add the correct subroutine_id field to the propagated table, OR
+    passing in the field names via arguments?
+    """
+
+    inactive_var_ranges = IfEvaluationByHash.objects.filter(
+        config_hash=config_hash,
+        subroutine_id=OuterRef(sub_field),
+        is_active=False,
+        start_ln__lte=OuterRef(lineno_field),
+        end_ln__gte=OuterRef(lineno_field),
+    )
     return qs.annotate(in_inactive=Exists(inactive_var_ranges)).filter(
         in_inactive=False
     )
+
+def debug_inactive_ifs(sub_id: int, config_hash: str):
+    qs = (
+        IfEvaluationByHash.objects
+        .filter(
+            config_hash=config_hash,
+            subroutine_id=sub_id,
+            is_active=True,
+        ).select_related("flatif")
+        .order_by("start_ln", "end_ln")
+    )
+
+    qs = [r for r in qs if 'use_c13' in str(expr_from_dict(r.flatif.condition))]
+    if qs:
+        subroutine = Subroutines.objects.get(subroutine_id=sub_id)
+        print(f"Inactive IF ranges for {subroutine.subroutine_name}, cfg={config_hash}")
+        for r in qs:
+            cond = expr_from_dict(r.flatif.condition)
+            print(f"  [{r.start_ln}, {r.end_ln}]  is_active={r.is_active} cond: {cond}")
+
+    return
+
+def debug_inactive_flags(prop_qs, sub_field, lineno_field, config_hash):
+    inactive_var_ranges = IfEvaluationByHash.objects.filter(
+        config_hash=config_hash,
+        subroutine_id=OuterRef(sub_field),
+        is_active=False,
+        start_ln__lte=OuterRef(lineno_field),
+        end_ln__gte=OuterRef(lineno_field),
+    )
+
+    debug_qs = prop_qs.annotate(
+        in_inactive=Exists(inactive_var_ranges)
+    ).order_by("call_site__parent_subroutine_id", "call_site__lineno", "lineno")
+
+

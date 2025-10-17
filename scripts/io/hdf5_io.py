@@ -100,7 +100,7 @@ def generate_constants_io_hdf5(
     lines.append(f"module {mod_name}\n")
     lines.append(f"{tabs}!!! Auto-generated Fortran code for HDF5 I/O\n")
     lines.append(f"{tabs}use hdf5\n")
-    use_stmts = hio.var_use_statements(vars)
+    use_stmts, _ = hio.var_use_statements(vars)
     lines.extend(use_stmts)
 
     lines.extend(

@@ -36,7 +36,15 @@ class Command(BaseCommand):
                     sys.exit(1)
 
                 try:
-                    sub_obj = Subroutines.objects.get(subroutine_name=sub_name)
+                    sub_mod_obj = Modules.objects.get(module_name=sub_mod)
+                except Modules.DoesNotExist:
+                    self.stdout.write(self.style.ERROR(f"Module {sub_mod} not found."))
+                    sys.exit(1)
+
+                try:
+                    sub_obj = Subroutines.objects.get(
+                        subroutine_name=sub_name, module=sub_mod_obj
+                    )
                 except Subroutines.DoesNotExist:
                     self.stdout.write(
                         self.style.ERROR(f"Subroutine {sub_name} not found!")

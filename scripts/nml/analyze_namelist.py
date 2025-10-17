@@ -6,18 +6,25 @@ from scripts.config import ELM_SRC
 from scripts.nml.analyze_elm import single_line_unwrapper
 from scripts.nml.analyze_ifs import set_default
 from scripts.types import NameList
+from scripts.nml.namelist_cascade import NML_CASCADES
 
 
 def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList]):
     nml_str = "|".join(list(nml_dict.keys()))
     regex_nml = re.compile(rf"\b({nml_str})\b")
 
+    deps = list(NML_CASCADES.keys())
+    regex_deps = re.compile(rf"\b({'|'.join(deps)})\b")
     for sub in sub_dict.values():
         for if_node in sub.flat_ifs:
             cond = str(if_node.condition)
             nml_vars = regex_nml.findall(cond)
             temp = {v: nml_dict[v] for v in nml_vars}
             if_node.nml_vars.update(temp)
+
+            # check nml dependents:
+            dep_vars = regex_deps.findall(cond)
+            if_node.nml_cascades.update({v: NML_CASCADES[v] for v in dep_vars })
 
     return
 
@@ -28,11 +35,12 @@ def find_all_namelist() -> dict[str, NameList]:
     """
 
     output = subprocess.getoutput(
-        f'grep -rin --include=*.F90 --exclude-dir=external_modules/ "namelist\s*\/" {ELM_SRC}'
+        f'grep -rin --include=*.F90 --exclude-dir=external_models/ "namelist\s*\/" {ELM_SRC}'
     )
     namelist_dict = {}
     if output.strip() == "":
         return namelist_dict
+    file_set: set[str] = {line.split(":")[0] for line in output.split("\n")}
     for line in output.split("\n"):
         line = line.split(":")
         filename = line[0]
@@ -41,15 +49,15 @@ def find_all_namelist() -> dict[str, NameList]:
         full_line, _ = single_line_unwrapper(filename, line_number)
 
         group = re.findall(r"namelist\s*\/\s*(\w+)\s*\/", info, re.IGNORECASE)[0]
-        flags = full_line.split("/")[-1].split(",")
+        flags = full_line.lower().split("/")[-1].split(",")
         for flag in flags:
             f = NameList()
-            f.name = flag.strip()
-            f.group = group
+            f.name = flag.strip().lower()
+            f.group = group.lower()
             f.filepath = filename
             f.ln = line_number
 
-            namelist_dict[flag.strip()] = f
+            namelist_dict[flag.strip().lower()] = f
     return namelist_dict
 
 

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% load static %}
+
+{% block extrahead %}
+<script src="{% static 'js/toggle.js' %}" defer></script>
+{% endblock %}
+
+{% block body %}
+{% include 'banner.html' %}
+
+<button
+  id="toggle-all-button"
+  data-toggle-all
+  data-target="#left-panel"
+  aria-pressed="false"
+  class="expand-all"
+>
+  Expand all
+</button>
+
+<div id="sub-split-view" class="split-container">
+  <div class="left-panel" id="left-panel" hx-get="{% url 'trace' key=var_name %}" hx-trigger="load, configChanged from:body"
+    hx-swap="innerHTML">
+  </div>
+  <div class="right-panel" id="right-panel">
+  </div>
+</div>
+
+
+{% endblock %}
