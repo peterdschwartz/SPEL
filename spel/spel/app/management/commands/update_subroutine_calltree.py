@@ -27,6 +27,7 @@ class Command(BaseCommand):
                 mod_child = row.get("mod_child")
                 child_sub = row.get("child_subroutine")
                 ln = row.get("ln")
+                args = row.get("args")
 
                 try:
                     parent_mod_obj = Modules.objects.get(module_name=mod_parent)
@@ -52,7 +53,6 @@ class Command(BaseCommand):
                     self.stdout.write(
                         self.style.ERROR(f"Subroutine {parent_sub} not found.")
                     )
-                    input("continue?")
                     continue
 
                 try:
@@ -63,12 +63,12 @@ class Command(BaseCommand):
                     self.stdout.write(
                         self.style.ERROR(f"Subroutine {child_sub} not found.")
                     )
-                    input("continue?")
                     continue
 
                 calltree_obj, created = SubroutineCalltree.objects.update_or_create(
                     parent_subroutine=parent_sub_obj,
                     child_subroutine=child_sub_obj,
                     lineno=ln,
+                    defaults={"args": args},
                 )
         self.stdout.write(self.style.SUCCESS("Call Tree Data update complete."))

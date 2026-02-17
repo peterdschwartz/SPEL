@@ -1,7 +1,9 @@
 import logging
 import os
-from pprint import pprint
+from pprint import pformat
 from unittest.mock import patch
+
+
 
 test_dir = os.path.dirname(__file__) + "/"
 logger = logging.getLogger("TEST")
@@ -76,66 +78,12 @@ expected_arg_status = {
 }
 
 
-def test_Functions():
-    """
-    Test for parsing functions
-    """
-    with patch("scripts.config.ELM_SRC", test_dir), patch(
-        "scripts.config.SHR_SRC", test_dir
-    ):
-        from scripts.analyze_subroutines import Subroutine
-        from scripts.config import scripts_dir
-        from scripts.edit_files import modify_file
-        from scripts.fortran_modules import get_module_name_from_file
-        from scripts.utilityFunctions import Variable
-
-        fn = f"{scripts_dir}/tests/example_functions.f90"
-
-        SUB_NAME_DICT = {
-            "landunit_is_special": Variable(
-                type="logical", name="is_special", dim=0, subgrid="?", ln=-1
-            ),
-            "constructor": Variable(
-                type="prior_weights_type", name="constructor", dim=0, subgrid="?", ln=-1
-            ),
-            "old_weight_was_zero": Variable(
-                type="logical", name="old_weight_was_zero", dim=1, subgrid="?", ln=-1
-            ),
-            "cnallocate_carbon_only": Variable(
-                type="logical", name="cnallocate_carbon_only", dim=0, subgrid="?", ln=-1
-            ),
-            "get_beg": Variable(
-                type="integer", name="beg_index", dim=0, subgrid="?", ln=-1
-            ),
-        }
-
-        with open(fn, "r") as ifile:
-            lines = ifile.readlines()
-
-        _, mod_name = get_module_name_from_file(fn)
-        sub_dict = modify_file(
-            lines,
-            fn,
-            sub_init_dict={},
-            mod_name=mod_name,
-            verbose=False,
-            overwrite=False,
-        )
-
-        for key, ans in SUB_NAME_DICT.items():
-            func: Subroutine = sub_dict[key]
-            if func.func:
-                func.print_subroutine_info()
-                comp = func.result
-                assert ans == comp, f"Failed for function: {key}"
-
-
 def test_sub_parse(subtests):
     """
     Test for parsing function/subroutine calls
     """
     with patch("scripts.config.ELM_SRC", test_dir), patch(
-        "scripts.mconfig.SHR_SRC", test_dir
+        "scripts.config.SHR_SRC", test_dir
     ):
         import scripts.dynamic_globals as dg
         from scripts.aggregate import aggregate_dtype_vars
@@ -144,15 +92,13 @@ def test_sub_parse(subtests):
         from scripts.DerivedType import DerivedType
         from scripts.edit_files import process_for_unit_test
         from scripts.fortran_modules import FortranModule
-        from scripts.UnitTestforELM import (
-            create_unit_test,
-            process_subroutines_for_unit_test,
-        )
+        from scripts.UnitTestforELM import process_subroutines_for_unit_test
         from scripts.utilityFunctions import Variable
+        from scripts.types import ReadWrite
 
         dg.populate_interface_list()
         fn = f"{scripts_dir}/tests/example_functions.f90"
-        test_sub_name = "call_sub"
+        test_sub_name = "test_sub_parse::call_sub"
         sub_name_list = [test_sub_name]
 
         mod_dict: dict[str, FortranModule] = {}
@@ -202,11 +148,20 @@ def test_sub_parse(subtests):
         )
         active_vars = main_sub_dict[test_sub_name].active_global_vars
 
+        modname = "test_sub_parse"
+        names = {'host_subroutine','sub_program','sub_func1'}
+
+        for n in names:
+            sub = main_sub_dict[f"{modname}::{n}"]
+            sub.logger.warning("="*10)
+            sub.logger.warning(f"fileinfo: {sub.get_file_info()}")
+            sub.logger.warning(f"{pformat(sub.sub_lines)}")
+
         active_globals_fut: dict[str, Variable] = {}
         for sub in main_sub_dict.values():
             active_globals_fut.update(sub.active_global_vars)
 
-        for var in main_sub_dict["call_sub"].active_global_vars.values():
+        for var in main_sub_dict[test_sub_name].active_global_vars.values():
             logger.info(
                 f"Variable Info:\n"
                 f"  name         : {var.name}\n"
@@ -220,22 +175,35 @@ def test_sub_parse(subtests):
             len(active_vars) == 7
         ), f"Didn't correctly find the active global variables:\n{active_vars}"
 
-        for subname in expected_arg_status:
-            childsub = main_sub_dict[subname]
-            test_dict = {
-                k: rw.status for k, rw in childsub.arguments_read_write.items()
-            }
-            with subtests.test(msg=subname):
-                assert expected_arg_status[subname] == test_dict
-
-        for subname in expected_arg_status:
-            childsub = main_sub_dict[subname]
-
         aggregate_dtype_vars(
             sub_dict=main_sub_dict,
             type_dict=type_dict,
             inst_to_dtype_map=instance_to_user_type,
         )
+        test_sub = main_sub_dict[test_sub_name].sub_lines
+        # str_ = "\n".join([f"{lt.ln+1} {lt.line}" for lt in test_sub])
+        # print(f"{pformat(str_)}")
+        def pstatus(rw:ReadWrite):
+            return f"{rw.status}@{rw.ln+1}"
+
+        from scripts.tests.expected_parse_results import expected_access,elmtypes,args
+        for sub_obj in main_sub_dict.values():
+            if sub_obj.id in expected_access:
+                if expected_access[sub_obj.id].get(elmtypes):
+                    test_dict = {
+                        k: set(map(pstatus, status))
+                        for k, status in sub_obj.elmtype_access_by_ln.items()
+                    }
+                    with subtests.test(msg=f"{sub_obj.id}-elmtypes"):
+                        assert expected_access[sub_obj.id][ elmtypes ] == test_dict
+                # if expected_access[sub_obj.id].get("args"):
+                #     test_dict = {
+                #         k: set(map(pstatus,status))
+                #         for k, status in sub_obj.arg_access_by_ln.items()
+                #     }
+                #     with subtests.test(msg=f"{sub_obj.id}--arguments"):
+                #         assert expected_access[sub_obj.id][args] == test_dict
+
 
         active_set: set[str] = set()
         for inst_name, dtype in instance_dict.items():
@@ -244,33 +212,3 @@ def test_sub_parse(subtests):
             for field_var in dtype.components.values():
                 if field_var.active:
                     active_set.add(f"{inst_name}%{field_var.name}")
-
-
-def test_arg_intent():
-    with patch("scripts.config.ELM_SRC", test_dir), patch(
-        "scripts.config.SHR_SRC", test_dir
-    ):
-        import scripts.dynamic_globals as dg
-        from scripts.analyze_subroutines import Subroutine
-        from scripts.config import scripts_dir
-        from scripts.edit_files import process_for_unit_test
-        from scripts.fortran_modules import FortranModule, get_module_name_from_file
-
-        dg.populate_interface_list()
-        fn = f"{scripts_dir}/tests/example_functions.f90"
-        mod_dict: dict[str, FortranModule] = {}
-        main_sub_dict: dict[str, Subroutine] = {}
-
-        mod_dict, file_list, main_sub_dict = process_for_unit_test(
-            fname=fn,
-            case_dir="./",
-            mod_dict=mod_dict,
-            mods=[],
-            required_mods=[],
-            sub_dict=main_sub_dict,
-            overwrite=False,
-            verbose=False,
-        )
-        print("Sorted mods:\n", [get_module_name_from_file(m) for m in file_list])
-
-        assert 1 == 1

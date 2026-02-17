@@ -1,25 +1,49 @@
 {% if nml_vars %}
 <ul class="header-list">
-  <div class="toggler caret">
-    <span class="toggler-label">Namelist Variables</span>
-  </div>
-  <ul class="child">
-    {% for var in nml_vars %}
-    <li><span class="parent">{{ var }}</span></li>
-    {% endfor %}
-  </ul>
+  <li class="header-group" data-toggle>
+    <span class="toggler caret" role="button" tabindex="0" aria-expanded="false" aria-controls="nml_child">
+      Namelist Variables</span>
+    <ul class="child" id="nml_child">
+      {% for var in nml_vars %}
+      <li class="var-row">
+        <pre><code class="hljs language-fortran">{{ var }}</code></pre>
+      <span class="badge badge-r">r</span>
+      <button class="trace-btn" type="button" hx-get="{% url 'trace' var %}" hx-target="#left-panel" hx-trigger="click"
+        hx-swap="innerHTML">
+        <!-- icon -->
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" />
+          <circle cx="12" cy="12" r="3" fill="currentColor" />
+        </svg>
+      </button>
+      </li>
+      {% endfor %}
+    </ul>
+  </li>
 </ul>
 {% endif %}
 
 {% if globals %}
 <ul class="header-list">
-  <div class="toggler caret">
-    <span class="toggler-label">Global Variables</span>
-  </div>
-  <ul class="child">
-    {% for var in globals %}
-    <li><span class="parent">{{ var }}</span></li>
-    {% endfor %}
-  </ul>
+  <li class="header-group" data-toggle>
+    <span class="toggler caret" role="button" tabindex="0" aria-expanded="false" aria-controls="globals_child">
+      Global Variables</span>
+    <ul class="child" id="globals_child">
+      {% for var in globals %}
+      <li class="var-row">
+        <pre><code class="hljs language-fortran">{{ var }}</code></pre>
+        <span class="badge badge-dash">-</span>
+        <button class="trace-btn" type="button" hx-get="{% url 'trace' var %}" hx-target="#left-panel"
+          hx-trigger="click" hx-swap="innerHTML">
+          <!-- icon -->
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" />
+            <circle cx="12" cy="12" r="3" fill="currentColor" />
+          </svg>
+        </button>
+      </li>
+      {% endfor %}
+    </ul>
+  </li>
 </ul>
 {% endif %}

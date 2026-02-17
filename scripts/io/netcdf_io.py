@@ -1,3 +1,4 @@
+import re
 import sys
 import textwrap
 from collections.abc import Callable
@@ -14,6 +15,7 @@ Tab = hio.Tab
 def create_nc_define_vars(
     vars: dict[str, Variable],
     time: bool,
+    elminst_vars: list[tuple[str,Variable]]=[],
     bounds: bool = False,
 ) -> list[str]:
     """
@@ -21,11 +23,19 @@ def create_nc_define_vars(
     """
     tabs = hio.indent()
     arg_str = ",bounds" if bounds else ""
+
+    decls: list[str] = []
+    for type_mod, inst in elminst_vars:
+        arg_str = f"{arg_str}, {inst.name}"
+        var_type = inst.type
+        decls.append(f"{tabs}{tabs}type({var_type}), intent(inout) :: {inst.name}")
     lines: list[str] = [f"{tabs}subroutine define_vars(ncid{arg_str})\n"]
     tabs = hio.indent(hio.Tab.shift)
     lines.append(f"{tabs}integer, intent(in) :: ncid\n")
     if bounds:
         lines.append(f"{tabs}type(bounds_type), intent(in) :: bounds\n")
+    lines.extend([f"{decl}\n" for decl in decls])
+
     lines.append(f"{tabs}integer :: varid, time_id\n")
     lines.append(f"{tabs}character(len=32), dimension(5) :: dim_names\n")
     if time:
@@ -62,13 +72,24 @@ def generate_elmtypes_io_netcdf(
         ]
     )
 
+    def active_mask(dtype: DerivedType, inst_name: str) -> bool:
+        all_ptrs = bool(
+            len([field for field in dtype.components.values() if not field.pointer])
+            == 0
+        )
+        return (
+            not all_ptrs
+            and inst_name not in ["filter", "filter_inactive_and_active"]
+            and not re.match("(c13|c14)", inst_name)
+        )
+
     active_instances = {
         inst_var.name: inst_var
         for dtype in type_dict.values()
         for inst_var in dtype.instances.values()
-        if inst_var.active
+        if inst_var.active and active_mask(dtype,inst_var.name)
     }
-    use_statements = hio.var_use_statements(active_instances)
+    use_statements, elminst_vars = hio.var_use_statements(active_instances, type_dict)
     lines.extend(list(use_statements))
 
     lines.extend(
@@ -85,20 +106,20 @@ def generate_elmtypes_io_netcdf(
         type_name = inst_to_dtype_map[inst_var.name]
         dtype = type_dict[type_name]
         for field_var in dtype.components.values():
-            if field_var.active:
+            if field_var.active and not field_var.pointer:
                 new_var = field_var.copy()
                 new_var.name = f"{inst_var.name}%{field_var.name.split('%')[-1]}"
                 dtype_vars[new_var.name] = new_var
 
-    sub_lines = create_nc_define_vars(dtype_vars, time=True, bounds=True)
+    sub_lines = create_nc_define_vars(dtype_vars, elminst_vars=elminst_vars,time=True, bounds=True)
     lines.extend(sub_lines)
-
     sub_lines = create_netcdf_io_routine(
         mode=hio.IOMode.read,
         sub_name="read_elmtypes",
         vars=dtype_vars,
         time=True,
         bounds=True,
+        elminst_vars=elminst_vars,
     )
     lines.extend(sub_lines)
     sub_lines = create_netcdf_io_routine(
@@ -107,6 +128,7 @@ def generate_elmtypes_io_netcdf(
         vars=dtype_vars,
         time=True,
         bounds=True,
+        elminst_vars=elminst_vars,
     )
     lines.extend(sub_lines)
 
@@ -135,7 +157,7 @@ def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: str):
     lines.append(f"{tabs}use netcdf\n")
     lines.append(f"{tabs}use nc_io\n")
     lines.append(f"{tabs}use nc_allocMod\n")
-    use_stmts = hio.var_use_statements(vars)
+    use_stmts, _ = hio.var_use_statements(vars)
     lines.extend(use_stmts)
 
     lines.extend(
@@ -153,6 +175,7 @@ def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: str):
         "read_constants",
         vars,
         time=False,
+        elminst_vars=[],
     )
 
     lines.extend(sub_lines)
@@ -162,6 +185,7 @@ def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: str):
         "write_constants",
         vars,
         time=False,
+        elminst_vars=[],
     )
     lines.extend(sub_lines)
 
@@ -179,21 +203,30 @@ def create_netcdf_io_routine(
     sub_name: str,
     vars: dict[str, Variable],
     time: bool,
+    elminst_vars: list[tuple[str,Variable]],
     bounds: bool = False,
 ) -> list[str]:
     tabs = hio.indent()
     if bounds:
-        arg_str: str = "io_inst,bounds"
-        define_args: str = "ncid,bounds"
+        arg_str: str = "io_inst, bounds"
+        define_args: str = "ncid, bounds"
     else:
         arg_str: str = "io_inst"
         define_args: str = "ncid"
+
+    decls: list[str] = []
+    for type_mod, inst in elminst_vars:
+        arg_str = f"{arg_str}, {inst.name}"
+        define_args = f"{define_args}, {inst.name}"
+        var_type = inst.type
+        decls.append(f"{tabs}{tabs}type({var_type}), intent(inout) :: {inst.name}")
 
     lines: list[str] = [f"{tabs}subroutine {sub_name}({arg_str})\n"]
     tabs = hio.indent(hio.Tab.shift)
 
     mode_str = "create_file" if mode == hio.IOMode.write else "read_file"
     stmt = f"{tabs}type(bounds_type), intent(inout) :: bounds\n" if bounds else ""
+    lines.extend([f"{decl}\n" for decl in decls])
 
     # Arguments + Locals:
     lines.extend(
@@ -234,7 +267,9 @@ def create_netcdf_io_routine(
     if mode == hio.IOMode.read:
         lines.append(f"{tabs}if(io_inst%end_run) return\n")
         if bounds:
-            lines.append(f"{tabs}if(io_inst%dt_in_file == 99999) io_inst%dt_in_file = nc_read_timeslices(new_fn)\n")
+            lines.append(
+                f"{tabs}if(io_inst%dt_in_file == 99999) io_inst%dt_in_file = nc_read_timeslices(new_fn)\n"
+            )
         lines.append(f"{tabs}timestep = io_inst%timestep\n")
         lines.append(f"{tabs}ncid = nc_create_or_open_file(trim(new_fn), {mode_str})\n")
         sub_lines = create_nc_read(vars, time)
@@ -246,6 +281,7 @@ def create_netcdf_io_routine(
     lines.append(f"{tabs}end subroutine {sub_name}\n")
 
     return lines
+
 
 
 def create_nc_def(vars: dict[str, Variable], time: bool) -> list[str]:
@@ -397,7 +433,7 @@ def generate_verify(rw_set: set[str], type_dict: dict[str, DerivedType]):
         for inst_var in dtype.instances.values()
         if inst_var.active
     }
-    use_statements = hio.var_use_statements(active_instances)
+    use_statements, _ = hio.var_use_statements(active_instances,type_dict)
     lines.extend(list(use_statements))
 
     return

@@ -92,6 +92,7 @@ MODULE shr_const_mod
     procedure, public :: Init => test_init
   end type test_type
 
+
 contains
 
   subroutine test_init(this,begc,endc)

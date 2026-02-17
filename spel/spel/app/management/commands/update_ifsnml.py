@@ -9,6 +9,7 @@ from app.models import (
     Subroutines,
 )
 from django.core.management.base import BaseCommand, sys
+from django.db.models.fields.json import json
 
 
 class Command(BaseCommand):
@@ -79,11 +80,10 @@ class Command(BaseCommand):
                     start_ln=if_start,
                     end_ln=if_end,
                     defaults={
-                        "condition": if_cond,
+                        "condition": json.loads(if_cond),
                         "active": True,
                     },
                 )
-
                 # Update Nml - if lookup
                 nml_if_obj, _ = FlatIfNamelistVar.objects.update_or_create(
                     flatif=ifs_obj, namelist_var=nml_obj

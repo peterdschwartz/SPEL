@@ -1,1 +1,10 @@
-{{ tree|safe }}
+<h3>Call Tree Root: {{sub_name}}</h3>
+{% if tree %}
+<ul id="SubTree">
+  {% for n in tree %}
+  {% include "partials/trace_details/trace_node.html" with node=n current_depth=0 expand_to=2 statuses=statuses %}
+  {% endfor %}
+</ul>
+{% else %}
+<em>No matches.</em>
+{% endif %}

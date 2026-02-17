@@ -10,7 +10,9 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "csv_file", type=str, help="The path to the CSV file containing new data."
+            "csv_file",
+            type=str,
+            help="The path to the CSV file containing new data.",
         )
 
     def handle(self, *args, **options):
@@ -22,25 +24,16 @@ class Command(BaseCommand):
             reader = csv.DictReader(f)
             for row in reader:
                 module_name = row.get("module").strip()
+                type_mod = row.get("type_mod").strip()
                 type_name = row.get("user_type_name").strip()
                 inst_name = row.get("instance_name").strip()
-                try:
-                    module_obj = Modules.objects.get(module_name=module_name)
-                except Modules.DoesNotExist:
-                    self.stdout.write(
-                        self.style.ERROR(f"Module {module_name} not found.")
-                    )
-                    sys.exit(1)
+                module_obj = Modules.objects.get(module_name=module_name)
 
-                try:
-                    user_type_obj = UserTypes.objects.get(
-                        module=module_obj,
-                        user_type_name=type_name,
-                    )
-                except UserTypes.DoesNotExist:
-                    self.stdout.write(self.style.ERROR(f"Type {type_name} not found."))
-                    input("continue?")
-                    continue
+                type_mod_obj = Modules.objects.get(module_name=type_mod)
+                user_type_obj = UserTypes.objects.get(
+                    module=type_mod_obj,
+                    user_type_name=type_name,
+                )
 
                 inst_obj, created = UserTypeInstances.objects.update_or_create(
                     inst_module=module_obj,

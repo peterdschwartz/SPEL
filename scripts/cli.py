@@ -12,7 +12,12 @@ def create(args):
     from scripts.UnitTestforELM import create_unit_test
 
     with profile_ctx(enabled=True, section="create") as pr:
-        create_unit_test(sub_names=args.subs, casename=args.case, keep=args.keep)
+        create_unit_test(
+            sub_names=args.subs,
+            casename=args.case,
+            keep=args.keep,
+            db_mode=args.db_mode,
+        )
 
 
 def export(args):
@@ -115,6 +120,13 @@ def main():
         dest="keep",
         action="store_true",
         help="Re-use existing case",
+    )
+    create_parser.add_argument(
+        "--db",
+        required=False,
+        dest="db_mode",
+        action="store_true",
+        help="Don't make Unit Test",
     )
     create_parser.set_defaults(func=create)
 

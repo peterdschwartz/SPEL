@@ -17,6 +17,8 @@ dependencies = [
 	"xarray>=2024.7",
 	"netCDF4>=1.7.2",
 	"colorlog>=6.9.0",
+	"mysqlclient",
+	"dotenv",
 ]
 
 [tool.setuptools.packages.find]

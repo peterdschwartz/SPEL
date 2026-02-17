@@ -35,3 +35,8 @@ SQL
 
 echo "==> Done."
 echo "Database: $DB_NAME        User: $DB_USER"
+
+python3 manage.py makemigrations
+python3 manage.py migrate
+python3 manage.py update_all_data --all
+python3 manage.py import_presets

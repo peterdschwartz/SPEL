@@ -8,6 +8,9 @@ from collections import namedtuple
 from copy import deepcopy
 from typing import TYPE_CHECKING, Optional
 
+from scripts.fortran_parser.spel_ast import GenericOperatorExpression, Identifier, InfixExpression, UseStatement
+from scripts.fortran_parser.spel_parser import Parser
+from scripts.fortran_parser.tracing import Trace
 from scripts.utilityFunctions import Variable
 
 if TYPE_CHECKING:
@@ -15,7 +18,7 @@ if TYPE_CHECKING:
     from scripts.DerivedType import DerivedType
 
 import scripts.dynamic_globals as dg
-from scripts.config import ELM_SRC, SHR_SRC, _bc
+from scripts.config import ELM_SRC, SHR_SRC
 from scripts.types import LineTuple, ModUsage, PointerAlias
 
 
@@ -45,7 +48,7 @@ def get_filename_from_module(module_name: str, verbose: bool = False):
     if module_name in dg.map_module_name_to_fpath:
         return dg.map_module_name_to_fpath[module_name]
 
-    cmd = f'grep -rin --exclude-dir=external_models/ "module {module_name}" {ELM_SRC}*'
+    cmd = rf'grep -rin --exclude-dir=external_models/ "^\s*module\s* {module_name}" {ELM_SRC}*'
     elm_output = sp.getoutput(cmd)
     if not elm_output:
         if verbose:
@@ -119,27 +122,29 @@ def print_spel_module_dependencies(
     return modtree
 
 
-def parse_only_clause(line: str) -> set[PointerAlias]:
+def parse_only_clause(stmt: UseStatement) -> set[PointerAlias]:
     """
     Input a line of the form: `use modname, only: name1,name2,...`
     """
     # get items after only:
-    only_l = line.split(":")[1]
-    only_l = only_l.split(",")
-
-    only_objs_list = set()
+    only_objs_set = set()
     # Go through list of objects, determine '=>' usage.
-    for ptrobj in only_l:
-        if "=>" in ptrobj:
-            ptr, obj = ptrobj.split("=>")
-            ptr = ptr.strip()
-            obj = obj.strip()
-            only_objs_list.add(PointerAlias(ptr=ptr, obj=obj))
+    for ptrobj in stmt.objs:
+        if isinstance(ptrobj,InfixExpression):
+            assert ptrobj.operator == '=>'
+            ptr = str(ptrobj.left_expr)
+            obj = str(ptrobj.right_expr)
+            only_objs_set.add(PointerAlias(ptr=ptr, obj=obj))
+        elif isinstance(ptrobj,Identifier):
+            obj = str(ptrobj)
+            only_objs_set.add(PointerAlias(ptr=None, obj=obj))
+        elif isinstance(ptrobj,GenericOperatorExpression):
+            # TODO: 
+            continue
         else:
-            obj = ptrobj.strip()
-            only_objs_list.add(PointerAlias(ptr=None, obj=obj))
+            sys.exit(f"Error - unexpected expression in UseStatement {ptrobj}")
 
-    return only_objs_list
+    return only_objs_set
 
 
 def build_module_tree(modules: dict[str, FortranModule]) -> list[ModTree]:
@@ -186,6 +191,14 @@ def insert_header_for_unittest(
     return None
 
 
+def parse_use_stmts(use_lines: list[LineTuple]) -> list[UseStatement]:
+    if not use_lines:
+        return []
+    parser = Parser(lines=use_lines)
+    program = parser.parse_program()
+    return program.statements
+
+
 class FortranModule:
     """
     A class to represent a Fortran module.
@@ -224,7 +237,7 @@ class FortranModule:
     def get_mod_lines(self):
         return self.module_lines
 
-    def add_dependency(self, mod: str, line: str, ln: int):
+    def add_dependency(self, use_stmt: UseStatement):
         """
         Adds module dependency and either only the items accessed
         or "all" for blanket usage of module
@@ -232,6 +245,8 @@ class FortranModule:
         Dependencies here are stored with their linenumber that way module head
         and subroutine specific usages can be easily sorted.
         """
+        mod = use_stmt.module
+        ln = use_stmt.lineno
         mod_key = f"{mod}@{ln}"
 
         curr_usage = self.modules_by_ln.get(mod_key)
@@ -239,8 +254,8 @@ class FortranModule:
             self.modules_by_ln[mod_key] = ModUsage(all=False, clause_vars=set())
 
         # Check if there is an only statement AND that the entire module isn't used.
-        if "only" in line and not (self.modules_by_ln[mod_key].all):
-            obj_set = parse_only_clause(line)
+        if use_stmt.objs and not (self.modules_by_ln[mod_key].all):
+            obj_set = parse_only_clause(use_stmt)
             self.modules_by_ln[mod_key].clause_vars |= obj_set
         else:
             # Even if only clause was previously used, overwrite
@@ -271,18 +286,16 @@ class FortranModule:
 
     def find_allocations(self, sub_dict: dict[str, Subroutine]):
 
-        if self.name == "columndatatype":
-            print(self.defined_types)
         regex_alloc = re.compile(r"^(allocate\b)")
         fline_list = self.module_lines
         alloc_lines = [
             line for line in filter(lambda x: regex_alloc.search(x.line), fline_list)
         ]
 
-        mod_subs = [sub_dict[subname] for subname in self.subroutines]
+        mod_subs = [sub_dict[sub_id] for sub_id in self.subroutines]
         Interval = namedtuple("Interval", "tag, xi, xf")
         intervals: list[Interval] = [
-            Interval(tag=sub.name, xi=sub.startline, xf=sub.endline) for sub in mod_subs
+            Interval(tag=sub.id, xi=sub.startline, xf=sub.endline) for sub in mod_subs
         ]
         intervals.sort(key=lambda x: x.xi)
         starts = [x.xi for x in intervals]
@@ -296,9 +309,6 @@ class FortranModule:
             return None
 
         for dtype in self.defined_types.values():
-            debug = False
-            if dtype.type_name == "column_water_state":
-                debug = True
             vars = [
                 rf"%{field.name}"
                 for field in dtype.components.values()

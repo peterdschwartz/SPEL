@@ -1,9 +1,10 @@
-# app/management/commands/import_presets.py
 import json
 import re
 from pathlib import Path
 
-from app.models import IntrinsicGlobals, NamelistVariable, PresetConfig
+from django.core.management import call_command
+
+from app.models import  NamelistVariable, PresetConfig
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils.text import slugify
@@ -89,8 +90,9 @@ class Command(BaseCommand):
             )
 
         # Optionally mark a default
-        if not opts["dry_run"] and opts.get("default"):
-            sel = opts["default"].lower()
+        default = opts.get("default") if opts.get("default") else 'CNPRDCTCBC' 
+        if not opts["dry_run"]:
+            sel =  default.lower()
             # unset others, set selected
             PresetConfig.objects.exclude(slug=sel).update(is_default=False)
             cnt = PresetConfig.objects.filter(slug=sel).update(is_default=True)
@@ -103,6 +105,8 @@ class Command(BaseCommand):
                     self.style.SUCCESS(f"Marked '{sel}' as default preset.")
                 )
 
+        if not opts["dry_run"]:
+            call_command("update_config_preset_tables")
         self.stdout.write(
             self.style.NOTICE(f"Processed {total_files} files; upserts: {upserts}.")
         )

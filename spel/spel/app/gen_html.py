@@ -5,23 +5,31 @@ def build_tree_html(tree: list[Node]):
     """Recursive function to build HTML for a tree."""
     html = '<ul id="SubTree">'
     for node in tree:
-        html += process_node(node)
+        level = 0
+        html += process_node(node,level)
     html += "</ul>"
     return html
 
 
-def process_node(node: Node):
+def process_node(node: Node, level:int):
     """
     Function to tranlate Node("name":name,"children":[])
     to html
     """
     html = ""
+    if level == 0:
+        chld_active = " active"
+        expanded = "true"
+    else:
+        chld_active = ""
+        expanded="false"
 
     if node.children:
-        html += f'<li class="node"><span class="toggler checkbox" aria-expanded="false">{node.name}</span>'
-        html += '<ul class="child">'
+        html += f'<li class="node"><span class="toggler checkbox" aria-expanded="{expanded}">{node.name}</span>'
+        html += f'<ul class="child{chld_active}">'
+        level += 1
         for child in node.children:
-            html += process_node(child)
+            html += process_node(child,level)
         html += "</ul>"
         html += add_details_btn(node.name)
         html += "</li>"

@@ -18,7 +18,8 @@ class Lexer:
     def _fetch_next_line(self) -> None:
         """Get the next line from the iterator, or set EOF."""
         try:
-            next_line, _ = next(self.line_iter)
+            fline = next(self.line_iter)
+            next_line = fline.line
             self.input = next_line + "\n"
             self.position = 0
             self.read_position = 0
@@ -139,7 +140,7 @@ class Lexer:
             case "/":
                 next_ch = self.peek_char()
                 if next_ch == "=":
-                    tok = new_token(tokens.TokenTypes.NOT_EQUIV, "!=")
+                    tok = new_token(tokens.TokenTypes.NOT_EQUIV, ".ne.")
                     self.read_char()
                 elif next_ch == "/":
                     tok = new_token(tokens.TokenTypes.CONCAT, "//")
@@ -178,6 +179,8 @@ class Lexer:
                     self.read_char()
                 else:
                     tok = new_token(tokens.TokenTypes.COLON, self.ch)
+            case ";":
+                tok = new_token(tokens.TokenTypes.SEMICOLON,self.ch)
             case "%":
                 tok = new_token(tokens.TokenTypes.PERCENT, self.ch)
             case "'":

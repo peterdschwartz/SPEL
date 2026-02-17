@@ -25,7 +25,7 @@ def get_logger(name: str, level=logging.INFO) -> logging.Logger:
                 log_colors={
                     "ERROR": "red",
                     "WARNING": "yellow",
-                    "INFO": "green",
+                    "INFO": "white",
                     "DEBUG": "cyan",
                 },
             )

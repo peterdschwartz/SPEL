@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pprint import pformat
 import re
 import sys
-from typing import TYPE_CHECKING, Optional
+from functools import reduce
+from typing import TYPE_CHECKING, Callable, Optional
 
 from scripts.config import _bc
+from scripts.fortran_modules import FortranModule
 from scripts.utilityFunctions import Variable
 
 if TYPE_CHECKING:
@@ -14,8 +17,8 @@ import scripts.dynamic_globals as dg
 from scripts.DerivedType import DerivedType, get_component
 from scripts.fortran_parser.evaluate import (check_keyword,
                                              parse_subroutine_call)
-from scripts.types import (ArgLabel, CallDesc, CallTree, CallTuple, LineTuple,
-                           ReadWrite, SubroutineCall)
+from scripts.types import (ArgLabel, CallDesc, CallTag, CallTree, CallTuple,
+                           LineTuple, ReadWrite, SubroutineCall)
 
 regex_paren = re.compile(r"\((.+)\)")  # for removing array of struct index
 regex_bounds = re.compile(r"(?<=(\w|\s))\(.+?\)")
@@ -38,7 +41,7 @@ def normalize_soa_keys(d: dict[str, list[ReadWrite]]) -> dict[str, list[ReadWrit
     pattern = re.compile(r"\([^)]+\)(?=%)")
     new_dict: dict[str, list[ReadWrite]] = {}
     for key, values in d.items():
-        new_key = pattern.sub("(index)", key)
+        new_key = pattern.sub("", key)
         # If the normalized key already exists, merge the value lists
         if new_key in new_dict:
             new_dict[new_key].extend(values)
@@ -56,8 +59,10 @@ def is_derived_type(var: Variable) -> bool:
 
 
 def sub_soa(name: str) -> str:
-    index_str = "" # "(index)"
-    inst, field = name.split("%")
+    if name.count("%") == 0:
+        return name
+    index_str = "" 
+    inst, field = name.split("%",1)
     inst = regex_paren.sub(index_str, inst)
     return f"{inst}%{field}"
 
@@ -118,11 +123,10 @@ def analyze_sub_variables(
 
     fileinfo = sub.get_file_info()
 
-    lines = sub.sub_lines[:]
-    if fileinfo.startln == lines[0].ln:
-        lines = lines[1:]
+    if sub.associate_vars:
+        lines = sub.replace_associate_in_lines()
     else:
-        lines = [lpair for lpair in lines if lpair.ln >= fileinfo.startln]
+        lines = [ lt for lt in sub.sub_lines if fileinfo.startln <= lt.ln <= fileinfo.endln ]
 
     matched_lines = [
         line
@@ -130,6 +134,7 @@ def analyze_sub_variables(
         if not regex_ptr.search(line.line)
         and not regex_io.search(line.line)
         and not regex_usemod.search(line.line)
+        and not re.match(rf"subroutine\s+{sub.name}",line.line)
     ]
 
     for line in matched_lines:
@@ -144,15 +149,8 @@ def analyze_sub_variables(
                 verbose=verbose,
             )
             for arg, status in line_accessed.items():
-                vars_accessed.setdefault(arg, []).extend(status)
-        else:
-            # Check arguments of child subroutines for dummy args of parent (sub.
-            call_desc = sub.sub_call_desc[line.ln]
-            subname: str = call_desc.fn
-            child_sub: Subroutine = sub_dict[subname]
-            arg_status = check_arguments(call_desc, child_sub, mode=mode)
-            for arg, status in arg_status.items():
-                vars_accessed.setdefault(arg, []).append(status)
+                key  = sub_soa(arg)
+                vars_accessed.setdefault(key, []).extend(status)
 
     return vars_accessed
 
@@ -176,16 +174,8 @@ def determine_variable_status(
     match_alloc = regex_alloc.search(line)
     match_case = regex_case.search(line)
 
-
     find_variables = regex_decl.search(line)
     vars_access: dict[str, list[ReadWrite]] = {}
-    if verbose:
-        print("line: ", line)
-        print("vars: ", matched_variables)
-        print("assignment:", match_assignment)
-        print("doif:", match_doif)
-        print("where", match_where)
-        print("matched_vars: ", matched_variables)
 
     for m_var in matched_variables[:]:
         var = var_dict[m_var]
@@ -295,18 +285,23 @@ def check_arguments(
             vars_in_arguments = {v.var.name: v for v in call_desc.locals}
 
     for argvar in vars_in_arguments.values():
-        if argvar.node.nested_level > 0:
+        if argvar.arg_node.nested_level > 0:
             var_status[argvar.var.name] = ReadWrite(
                 status="r", ln=call_ln, line=call_desc.lpair
             )
         else:
-            keyword = check_keyword(argvar.node)
+            keyword = check_keyword(argvar.arg_node)
             if keyword:
-                dummy_arg = argvar.node.node["Left"]
+                dummy_arg = argvar.arg_node.node["Left"]
             else:
-                argn = argvar.node.argn
+                argn = argvar.arg_node.argn
                 dummy_arg = child_sub.dummy_args_list[argn]
-            dummy_status = child_sub.arguments_read_write[dummy_arg]
+            dummy_status = child_sub.arguments_rw_summary.get( dummy_arg,None )
+            if not dummy_status:
+                intent = child_sub.arguments[dummy_arg].intent
+                child_sub.logger.warning(f"{dummy_arg} not present! Setting to {child_sub.arguments[dummy_arg].intent}")
+                dummy_status = ReadWrite(status=intent,ln=-1,line=None)
+                
             var_status[argvar.var.name] = ReadWrite(
                 dummy_status.status, ln=call_ln, line=call_desc.lpair
             )
@@ -372,82 +367,77 @@ def add_acc_routine_info(sub):
     with open(filename, "w") as ofile:
         ofile.writelines(lines)
 
-
-def determine_argvar_status(
-    vars_as_arguments: dict[str, str],
-    subname: str,
-    sub_dict: dict[str, Subroutine],
-    linenum: int,
-    verbose: bool = False,
-):
+def combine_many_statuses(statuses: list[str]) -> str:
     """
-    Function goes through a subroutine to classify their arguments as read,write status
-    Inputs:
-        vars_as_arguments : { 'dummy_arg' : 'global variable'}
+    Combine read/write statuses in program order.
+
+    Rules:
+    - If the first access is a pure write ('w'), overall status is 'w'
+      regardless of later reads.
+    - Otherwise, overall status is the union of all accesses.
     """
-    func_name = "determine_argvar_status"
 
-    # First go through the child subroutines and analyze arguments if not already done.
-    child_sub = sub_dict[subname]
-    if not child_sub.arguments_read_write:
-        child_sub.parse_arguments(sub_dict, verbose=verbose)
+    if not statuses:
+        return ""
 
-    # Filter out unused arguments:
-    inactive_args_to_remove = [
-        arg
-        for arg in vars_as_arguments.keys()
-        if arg not in child_sub.arguments_read_write
-    ]
-    vars_as_arguments = {
-        darg: gv
-        for darg, gv in vars_as_arguments.items()
-        if darg not in inactive_args_to_remove
-    }
+    # First access determines input-ness
+    first = statuses[0]
 
-    # Update the global variables with the status of their corresponding dummy args
-    updated_var_status = {
-        gv: child_sub.arguments_read_write[dummy_arg]
-        for dummy_arg, gv in vars_as_arguments.items()
-    }
-    # Update the line number to be line child_sub is called in parent.
-    updated_var_status = {
-        gv: [ReadWrite(status=val.status, ln=linenum, line=val.ltuple)]
-        for gv, val in updated_var_status.items()
-    }
+    if first == "w":
+        return "w"
 
-    return updated_var_status
+    # Otherwise, fall back to union logic
+    perms = set()
+    for s in statuses:
+        perms |= set(s)
 
-
-def combine_status(s1: str, s2: str) -> str:
-    """
-    # Convert each status string to a set of permissions
-    # Return 'rw' if both permissions are present; otherwise 'r' or 'w'
-    """
-    perms = set(s1) | set(s2)
     return "".join(sorted(perms))
 
-
-def summarize_read_write_status(
-    var_access: dict[str, list[ReadWrite]],
-) -> dict[str, str]:
+def trace_dtype_globals(parent_sub: Subroutine):
     """
-    Function that takes the raw ReadWrite status for given variables
-    and returns a dict of variables with only one overall ReadWrite Status
+    Function goes through call descriptions of child_subroutines and checks for
+    usage of dtype global variables passed as arguments.
+    The child_sub.elmtype_access_by_ln is then populated with the passed global
+    with the status of the argument
     """
-    summary = {}
-    for varname, values in var_access.items():
-        status_list = [v.status for v in values]
-        if status_list[0] == "w":
-            summary[varname] = "w"
-        elif status_list[0] == "r":
-            if "w" in status_list[1:] or "rw" in status_list[1:]:
-                summary[varname] = "rw"
-            else:
-                summary[varname] = "r"
-        elif status_list[0] == "rw":
-            summary[varname] = "rw"
+    for ln, call_desc in parent_sub.sub_call_desc.items():
+        child_sub = parent_sub.child_subroutines[call_desc.fn]
+        globals = call_desc.globals_passed()
+        local_ptrs = [
+            (var, argn)
+            for var, argn in call_desc.locals_passed()
+            if var.name in parent_sub.ptr_vars
+        ]
+        if local_ptrs:
+            ptr_to_global_list = [
+                (field, argn)
+                for ptr_var, argn in local_ptrs
+                for field in parent_sub.ptr_vars[ptr_var.name]
+            ]
+            for var, argn in ptr_to_global_list:
+                dummy = child_sub.dummy_args_list[argn]
+                rws = child_sub.arg_access_by_ln[dummy]
+                child_sub.elmtype_access_by_ln.setdefault(var, []).extend(rws.copy())
 
-    return summary
+        dtypes = [
+            (var.name, argn) for var, argn in globals if var.type not in intrinsic_types
+        ]
+
+        # get access for derived type arguments:
+        for var, argn in dtypes:
+            dummy = child_sub.dummy_args_list[argn]
+            field_entries = {
+                k: rws
+                for k, rws in child_sub.arg_access_by_ln.items()
+                if re.match(rf"{dummy}%", k)
+            }
+            for field, rw_status in field_entries.items():
+                new_field = field.replace(dummy, var)
+                child_sub.elmtype_access_by_ln.setdefault(new_field, []).extend(
+                    rw_status
+                )
+
+    return
 
 
 def trace_derived_type_arguments(
@@ -457,8 +447,7 @@ def trace_derived_type_arguments(
     verbose: bool = False,
 ):
     """
-    Function will check child_subroutines for (non-nested) derived-type arguments.
-    Then, add the field access status from the child to the parent.
+    Function will check child_subroutines for (non-nested) derived-type arguments
     """
     func_name = "trace_derived_type_arguments"
 
@@ -468,24 +457,24 @@ def trace_derived_type_arguments(
         unnested_vars = [
             argvar
             for argvar in call_desc.globals
-            if argvar.var.name in inst_set and argvar.node.nested_level == 0
+            if argvar.var.name in inst_set and argvar.arg_node.nested_level == 0
         ]
 
         unnested_vars.extend(
             [
                 argvar
                 for argvar in call_desc.dummy_args
-                if argvar.var.name in inst_set and argvar.node.nested_level == 0
+                if argvar.var.name in inst_set and argvar.arg_node.nested_level == 0
             ]
         )
 
         names_to_replace: dict[str, str] = {}
         for argvar in unnested_vars:
-            keyword = check_keyword(argvar.node)
+            keyword = check_keyword(argvar.arg_node)
             if keyword:
-                dummy_arg = argvar.node.node["Left"]
+                dummy_arg = argvar.arg_node.node["Left"]
             else:
-                argn = argvar.node.argn
+                argn = argvar.arg_node.argn
                 dummy_arg = child_sub.dummy_args_list[argn]
             names_to_replace[dummy_arg] = argvar.var.name
 
@@ -569,10 +558,8 @@ def find_child_subroutines(
     type_dict: dict[str, DerivedType],
 ) -> None:
     """
-    Function that populates Subroutine fields that require
-    looking up in main dictionaries
     """
-    lines = sub.sub_lines
+    lines = sub.replace_associate_in_lines()
 
     regex_call = re.compile(r"^\s*(call)\b")
     matches = [line for line in filter(lambda x: regex_call.search(x.line), lines)]
@@ -586,8 +573,15 @@ def find_child_subroutines(
             type_dict=type_dict,
         )
         if call_desc:
-            call_desc.aggregate_vars()
+            call_desc.aggregate_vars(sub)
             sub.sub_call_desc[call_desc.lpair.ln] = call_desc
+            sub.call_bindings[
+                CallTag(
+                    caller=sub.id,
+                    callee=call_desc.fn,
+                    call_ln=call_desc.lpair.ln,
+                )
+            ] = call_desc.export_bindings()
 
     return
 
@@ -596,6 +590,7 @@ def construct_call_tree(
     sub: Subroutine,
     sub_dict: dict[str, Subroutine],
     dtype_dict: dict[str, DerivedType],
+    mod_dict: dict[str, FortranModule],
     nested: int,
 ) -> list[CallTuple]:
     """
@@ -605,12 +600,12 @@ def construct_call_tree(
     for childsub in sub.child_subroutines.values():
         if childsub.preprocessed or childsub.library:
             continue
-        childsub.collect_var_and_call_info(sub_dict, dtype_dict)
+        childsub.collect_var_and_call_info(sub_dict, dtype_dict,mod_dict)
 
     flat_call_list: list[CallTuple] = [
         CallTuple(
             nested=nested,
-            subname=sub.name,
+            subname=sub.id,
         )
     ]
 
@@ -621,6 +616,7 @@ def construct_call_tree(
             childsub,
             sub_dict,
             dtype_dict,
+            mod_dict,
             nested + 1,
         )
         flat_call_list.extend(child_list)

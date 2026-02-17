@@ -63,7 +63,7 @@ Thumbs.db
 *.cmake
 *.cmake.user
 **/build/
+**/admin/
 schema.pdf
 schema.svg
-**.svg
 **.pdf

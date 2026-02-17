@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import logging
-import pprint
 import re
 import sys
 from logging import Logger
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Callable, Optional
 
 from scripts.logging_configs import get_logger, set_logger_level
-from scripts.types import LineTuple, ModUsage
+from scripts.types import LineTuple, ModUsage, PointerAlias
 
 if TYPE_CHECKING:
     from scripts.analyze_subroutines import Subroutine
-
-from scripts.fortran_modules import FortranModule
-from scripts.utilityFunctions import Variable
+    from scripts.fortran_modules import FortranModule
+    from scripts.utilityFunctions import Variable
 
 
 def find_global_var_bounds(
@@ -66,21 +64,60 @@ def generate_dim_names(var: Variable) -> str:
 
 
 def add_global_vars(
+    mod_dict: dict[str, FortranModule],
     dep_mod: FortranModule,
     vars: dict[str, Variable],
     mod_usage: ModUsage,
+    mask: Callable,
 ):
     """ """
-    intrinsic_types = {"real", "integer", "logical", "character"}
     if mod_usage.all:
-        vars.update(dep_mod.global_vars)
+        vars.update(
+            {k: item for k, item in dep_mod.global_vars.items() if mask(item.type)}
+        )
     else:
         for id in mod_usage.clause_vars:
-            var = dep_mod.global_vars.get(id.obj)
-            if var is None or var.type not in intrinsic_types:
+            var = retrieve_global_var(
+                fort_mod=dep_mod,
+                var_name=id.obj,
+                mod_dict=mod_dict,
+            )
+            if var is None or not mask(var.type):
                 continue
             vars[id.obj] = var
     return
+
+
+def retrieve_global_var(
+    fort_mod: FortranModule,
+    var_name: str,
+    mod_dict: dict[str, FortranModule],
+) -> Optional[Variable]:
+    var = fort_mod.global_vars.get(var_name)
+
+    def in_usage(name: str, clause: set[PointerAlias]) -> bool:
+        x = list(filter(lambda x: x.obj == name, clause))
+        return bool(len(x) > 0)
+
+    if var is None:
+        candidates = {
+            mod: usages
+            for mod, usages in fort_mod.head_modules.items()
+            if not usages.all and in_usage(var_name, usages.clause_vars)
+        }
+        if not candidates:
+            # Symbol may not be a variable:
+            if (
+                var_name not in fort_mod.defined_types
+                and f"{fort_mod.name}::{var_name}" not in fort_mod.subroutines
+            ):
+                interface = var_name
+        else:
+            for mod in candidates:
+                dep_mod = mod_dict[mod]
+                return dep_mod.global_vars[var_name]
+    else:
+        return var
 
 
 def check_global_vars(regex_variables, sub: Subroutine) -> set[str]:
@@ -150,22 +187,34 @@ def determine_global_variable_status(
     set_logger_level(logger, logging.DEBUG)
 
     fileinfo = sub.get_file_info(all=True)
+    intrinsic_types = {"real", "character", "logical", "integer", "complex"}
 
     # temp mod dict for only those related to this Sub
-    test_modules: Dict[str, FortranModule] = {}
+    test_modules: dict[str, FortranModule] = {}
     modname = sub.module
     sub_mod = mod_dict[modname]
     update_default_value(mod_dict)
 
     variables: dict[str, Variable] = {}
     for mod_name, musage in sub_mod.head_modules.items():
-        add_global_vars(dep_mod=mod_dict[mod_name], vars=variables, mod_usage=musage)
+        add_global_vars(
+            mod_dict=mod_dict,
+            dep_mod=mod_dict[mod_name],
+            vars=variables,
+            mod_usage=musage,
+            mask=lambda x: x in intrinsic_types,
+        )
 
     sub_dep = sub_mod.sort_module_deps(startln=fileinfo.startln, endln=fileinfo.endln)
     for mod_name, musage in sub_dep.items():
-        add_global_vars(dep_mod=mod_dict[mod_name], vars=variables, mod_usage=musage)
+        add_global_vars(
+            mod_dict=mod_dict,
+            dep_mod=mod_dict[mod_name],
+            vars=variables,
+            mod_usage=musage,
+            mask=lambda x: x in intrinsic_types,
+        )
 
-    intrinsic_types = ["real", "character", "logical", "integer"]
     variables.update(
         {
             key: val

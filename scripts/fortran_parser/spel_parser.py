@@ -10,7 +10,7 @@ from scripts.fortran_parser.spel_ast import (ArrayInit, AttributeSpec,
                                              EntityDecl, Expression,
                                              ExpressionStatement,
                                              FieldAccessExpression,
-                                             FloatLiteral, FuncExpression,
+                                             FloatLiteral, FuncExpression, GenericOperatorExpression,
                                              Identifier, IfConstruct,
                                              ImpliedDo, InfixExpression,
                                              IntegerLiteral, IOExpression,
@@ -20,12 +20,12 @@ from scripts.fortran_parser.spel_ast import (ArrayInit, AttributeSpec,
                                              ProcedureStatement, Program,
                                              Statement, StringLiteral,
                                              SubCallStatement, TypeDef,
-                                             TypeSpec, VariableDecl,
-                                             WriteStatement)
+                                             TypeSpec, UseStatement,
+                                             VariableDecl, WriteStatement)
 from scripts.fortran_parser.tokens import Token, TokenTypes
 from scripts.fortran_parser.tracing import Trace
 from scripts.logging_configs import get_logger
-from scripts.types import Precedence
+from scripts.types import LineTuple, LogicalLineIterator, Precedence
 
 precedences = {
     TokenTypes.ASSIGN: Precedence.EQUALS,
@@ -60,10 +60,15 @@ Tok = TokenTypes
 class ParseError(Exception):
     pass
 
-
 class Parser:
-    def __init__(self, lex: lexer.Lexer, logger: str = "Parser"):
-        self.lexer: lexer.Lexer = lex
+    def __init__(self, lex: Optional[lexer.Lexer]=None, logger: str = "Parser",lines: list[LineTuple]=None,):
+        if lex:
+            self.lexer: lexer.Lexer = lex
+        elif lines:
+            line_it = LogicalLineIterator(lines=lines)
+            self.lexer = lexer.Lexer(line_it)
+        else:
+            sys.exit("Error - Need either lexer or lines to create Parser")
         self.errors: list[str] = []
         self.cur_token: Token = Token(token=Tok.ILLEGAL, literal="")
         self.peek_token: Token = Token(token=Tok.ILLEGAL, literal="")
@@ -157,7 +162,7 @@ class Parser:
             self.cur_token = Token(Tok.TYPE, "type")
         elif not self.is_first_token() and self.curTokenIs(Tok.TYPE_DEF):
             self.cur_token = Token(Tok.IDENT, "type")
-        # self.logger.info(f"(next_token) {self.cur_token} -> {self.peek_token}")
+        # self.logger.debug(f"{self.cur_token} -> {self.peek_token}")
         self.lineno = self.lexer.cur_ln
         return
 
@@ -195,16 +200,17 @@ class Parser:
         return LogicalLiteral(tok=self.cur_token, val=val)
 
     def parse_FloatLiteral(self) -> Expression:
-        num = FloatLiteral(tok=self.cur_token)
         lit = self.cur_token.literal
+        precision = ""
         if "_" in lit:
             val_prec = lit.split("_")
             val = val_prec[0]
             prec = "_".join(val_prec[1:])
-            num.precision = "_" + prec
+            precision = "_" + prec
         else:
             val = lit
-        num.value = float(val.replace("d", "e"))
+        value = float(val.replace("d", "e"))
+        num = FloatLiteral(tok=self.cur_token,val=value,prec=precision)
         return num
 
     def curTokenIs(self, etype: Tok):
@@ -324,6 +330,8 @@ class Parser:
                 stmt = self.parse_if_statement()
             case Tok.NEWLINE:
                 stmt = None
+            case Tok.SEMICOLON:
+                stmt = None
             case Tok.PRINT:
                 stmt = self.parse_print_statement()
             case Tok.WRITE:
@@ -336,11 +344,71 @@ class Parser:
                 stmt = self.parse_type_def()
             case Tok.PROC:
                 stmt = self.parse_procedure_stmt()
+            case Tok.USE:
+                stmt = self.parse_use_statement()
             case _:
                 stmt = self.parse_expression_statement()
         if stmt:
             stmt.lineno = startln
         return stmt
+
+    @Trace.trace_decorator("parse_uses")
+    def parse_use_statement(self)->Statement:
+        """
+        Parses fortran statements: use <mod_name> [, only : obj1,obj2, x => obj3]
+        """
+        tok = self.cur_token
+        self.next_token()
+        assert self.curTokenIs(Tok.IDENT), f"Un-expected module name: {self.cur_token}"
+        module = self.parse_expression(Precedence.LOWEST) # must be Identifier
+        objs = []
+        only_clause = False
+        if self.peekTokenIs(Tok.COMMA):
+            self.next_token() # COMMA
+            self.expect_peek(Tok.IDENT) # 'only'
+            assert self.cur_token.literal == "only", f"Expect 'only' identifier got: {self.cur_token}"
+            self.expect_peek(Tok.COLON) # ':'
+            self.next_token()
+            only_clause = True
+
+        if only_clause:
+            op = self.check_operator_def()
+            if op is None:
+                objs.append(self.parse_expression(Precedence.LOWEST))
+            else:
+                objs.append(op)
+            while self.peekTokenIs(Tok.COMMA):
+                self.next_token()
+                self.next_token()
+                op = self.check_operator_def()
+                if op is None:
+                    objs.append(self.parse_expression(Precedence.LOWEST))
+                else:
+                    objs.append(op)
+        return UseStatement(tok=tok,mod_name=module,objs=objs)
+
+
+    @Trace.trace_decorator("check_operator")
+    def check_operator_def(self)->Optional[GenericOperatorExpression]:
+        if not self.peekTokenIs(Tok.LPAREN):
+            return None
+        if self.cur_token.literal == "assignment" :
+            tok = Token(token=Tok.IDENT,literal="assignment")
+            _ = self.expect_peek(Tok.LPAREN) # not needed but advances tokens
+            _ = self.expect_peek(Tok.ASSIGN)
+            spec: Identifier = Identifier(tok=self.cur_token,value='=')
+            _ = self.expect_peek(Tok.RPAREN)
+        elif self.cur_token.literal == "operator":
+            tok = Token(token=Tok.IDENT,literal="operator")
+            _ = self.expect_peek(Tok.LPAREN)
+            self.next_token()
+            spec: Identifier = self.parse_identifier()
+            _ = self.expect_peek(Tok.RPAREN)
+        else:
+            self.errors.append(f"(check_operator_def) Unexpected token {self.cur_token}")
+            self.error_exit()
+        return GenericOperatorExpression(tok=tok,spec=spec)
+
 
     def parse_type_def(self) -> Statement:
         """
@@ -730,10 +798,8 @@ class Parser:
 
     @Trace.trace_decorator("parse_func_expr")
     def parse_func_expr(self, func: Expression) -> Expression:
-        func_expr = FuncExpression(tok=self.cur_token, fn=func)
-        func_expr.args = self.parse_args()
-        # Consume RPAREN
-        # self.next_token()
+        args = self.parse_args()
+        func_expr = FuncExpression(tok=self.cur_token, fn=func,args=args)
 
         return func_expr
 
@@ -761,24 +827,25 @@ class Parser:
         """
         Function to parse bounds.  curent token should be ":"
         """
-        bounds_expr = BoundsExpression(tok=self.cur_token)
-        bounds_expr.start = start
-
+        tok = self.cur_token
+        start_ = start
+        end_= None
         if not self.peekTokenIs(Tok.RPAREN) and not self.peekTokenIs(Tok.COMMA):
             self.next_token()
-            bounds_expr.end = self.parse_expression(Precedence.LOWEST)
-        return bounds_expr
+            end_ = self.parse_expression(Precedence.LOWEST)
+        return BoundsExpression(tok=tok,start=start_,end=end_)
 
     @Trace.trace_decorator("parse_prefix_bounds_expr")
     def parse_prefix_bounds_expr(self) -> Expression:
         """
         Function to parse bounds.  curent token should be ":"
         """
-        bounds_expr = BoundsExpression(tok=self.cur_token)
+        tok = self.cur_token
+        end_ = None
         if not self.peekTokenIs(Tok.RPAREN) and not self.peekTokenIs(Tok.COMMA):
             self.next_token()
-            bounds_expr.end = self.parse_expression(Precedence.LOWEST)
-        return bounds_expr
+            end_ = self.parse_expression(Precedence.LOWEST)
+        return BoundsExpression(tok=tok, start=None,end=end_)
 
     @Trace.trace_decorator("parse_write_statement")
     def parse_write_statement(self) -> WriteStatement:

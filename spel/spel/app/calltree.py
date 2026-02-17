@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
 from collections import defaultdict
+from copy import deepcopy
 from typing import Optional
 
 from django.conf import settings
-from django.core.cache import cache
-from django.db import connection
 
 from .models import SubroutineActiveGlobalVars, SubroutineCalltree, Subroutines
 
@@ -16,45 +14,99 @@ modules = {}
 
 
 class Node:
-    __slots__ = ("name", "children", "is_hit")
+    __slots__ = ("name", "children", "is_hit","id","uid")
 
     def __init__(
         self,
         name: str,
+        id : str,
         is_hit: bool = False,
+        children=None
     ):
         self.name: str = name
         self.children: list[Node] = []
+        if children:
+            self.children = children
         self.is_hit: bool = is_hit
+        self.id: str = id
+        self.uid = ""
 
     def __repr__(self):
-        return f"Node(name:{self.name},dep:{self.children})"
+        if self.children:
+            str_ = "/".join([str(c) for c in self.children])
+        else:
+            str_ = ""
+        return f"{self.id} -> {str_}"
 
+    def __str__(self):
+        return f"{self.id}"
+
+def print_node(node: Node, level:int=0):
+    """Recursively prints the tree in a hierarchical format."""
+    if level == 0:
+        print("CallTree for ", node.id)
+    indent = "|--" * level
+    print(f"{indent}>{node.id} {node.uid}")
+
+    for child in node.children:
+        print_node(child, level + 1)
+
+def annotate_tree(tree: list[Node], prefix="ctree"):
+    """
+    Annotate a pruned call tree with a unique 'uid' per *occurrence*.
+    The uid is a path, e.g., 'ctree-0-3-1'. Runs in O(N).
+    Returns the same structure, modified in-place (and also returns it).
+    """
+    path = []
+    def walk(nodes, depth=0):
+        for i, node in enumerate(nodes):
+            kids = node.children
+            node_uid = "-".join([prefix] + list(map(str, path + [i])))
+            node.uid = node_uid
+
+            path.append(i)
+            walk(kids,depth+1)
+            path.pop()
+    walk(tree,0)
+    return
 
 def prune_tree(
     roots: list[Node],
     hit_set: set[str],
+    traversable_set: Optional[set[str]] = None,
 ) -> list[Node]:
 
     seen_map: dict[str, Optional[Node] | object] = {}
     IN_PROGRESS = object()
 
+    def may_descend(name: str) -> bool:
+        return traversable_set is None or name in traversable_set
+
     def search_children(node: Node) -> Optional[Node]:
-        val = seen_map.get(node.name, None)
+        val = seen_map.get(node.id, None)
         if val is not None:
             if val is IN_PROGRESS:
                 new_node = (
-                    Node(node.name, is_hit=(node.name in hit_set))
+                    Node(node.name, id=node.id, is_hit=(node.name in hit_set))
                     if (node.name in hit_set)
                     else None
                 )
-                seen_map[node.name] = new_node
+                seen_map[node.id] = new_node
                 return new_node
             else:
-                return val
+                return deepcopy(val)
+
+        # HARD-STOP: if we cannot descend here, we decide solely on self-hit
+        if not may_descend(node.name):
+            kept = node.name in hit_set
+            seen_map[node.id] = (
+                Node(node.name,id=node.id,is_hit=True, children=[]) if kept else None
+            )
+            return deepcopy(seen_map[node.id])
 
         kept_children: list[Node] = []
-        seen_map[node.name] = IN_PROGRESS
+        seen_map[node.id] = IN_PROGRESS
+
         for child in node.children:
             kc = search_children(child)
             if kc is not None:
@@ -62,12 +114,12 @@ def prune_tree(
 
         is_hit = node.name in hit_set
         if is_hit or kept_children:
-            new_node = Node(name=node.name, is_hit=is_hit)
+            new_node = Node(name=node.name,id=node.id, is_hit=is_hit)
             new_node.children = kept_children.copy()
-            seen_map[node.name] = new_node
+            seen_map[node.id] = new_node
             return new_node
 
-        seen_map[node.name] = None
+        seen_map[node.id] = None
         return None
 
     ptree: list[Node] = []
@@ -214,27 +266,30 @@ def create_calltree_from_sub(sub_name: str) -> list[Node]:
         ln = e["lineno"]
         calltree_map[p].append((c, ln))
 
-    root = Node(root_sub.subroutine_name)
-    queue = [(root_sub.subroutine_name, root)]
+    root_id = f"{sub_name}@L0"
+    root = Node(sub_name,id=root_id)
+    queue = [(sub_name, root)]
 
     # Build the tree using a queue (BFS) to avoid recursion.
     # Expand each subroutine at most once to avoid infinite loops on recursion.
     expanded: set[str] = set()
 
     while queue:
-        cur_name, cur_node = queue.pop(0)
-        if cur_name in expanded:
+        cur_id, cur_node = queue.pop(0)
+        if cur_id in expanded:
             continue
-        expanded.add(cur_name)
+        expanded.add(cur_id)
+        cur_name = cur_id.split("@")[0]
 
         # children are already ordered by lineno due to the queryset order_by
         for child_name, ln in calltree_map.get(cur_name, []):
-            child_node = Node(child_name)
+            id = f"{child_name}@L{ln}"
+            child_node = Node(child_name,id=id)
             cur_node.children.append(child_node)
 
             # enqueue for expansion unless we've already expanded that subroutine elsewhere
-            if child_name not in expanded:
-                queue.append((child_name, child_node))
+            if id not in expanded:
+                queue.append((id, child_node))
 
     return [root]
 

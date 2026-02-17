@@ -1,3 +1,4 @@
+import json
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import List, Optional, Tuple
@@ -179,7 +180,7 @@ class IntegerLiteral(Expression):
         return isinstance(other, IntegerLiteral) and self.value == other.value
 
     def to_dict(self):
-        return {"Node": "IntegerLiteral", "Val": self.value}
+        return {"Node": "IntegerLiteral", "Val": self.value, "Prec": self.precision}
 
 
 class StringLiteral(Expression):
@@ -194,7 +195,7 @@ class StringLiteral(Expression):
         pass
 
     def __str__(self):
-        return self.token_literal()
+        return f"'{self.value}'"
 
     def __eq__(self, other):
         return isinstance(other, StringLiteral) and self.value == other.value
@@ -225,10 +226,10 @@ class LogicalLiteral(Expression):
 
 
 class FloatLiteral(Expression):
-    def __init__(self, tok: Token):
+    def __init__(self, tok: Token, val: float, prec: str):
         self.token: Token = tok
-        self.value: Optional[float] = None
-        self.precision: str = ""
+        self.value: float = val
+        self.precision: str = prec
 
     def token_literal(self) -> str:
         return self.token.literal
@@ -287,7 +288,7 @@ class PrefixExpression(Expression):
         pass
 
     def __str__(self):
-        return f"({self.operator} {str(self.right_expr)})"
+        return f"{self.operator} ({str(self.right_expr)})"
 
     def __eq__(self, other):
         if not isinstance(other, PrefixExpression):
@@ -417,14 +418,10 @@ class FuncExpression(Expression):
     Expression for functions or arrays. Infix operator expression
     """
 
-    def __init__(
-        self,
-        tok: Token,
-        fn: Expression,
-    ):
+    def __init__(self, tok: Token, fn: Expression, args: list[Expression]):
         self.token: Token = tok  # '('
         self.function: Expression = fn  # Identifier
-        self.args: list[Expression] = []
+        self.args: list[Expression] = args
 
     def expression_node(self) -> None:
         pass
@@ -461,10 +458,10 @@ class FuncExpression(Expression):
 
 
 class BoundsExpression(Expression):
-    def __init__(self, tok):
+    def __init__(self, tok, start: Optional[Expression], end=Optional[Expression]):
         self.token: Token = tok  # Colon
-        self.start: Expression | str = ""
-        self.end: Expression | str = ""
+        self.start = start
+        self.end = end
 
     def expression_node(self) -> None:
         pass
@@ -473,7 +470,9 @@ class BoundsExpression(Expression):
         return super().token_literal()
 
     def __str__(self):
-        return f"{self.start}:{self.end}"
+        s = "" if self.start is None else self.start
+        e = "" if self.end is None else self.end
+        return f"{s}:{e}"
 
     def __eq__(self, other):
         if not isinstance(other, BoundsExpression):
@@ -489,10 +488,35 @@ class BoundsExpression(Expression):
         return {
             "Node": "BoundsExpression",
             "Val": str(self),
+            "Start": self.start.to_dict() if self.start else None,
+            "End": self.end.to_dict() if self.end else None,
         }
 
     def copy(self):
         return deepcopy(self)
+
+
+class GenericOperatorExpression(Expression):
+    def __init__(self, tok: Token, spec: Identifier):
+        assert tok.literal in {"operator", "assignment"}
+        self.token: Token = tok
+        self.interface: Identifier = spec
+
+    def expression_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return f"{self.token_literal()}({self.interface})"
+
+    def to_dict(self):
+        return {
+            "Node": "GenericOperatorExpression",
+            "Token": self.token_literal(),
+            "Interface": self.interface.value,
+        }
 
 
 class BlockStatement(Statement):
@@ -882,7 +906,7 @@ class EntityDecl(Expression):
         self,
         tok: Token,
         bounds: list[BoundsExpression],
-        init: Optional[InfixExpression],
+        init: Optional[Expression],
     ):
         self.token: Token = tok
         self.bounds = bounds
@@ -899,7 +923,7 @@ class EntityDecl(Expression):
         if self.bounds:
             s += "(" + ",".join([str(bnds) for bnds in self.bounds]) + ")"
         if self.init is not None:
-            s += f" {self.init.operator} {self.init.right_expr}"
+            s += f" = {self.init}"
         return s
 
     def get_bounds_str(self) -> str:
@@ -1073,3 +1097,86 @@ class ProcedureStatement(Statement):
         attrs = f",{self.attrs}" if self.attrs else ""
         alias = f"=> {self.alias}" if self.alias else ""
         return f"procedure {attrs} :: {self.name} {alias}"
+
+
+class UseStatement(Statement):
+    def __init__(self, tok: Token, mod_name: Identifier, objs: list[Expression]):
+        self.token = tok  # Should be 'Ident'
+        self.module = mod_name.value
+        self.objs = objs
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def statement_node(self) -> None:
+        return super().statement_node()
+
+    def __str__(self) -> str:
+        use_str = f", only : {','.join(list(map(str,self.objs)))}" if self.objs else ""
+        return f"{self.lineno}: use {self.module}{use_str}"
+
+    def to_dict(self):
+        return {
+            "Node": "UseStatement",
+            "Module": self.module,
+            "objs": [expr.to_dict() for expr in self.objs],
+        }
+
+
+def expr_from_dict(d: dict | None) -> Optional[Expression]:
+    if d is None:
+        return None
+
+    node = d.get("Node")
+    match node:
+        case "Ident":
+            return Identifier(None, value=d["Val"])
+        case "StringLiteral":
+            return StringLiteral(tok=None, val=d["Val"])
+        case "FloatLiteral":
+            return FloatLiteral(tok=None, val=d["Val"], prec="")
+        case "LogicalLiteral":
+            return LogicalLiteral(None, val=d["Val"])
+        case "IntegerLiteral":
+            return IntegerLiteral(tok=None, val=d["Val"], prec=d["Prec"])
+        case "PrefixExpression":
+            return PrefixExpression(
+                tok=None, op=d["Op"], right=expr_from_dict(d["Right"])
+            )
+        case "InfixExpression":
+            return InfixExpression(
+                tok=None,
+                left=expr_from_dict(d["Left"]),  # <-- recursion
+                op=d["Op"],
+                right=expr_from_dict(d["Right"]),  # <-- recursion
+            )
+        case "FuncExpression":
+            args = [expr_from_dict(arg) for arg in d["Args"]]
+            return FuncExpression(tok=None, fn=d["Func"], args=args)
+        case "FieldAccessExpression":
+            return FieldAccessExpression(
+                left=expr_from_dict(d["Left"]),
+                field=expr_from_dict(d["Field"]),
+                tok=None,
+            )
+        case "BoundsExpression":
+            return BoundsExpression(
+                tok=None,
+                start=expr_from_dict(d["Start"]),
+                end=expr_from_dict(d["End"]),
+            )
+
+    raise ValueError(f"Unknown node type: {node}")
+
+
+def expr_to_json(expr) -> str:
+    """Serialize an Expression to a canonical JSON string."""
+    if expr is None:
+        return "null"
+    return json.dumps(expr.to_dict(), separators=(",", ":"), sort_keys=True)
+
+
+def expr_from_json(s: str) -> Optional[Expression]:
+    """Deserialize a JSON string into an Expression (or None)."""
+    d = json.loads(s)
+    return expr_from_dict(d)  # your function

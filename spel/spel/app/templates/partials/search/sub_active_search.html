@@ -1,0 +1,13 @@
+{% if results %}
+<div class="dropdown" role="listbox" aria-label="Subroutine matches">
+  {% for r in results %}
+  <a href="{% url 'sub_view' r.subroutine_name %}" role="option" tabindex="0" hx-boost="true">
+    {{ r.display_label }}
+  </a>
+  {% endfor %}
+</div>
+{% elif query %}
+<div class="dropdown" role="listbox">
+  <div class="empty">No matches for “{{ query }}”.</div>
+</div>
+{% endif %}

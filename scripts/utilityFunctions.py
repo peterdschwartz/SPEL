@@ -10,8 +10,9 @@ import re
 import subprocess as sp
 import sys
 from collections import namedtuple
+from itertools import zip_longest
 from pprint import pprint
-from typing import TYPE_CHECKING, List, Pattern, Tuple
+from typing import TYPE_CHECKING, List, Pattern, TextIO, Tuple
 
 from scripts.fortran_parser.lexer import Lexer
 from scripts.fortran_parser.spel_ast import VariableDecl
@@ -255,37 +256,6 @@ def getArguments(full_line, verbose=False) -> List[str]:
     return args
 
 
-def lineContinuationAdjustment(lines, ln, verbose=False):
-    """
-    This function returns takes a string that
-    accounts for line continuations
-
-    Could be simpler/easier to read without using enumerate
-    in calling loop.
-    """
-    l = lines[ln]
-    l = l.split("!")[0]
-    l = l.rstrip("\n")
-    l = l.strip().lower()
-
-    lines_to_skip = 0
-    while l.endswith("&"):
-        lines_to_skip += 1
-        ct = ln + lines_to_skip
-        newline = lines[ct].split("!")[0]
-        newline = newline.strip().lower()
-        l = l[:-1] + newline.strip().rstrip("\n")
-
-    if verbose and lines_to_skip > 0:
-        print("Started with line: ")
-        print(lines[ln])
-        print("Returning line:")
-        print(l)
-        print(f"Skipped {lines_to_skip} lines")
-
-    return l, lines_to_skip
-
-
 def unwrap_section(lines: list[str], startln: int) -> list[LineTuple]:
     """
     lines: list of fortran lines to adjust for lineconinuation
@@ -295,12 +265,12 @@ def unwrap_section(lines: list[str], startln: int) -> list[LineTuple]:
     line_it = LogicalLineIterator(
         lines=[LineTuple(line=line, ln=i) for i, line in enumerate(lines)]
     )
-    for full_line, new_ln in line_it:
+    for fline in line_it:
+        full_line = fline.line
         ln = line_it.get_start_ln()
         if ln > startln and full_line:
-            for stmt in full_line.split(';'):
-                fline_list.append(LineTuple(line=stmt, ln=ln))
-        ln = new_ln + 1
+            fline_list.append(LineTuple(line=full_line, ln=ln))
+        ln = line_it.get_curr_idx() + 1
 
     return fline_list
 
@@ -482,23 +452,6 @@ def determine_class_instance(sub, verbose=False):
         sys.exit()
     else:
         return var_type
-
-
-def convertAssociateDict(associate_vars, varlist):
-    """
-    Need to eliminate this function and properly match arguments
-    """
-    dtypes = []
-    replace_inst = []
-    for vars in associate_vars.values():
-        for v in vars:
-            _type, field = v.split("%")
-            if _type in replace_inst:
-                _type = _type.replace("_inst", "vars")
-            if _type not in dtypes:
-                dtypes.append(_type)
-
-    return
 
 
 def adjust_array_access_and_allocation(local_arrs, sub, dargs=False, verbose=False):
@@ -1043,108 +996,6 @@ def create_var_from_decl(stmt: VariableDecl) -> list[Variable]:
     return variables
 
 
-def parse_line_for_variables(ifile, l, ln, ptr=False, verbose=False):
-    """
-    Function that takes a line of code and returns the variables
-    that are declared in it.
-    """
-    # NOTE: This code is duplicated from getLocalVariables
-    #       which should be refactored?
-    func_name = "parse_line_for_variables"
-    variable_list = []
-    match_var = find_variables.search(l)
-    if match_var:
-        if "::" not in l:
-            # regex to separate type from variable when there is no '::' separator
-            ng_type = re.compile(r"^\w+?\s*\(.+?\)")
-            match_type = ng_type.search(l)
-            if match_type:
-                # Means there exists a character(len=) or type(.) or real(r8)
-                temp_decl = match_type.group()
-                temp_vars = l.split(temp_decl)[1]
-            else:  # means it's a simple decl such as 'integer'
-                temp_decl = find_variables.search(l)
-                temp_vars = find_variables.sub("", l).strip()
-        else:
-            temp = l.split("::")  # Is this a poor assumption?
-            if len(temp) < 2:
-                print(
-                    f"{func_name}:: Error - Thought there was a variable decl at \n {ifile}::L{ln+1}\n{l} "
-                )
-                sys.exit(1)
-            temp_decl = l.split("::")[0]
-            temp_vars = l.split("::")[1]
-
-        # Get data type of variable by checking for intrinsic types
-        # and then user-defined types separately
-        m_type = intrinsic_type.search(temp_decl)
-        if m_type:
-            data_type = m_type.group()
-        else:  # User-Defined Type
-            m_type = user_type.search(temp_decl)
-            data_type = find_type.search(temp_decl).group()
-
-        # Go through and replace all arrays first
-        #
-        # NOTE: It may be beneficial to store the initialized value
-        # for any arrays, for now they are deleted and
-        # only the variable name, dimension are stored
-        regex_array_init = re.compile(r"=\s*(\(\/)(.)+?(\/\))")
-        temp_vars = regex_array_init.sub("", temp_vars)
-
-        # call function to remove any array bounds so that only
-        # variable names are comma separated.
-        remove_slices = removeBounds(temp_vars)
-
-        # create list of only variable names
-        var_list = remove_slices.split(",")
-        var_list = [x.strip() for x in var_list if x.strip()]
-
-        for var in var_list:
-            # NOTE: similar to note above for arrays, this skips over
-            #       initialization for other variables. May change if
-            #       desired use case wants initial values.
-            ptrscalar = False
-            default_value: str = ""
-            if "=" in var:
-                default_value = var.split("=")[1].strip()
-                var = var.split("=")[0].strip()
-            # Check if current variable is an array
-            ng_var_array = re.compile(rf"{var}?\s*\(.+?\)", re.IGNORECASE)
-            match_array = ng_var_array.search(temp_vars)
-            if match_array:
-                arr = match_array.group()
-                index = regex_subgrid_index.search(var)
-                if index:
-                    subgrid = index.group()
-                else:
-                    subgrid = "?"
-                # Storing line number of declaration
-                dim = arr.count(",") + 1
-            else:
-                subgrid = ""
-                dim = 0
-                if ptr:
-                    ptrscalar = True
-            parameter = bool("parameter" in temp_decl.lower())
-            private = bool("private" in temp_decl.lower())
-
-            variable_list.append(
-                Variable(
-                    data_type,
-                    var,
-                    subgrid,
-                    ln,
-                    dim,
-                    parameter=parameter,
-                    private=private,
-                    ptrscalar=ptrscalar,
-                    value=default_value,
-                )
-            )
-
-    return variable_list
-
 
 def check_cpp_line(base_fn, og_lines, cpp_lines, cpp_ln, og_ln, verbose=False):
     """Function to check if the compiler preprocessor (cpp) line
@@ -1211,3 +1062,19 @@ def search_in_file_section(
         matches = [line[1] for line in filter(lambda x: pattern.search(x[1]), section)]
 
     return matches
+
+def retrieve_lines(infile: str,lns: list[int])->list[LineTuple]:
+    """
+    read full Fortran statement from the given line
+    """
+    olines: list[LineTuple] = []
+    with open(infile,'r') as f:
+        lines = f.readlines()
+        line_it = LogicalLineIterator(lines=[LineTuple(line=line,ln=i) for i, line in enumerate(lines)])
+        for ln in lns:
+            line_it.reset(ln)
+            fline = next(line_it)
+            full_line = fline.line
+            olines.append(LineTuple(line=full_line,ln=ln))
+
+    return olines

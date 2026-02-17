@@ -5,14 +5,14 @@ import subprocess as sp
 import sys
 from typing import TYPE_CHECKING, Optional
 
+from scripts.fortran_modules import get_module_name_from_file
 from scripts.types import ArgDesc, ArgType
 
 if TYPE_CHECKING:
     from scripts.analyze_subroutines import Subroutine
 
-from scripts.config import ELM_SRC, _bc
+from scripts.config import ELM_SRC
 from scripts.types import PointerAlias
-from scripts.utilityFunctions import Variable
 
 
 def match_input_arguments(l_args, sub: Subroutine, special, verbose=False):
@@ -205,7 +205,7 @@ def compare_args(
     return True
 
 
-def get_interface_procedures(iname: str, verbose: bool = False) -> list[str]:
+def get_interface_procedures(iname: str) -> list[str]:
     """
     Function that finds the potential procedures of an interface
     """
@@ -221,6 +221,7 @@ def get_interface_procedures(iname: str, verbose: bool = False) -> list[str]:
             f"cmd: {cmd}\noutput: {output}"
         )
     fn, ln, _ = output
+    _, module = get_module_name_from_file(fn)
 
     ln = int(ln)
 
@@ -233,7 +234,7 @@ def get_interface_procedures(iname: str, verbose: bool = False) -> list[str]:
     regex_end = re.compile(r"^\s*(end)\s+(interface)", re.IGNORECASE)
     regex_procedure = re.compile(r"^\s*(module)\s+(procedure)\s+", re.IGNORECASE)
 
-    interface_sub_names = []  # list of subroutine names in the interface
+    interface_sub_names: list[str] = []  # list of subroutine names in the interface
     ct = ln - 1
     in_interface = True
     while in_interface:
@@ -244,7 +245,7 @@ def get_interface_procedures(iname: str, verbose: bool = False) -> list[str]:
             m_proc = regex_procedure.search(lines[ct])
             if m_proc:
                 subname = lines[ct].replace(m_proc.group(), "").strip().lower()
-                interface_sub_names.extend([s.strip() for s in subname.split(",")])
+                interface_sub_names.extend([f"{module}::{s.strip()}" for s in subname.split(",")])
         ct += 1
 
     return interface_sub_names

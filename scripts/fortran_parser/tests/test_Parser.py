@@ -1,7 +1,9 @@
 from scripts.fortran_parser.lexer import Lexer
+from scripts.fortran_parser.spel_ast import IfConstruct, Program
 from scripts.fortran_parser.spel_parser import Parser
 from scripts.fortran_parser.tracing import Trace
-from scripts.types import LineTuple, LogicalLineIterator
+from scripts.nml.analyze_ifs import flatten_if
+from scripts.types import FlatIfs, LineTuple, LogicalLineIterator
 
 var_txt = """
     ! 1) Old-style, no attributes (no :: allowed/used)
@@ -270,11 +272,24 @@ ifs_txt = """
          anaerobic_frac(c,j) = 0._r8
       endif
     end if 
+
    """
 
 
 def test_if_parsing():
-    parse_statements(ifs_txt)
+    program = parse_statements(ifs_txt)
+
+    flat_ifs: list[FlatIfs] = []
+    for stmt in program.statements:
+        if isinstance(stmt, IfConstruct):
+            flat_ifs.extend(flatten_if(stmt))
+
+    flat_conds = [str(fi.condition) for fi in flat_ifs]
+
+    test = parse_statements("\n".join(flat_conds))
+    for stmt in test.statements:
+        print(stmt)
+
     return
 
 
@@ -291,6 +306,15 @@ def test_do_parsing():
         do j = 1, n
             x(fc) = x(fc) + b(nc,j)*dz(j)
             print *, "j :" , j
+        if (error) then
+                   write(iulog,*) subname//' ERROR: at least one glc_mec column has non-zero area from the coupler,'
+                   write(iulog,*) 'but there was no slot in memory for this column; g = ', g
+                   write(iulog,*) 'this%frac_grc(g, 1:maxpatch_glcmec) = ', &
+                        this%frac_grc(g, 1:maxpatch_glcmec)
+                   write(iulog,*) 'frac_assigned(1:maxpatch_glcmec) = ', &
+                        frac_assigned(1:maxpatch_glcmec)
+                   call endrun()
+        end if  ! error
         end do
     end do
 
@@ -306,7 +330,7 @@ def test_do_parsing():
           exit
        end if
        if ( iter>itmax ) then                                 !exceeds max iters -> exit
-          flag = .false.
+          flag = .false.; c1 = 2
           exit
        end if
     end do
@@ -326,20 +350,22 @@ def test_var_parsing():
     Trace.enabled = True
     parse_statements(var_txt)
 
+def test_use_parsing():
+    Trace.enabled = True
+    program = parse_statements(
+        """use mod1
+        use mod3, only: x => y, zs_jf, assignment(=)
+        use mod4  , only : t,h, operator(.also.), operator(+)
+    """)
+    for stmt in program.statements:
+        print(f"{stmt}")
+        print(stmt.to_dict())
 
-def parse_statements(txt: str):
+def parse_statements(txt: str) -> Program:
     lines = [LineTuple(line=l, ln=i) for i, l in enumerate(txt.split("\n"))]
 
-    # Trace.enabled = True
-    line_it = LogicalLineIterator(lines=lines, log_name="test_ifs")
-    for fl, x in line_it:
-        print(x, fl)
-    line_it.reset()
-    lexer = Lexer(line_it=line_it)
-    parser = Parser(lex=lexer)
+    parser = Parser(lines=lines)
     program = parser.parse_program()
 
     parser.logger.info(f"FOUND {len(program.statements)} statements")
-
-    for stmt in program.statements:
-        print(stmt)
+    return program

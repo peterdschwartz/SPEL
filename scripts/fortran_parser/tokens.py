@@ -16,7 +16,7 @@ class TokenTypes(Enum):
     PLUS = "+"
     MINUS = "-"
     ASTERISK = "*"
-    BANG = "!"
+    BANG = ".not."
     SLASH = "/"
     EXP = "**"
     EQUIV = "=="
@@ -24,9 +24,9 @@ class TokenTypes(Enum):
     GTEQ = ">="
     LT = "<"
     LTEQ = "<="
-    NOT_EQUIV = "!="
-    OR = "or"
-    AND = "and"
+    NOT_EQUIV = ".ne."
+    OR = ".or."
+    AND = ".and."
     CONCAT = "//"
     PTR = "=>"
     # delimiters
@@ -36,6 +36,7 @@ class TokenTypes(Enum):
     RPAREN = ")"
     NEWLINE = "\n"
     COLON = ":"
+    SEMICOLON = ';'
     PERCENT = "%"
     MACRO = "#"
     DOUBLE_COLON = "::"
@@ -62,8 +63,8 @@ class TokenTypes(Enum):
     END = "END"
     ENDIF = "ENDIF"
     ENDDO = "ENDDO"
-    ENDSUB = "END SUB"
-    ENDFUNC = "END FUNC"
+    ENDSUB = "END SUBROUTINE"
+    ENDFUNC = "END FUNCTION"
     PRINT = "PRINT"
     WRITE = "WRITE"
     IFDEF = "ifdef"
@@ -72,6 +73,7 @@ class TokenTypes(Enum):
     M_ENDIF = "#endif"
     ENDTYPE = "end type"
     PROC = "procedure"
+    USE = "use"
 
 
 keywords: dict[str, TokenTypes] = {
@@ -114,6 +116,7 @@ keywords: dict[str, TokenTypes] = {
     "contains": TokenTypes.CONTAINS,
     "endtype": TokenTypes.ENDTYPE,
     "procedure": TokenTypes.PROC,
+    "use": TokenTypes.USE,
 }
 
 
@@ -130,3 +133,24 @@ def lookup_identifer(ident: str) -> TokenTypes:
     if ident in keywords:
         return keywords[ident]
     return TokenTypes.IDENT
+
+
+OPERATORS = {
+    TokenTypes.ASSIGN,
+    TokenTypes.PLUS,
+    TokenTypes.MINUS,
+    TokenTypes.ASTERISK,
+    TokenTypes.BANG,
+    TokenTypes.SLASH,
+    TokenTypes.EXP,
+    TokenTypes.EQUIV,
+    TokenTypes.GT,
+    TokenTypes.GTEQ,
+    TokenTypes.LT,
+    TokenTypes.LTEQ,
+    TokenTypes.NOT_EQUIV,
+    TokenTypes.OR,
+    TokenTypes.AND,
+    TokenTypes.CONCAT,
+    TokenTypes.PTR,
+}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -11,12 +11,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class Environment:
-    inst_dict: dict[str, DerivedType]
-    variables: dict[str, Variable]
-    locals: dict[str, Variable]
-    globals: dict[str, Variable]
-    dummy_args: dict[str, Variable]
-    fns: dict[str, Subroutine]
+    inst_dict: dict[str, DerivedType] = field(default_factory=dict)
+    variables: dict[str, Variable] = field(default_factory=dict)
+    locals: dict[str, Variable] = field(default_factory=dict)
+    globals: dict[str, Variable] = field(default_factory=dict)
+    dummy_args: dict[str, Variable] = field(default_factory=dict)
+    fns: dict[str, Subroutine] = field(default_factory=dict)
 
     def to_dict(self):
         return asdict(self)

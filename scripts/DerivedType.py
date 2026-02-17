@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 import subprocess as sp
 import sys
-from pprint import pprint
+from collections import defaultdict
+from pprint import pformat, pprint
 from typing import TYPE_CHECKING, Dict, Optional
 
 import scripts.dynamic_globals as dg
@@ -26,8 +27,8 @@ from scripts.fortran_modules import get_module_name_from_file
 from scripts.utilityFunctions import (
     Variable,
     create_var_from_decl,
-    line_unwrapper,
-    parse_line_for_variables,
+    parse_variable_decl,
+    retrieve_lines,
 )
 
 Alias = str
@@ -84,88 +85,66 @@ class DerivedType(object):
     def find_instances(self, mod_dict: dict[str, FortranModule]):
         # Find all instances of the derived type:
         grep = "grep -rin --exclude-dir=external_models/"
-        cmd = rf'{grep} "type\s*(\s*{self.type_name}\s*)" {ELM_SRC}* | grep "::" | grep -v "intent"'
+        cmd = rf'{grep} "type\s*(\s*{self.type_name}\s*)" {ELM_SRC}* | grep "::" | grep -iv intent'
         output = sp.getoutput(cmd)
 
-        regex_paren = re.compile(r"\((.+)\)")
-        #
-        # Each element in output should have the format:
-        # <filepath> : <ln> : type(<type_name>) :: <instance_name>
         instance_list = {}
         if not output:
             return
 
+        # <filepath> : <ln> : type(<type_name>) :: <instance_name>
         output = output.split("\n")
-        for el in output:
-            inst_name = el.split("::")[-1]
-            inst_name = inst_name.split("!")[0].strip().lower()
+        split_output = list(map(lambda x: x.split(":", 2), output))
 
-            filepath = el.split(":")[0].strip()
-            ln = int(el.split(":")[1].strip())
-            _, module_name = get_module_name_from_file(filepath)
-            if module_name not in mod_dict:
-                end_of_head_ln = find_module_head_end(module_name, filepath)
+        def mod_ln_helper(modname, fp):
+            fort_mod = mod_dict.get(modname, None)
+            if fort_mod: 
+                return fort_mod.end_of_head_ln
             else:
-                fort_mod = mod_dict[module_name]
-                end_of_head_ln = fort_mod.end_of_head_ln
-            if ln > end_of_head_ln:
-                continue
+                if modname == "elm_instmod":
+                    return find_module_head_end(modname,fp)
+                else:
+                    return -1
 
-            dim = inst_name.count(":")
-            inst_name = regex_paren.sub("", inst_name)
+        files = [el[0] for el in split_output]
+        lns = [int(el[1]) - 1 for el in split_output]
 
-            inst_var = Variable(
-                type=self.type_name,
-                name=inst_name,
-                subgrid="?",
-                ln=ln,
-                dim=dim,
-                declaration=module_name,
-            )
-            if inst_var.name not in instance_list:
-                instance_list[inst_var.name] = inst_var
+        io_list = defaultdict(list)
+        for f, ln in zip(files, lns):
+            _, mod = get_module_name_from_file(f)
+            if ln < mod_ln_helper(mod, f):
+                io_list[f].append(ln)
+
+        lines: list[LineTuple] = []
+        mod_for_lines = []
+        for f, lns in io_list.items():
+            lines.extend(retrieve_lines(f, lns))
+            _, mod_name = get_module_name_from_file(f)
+            mod_for_lines.extend([mod_name for i in lns])
+
+        assert len(mod_for_lines) == len(lines), "Error - Mismatch of modules for each line"
+        if not lines:
+            return
+        line_it = LogicalLineIterator(lines=lines, log_name="find_instances")
+        lexer = Lexer(line_it)
+        parser = Parser(lexer, "find_instances")
+        program = parser.parse_program()
+
+        for i, stmt in enumerate(program.statements):
+            assert isinstance(
+                stmt, VariableDecl
+            ), f"Unexpected Statement: {stmt} from:\n files: {files}\n{pformat(lines)}"
+            variables = create_var_from_decl(stmt)
+            mod_name = mod_for_lines[i]
+            for inst_var in variables:
+                if inst_var.name not in instance_list:
+                    if inst_var.name == "this":
+                        print(pformat(lines))
+                        sys.exit(1)
+                    inst_var.declaration = mod_name
+                    instance_list[inst_var.name] = inst_var
 
         self.instances = instance_list.copy()
-
-    def print_derived_type(self, ofile=sys.stdout, long=False) -> None:
-        """
-        Function to print info on the user derived type
-        """
-        if ofile == sys.stdout:
-            hl = _bc
-        else:
-            hl = _no_colors
-
-        ofile.write(hl.HEADER + "Derived Type:" + self.type_name + "\n" + hl.ENDC)
-        base_fn = "/".join(self.filepath.split("/")[-2:])
-        ofile.write(hl.HEADER + "from Mod: " + base_fn + "\n" + hl.ENDC)
-        for v in self.instances.values():
-            ofile.write(hl.OKBLUE + f"{v.type} {v.name} {v.declaration}\n" + hl.ENDC)
-        ofile.write(hl.WARNING + f"Initialized in {self.init_sub_name} \n" + hl.ENDC)
-        if self.procedures:
-            ofile.write(hl.OKGREEN + f"Type Procedures:\n")
-            for alias, proc in self.procedures.items():
-                if alias != proc:
-                    ofile.write(f"{alias} => {proc}\n")
-                else:
-                    ofile.write(f"{alias}\n")
-            ofile.write(hl.ENDC)
-        if long:
-            ofile.write("w/ components:\n")
-            for field_var in self.components.values():
-                status = field_var.active
-                var = field_var
-                if var.dim > 0:
-                    bounds = field_var.bounds
-                else:
-                    bounds = ""
-                if not var.pointer:
-                    str_ = f"  {status} {var.type} {var.name} {bounds} {str(var.dim)}-D"
-                else:
-                    targets = "|".join(var.pointer)
-                    str_ = f"  {status} {var.type} {var.name} => {var.pointer}"
-                ofile.write(str_ + "\n")
-        return None
 
     def manual_deep_copy(self, ofile=sys.stdout):
         """
@@ -209,27 +188,25 @@ class DerivedType(object):
 
 
 def get_component(
-    instance_dict: dict[str, DerivedType], dtype_field: str
+    instance_dict: dict[str, DerivedType],
+    inst_name: str,
+    field: str,
 ) -> Optional[Variable]:
     """
     Function that looks up inst%field in the instance dict.
     """
-    regex_paren = re.compile(r"\((.+)\)")  # for removing array of struct index
-    if dtype_field.count("%") != 1:
-        print(f"Error {dtype_field}")
-    inst_name, field = dtype_field.split("%")
-    inst_name = regex_paren.sub("", inst_name)
     dtype = instance_dict.get(inst_name, None)
     if not dtype:
-        print(f"Error: {inst_name} not known. {dtype_field}")
+        print(f"Error: {inst_name} not known. {field}")
         return None
     if field in dtype.components:
         var: Variable = dtype.components[field].copy()
         return var
     else:
         if field not in dtype.procedures:
-            print(f"Procedures for {dtype.type_name}: {dtype.procedures}")
-            print(f"Error- Couldn't categorize {dtype_field}")
+            print(f"Procedures for {dtype.type_name}: {dtype.procedures.items()}")
+            print(f"Error- Couldn't categorize {field}")
+            sys.exit(10)
         return None
 
 
@@ -298,13 +275,13 @@ def get_fields(typedef: TypeDef) -> dict[str, Variable]:
     return components
 
 
-def get_type_procedures(typedef: TypeDef) -> dict[Alias, Proc]:
+def get_type_procedures(modname:str,typedef: TypeDef) -> dict[Alias, Proc]:
     procs: dict[Alias, Proc] = {}
     for stmt in typedef.methods.statements:
         if isinstance(stmt, ProcedureStatement):
             alias = stmt.alias if stmt.alias else stmt.name
-            name = stmt.name
-            procs[alias] = name
+            name = f"{modname}::{stmt.name}"
+            procs[f"{alias}"] = name
     return procs
 
 
@@ -320,7 +297,8 @@ def parse_derived_type_definition(
     dtypes: TypeDict = {}
     statements: list[Statement] = []
     line_it = LogicalLineIterator(lines=lines)
-    for full_line, _ in line_it:
+    for fline in line_it:
+        full_line = fline.line
         m_start = regex_start.search(full_line)
         m_skip = regex_skip.search(full_line)
         if m_start and not m_skip:
@@ -340,7 +318,7 @@ def parse_derived_type_definition(
         dtype = DerivedType(type_name=typedef.name, vmod=mod_name, fpath=ifile)
         dtype.components = get_fields(typedef)
         if typedef.methods:
-            dtype.procedures = get_type_procedures(typedef)
+            dtype.procedures = get_type_procedures(mod_name, typedef)
         dtypes[dtype.type_name] = dtype
 
     return dtypes

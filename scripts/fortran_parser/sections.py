@@ -27,7 +27,8 @@ def parse_blocks(
 
     log_name = "Parser" if not tag else tag
     statements: list[Statement] = []
-    for full_line, _ in line_it:
+    for fline in line_it:
+        full_line = fline.line
         start_ln = line_it.get_start_ln()
         m_start = regex_start.search(full_line)
 
