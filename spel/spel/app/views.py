@@ -16,7 +16,6 @@ from django.shortcuts import HttpResponse, get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.views import View
 from django.views.decorators.http import require_http_methods
-from typing_extensions import Type
 
 from .calltree import (
     annotate_tree,
