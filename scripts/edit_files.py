@@ -21,7 +21,6 @@ from scripts.fortran_modules import (
     get_module_name_from_file,
     parse_use_stmts,
 )
-from scripts.fortran_parser.spel_ast import GenericOperatorExpression
 from scripts.logging_configs import get_logger, set_logger_level
 from scripts.profiler_context import profile_ctx
 from scripts.types import (
@@ -36,7 +35,6 @@ from scripts.types import (
 from scripts.utilityFunctions import (
     find_file_for_subroutine,
     find_variables,
-    line_unwrapper,
     parse_variable_decl,
     unwrap_section,
 )
@@ -696,7 +694,7 @@ def modify_file(
 
     # Join bad subroutines into single string with logical OR for regex. Commented out if matched.
     # these two likely don't need to be separate regexes
-    regex_hack = re.compile(r"\b(nan|spval|r8)\b")
+    regex_hack = re.compile(r"\b(nan|spval|r8|is_active_betr_bgc)\b")
     global bad_subroutines
     bad_subroutines = {el for el in bad_subroutines if not regex_hack.search(el)}
 

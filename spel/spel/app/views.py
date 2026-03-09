@@ -682,13 +682,6 @@ def trace_dtype_var(
 
     status_by_sub = {}
     inst_name, member_name = key.split("%", 1)
-    # instance = get_object_or_404(UserTypeInstances, instance_name=inst_name)
-    # member = get_object_or_404(
-    #     TypeDefinitions,
-    #     member_name=member_name,
-    #     user_type=instance.instance_type,
-    # )
-
 
     arg_qs = (
         ArgAccess.objects.filter(
@@ -708,12 +701,6 @@ def trace_dtype_var(
         .select_related("subroutine")
         .order_by("subroutine__subroutine_name", "ln")
     )
-    # rows_qs = filter_access_lns_by_hash(
-    #     qs=rows_qs,
-    #     sub_field="subroutine_id",
-    #     lineno_field="ln",
-    #     config_hash=cfg_hash,
-    # ).order_by("ln")
 
     triples = rows_qs.values_list(
         "subroutine__subroutine_name",
