@@ -10,6 +10,8 @@ level = 1
 
 Tab = Enum("Tab", ["shift", "unshift", "reset", "get"])
 IOMode = Enum("IOMode", ["read", "write"])
+VarDict = dict[str, Variable]
+TypeDict = dict[str, DerivedType]
 
 
 def sanitize_netcdf_name(name: str):
@@ -49,13 +51,15 @@ def get_subgrid(dim_str: str) -> str:
             sys.exit(1)
 
 
-def var_use_statements(var_dict: dict[str, Variable],type_dict:dict[str,DerivedType]={}) -> tuple[list[str], list[tuple[str,Variable]]]:
+def var_use_statements(
+    var_dict: VarDict, type_dict: TypeDict = {}
+) -> tuple[list[str], list[tuple[str, Variable]]]:
     """
     generate use statments for dict
     """
     lines: set[str] = set()
     tabs = indent()
-    elm_inst_vars: list[tuple[str,Variable]] = []
+    elm_inst_vars: list[tuple[str, Variable]] = []
 
     for var in var_dict.values():
         if var.name == "bounds":
@@ -72,14 +76,39 @@ def var_use_statements(var_dict: dict[str, Variable],type_dict:dict[str,DerivedT
     return (list(lines), elm_inst_vars)
 
 
-def indent(mode: Tab = Tab.get):
+def get_var_usage_and_elm_inst_vars(
+    type_dict: TypeDict,
+) -> tuple[VarDict, list[str], list[tuple[str, Variable]]]:
+
+    def active_mask(dtype: DerivedType, inst_name: str) -> bool:
+        all_ptrs = bool(
+            len([field for field in dtype.components.values() if not field.pointer])
+            == 0
+        )
+        return (
+            not all_ptrs
+            and inst_name not in ["filter", "filter_inactive_and_active"]
+            and not re.match("(c13|c14)", inst_name)
+        )
+
+    active_instances = {
+        inst_var.name: inst_var
+        for dtype in type_dict.values()
+        for inst_var in dtype.instances.values()
+        if inst_var.active and active_mask(dtype, inst_var.name)
+    }
+    use_statements, elminst_vars = var_use_statements(active_instances, type_dict)
+    return active_instances, use_statements, elminst_vars
+
+
+def indent(mode: Tab = Tab.get, num=1):
     global level
     global TAB_WIDTH
     match mode:
         case Tab.shift:
-            level += 1
+            level += num
         case Tab.unshift:
-            level -= 1
+            level -= num
         case Tab.reset:
             level = 1
         case Tab.get:

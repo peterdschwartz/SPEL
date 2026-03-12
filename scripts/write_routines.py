@@ -116,8 +116,7 @@ def generate_cmake(files: list[str], case_dir: str):
 
     exe_name = "elmtest"
 
-    cmake_script = textwrap.dedent(
-        f"""
+    cmake_script = textwrap.dedent(f"""
     cmake_minimum_required(VERSION 3.20)
     project(ELM-UnitTest LANGUAGES Fortran)
 
@@ -203,8 +202,7 @@ def generate_cmake(files: list[str], case_dir: str):
         WORKING_DIRECTORY ${{CMAKE_BINARY_DIR}}
     )
 
-    """
-    )
+    """)
 
     with open(f"{case_dir}/CMakeLists.txt", "w") as cmake_file:
         cmake_file.writelines(cmake_script)
@@ -552,14 +550,29 @@ def prepare_main(
         lines_to_add=reversed(adj_calls),
     )
 
-    active_inst: set[str] = set()
-    for dtype in type_dict.values():
-        for instance in dtype.instances.values():
-            if instance.active:
-                active_inst.add(instance.name)
+    active_instances, _, elm_inst_vars = hio.get_var_usage_and_elm_inst_vars(type_dict)
+
+    # Insert 'read_elmtypes' call
+    arg_str = "io_inputs, bounds_clump"
+    for _, elmvar in elm_inst_vars:
+        arg_str = f"{arg_str}, {elmvar.name}={elmvar.name}"
+
+    tabs = hio.indent(hio.Tab.shift, 2)
+    io_call = [f"{tabs}call read_elmtypes({arg_str})\n"]
+    lines = insert_at_token(
+        lines=lines,
+        token="!#IO_READ",
+        lines_to_add=io_call,
+    )
+    io_call = [f"{tabs}call write_elmtypes({arg_str})\n"]
+    lines = insert_at_token(
+        lines=lines,
+        token="!#IO_WRITE",
+        lines_to_add=io_call,
+    )
 
     copyin_lines: list[str] = ["!$acc enter data copyin(& \n"]
-    for el in sorted(active_inst):
+    for el in sorted(list(active_instances.keys())):
         copyin_lines.append(f"!$acc& {el},&\n")
     copyin_lines.append("!$acc& )\n")
     lines = insert_at_token(
@@ -592,10 +605,11 @@ def add_pointer_inits(type_dict: TypeDict, case_dir):
         use_lines.append(f"use {sub_mod}, only : {name}\n")
         init_lines.append(f"call {name}()\n")
 
-    lines = insert_at_token(lines,use_token,use_lines)
-    lines = insert_at_token(lines,init_token,init_lines)
-    with open(f"{case_dir}/main.F90",'w') as ofile:
+    lines = insert_at_token(lines, use_token, use_lines)
+    lines = insert_at_token(lines, init_token, init_lines)
+    with open(f"{case_dir}/main.F90", "w") as ofile:
         ofile.writelines(lines)
+
 
 def prepare_unit_test_files(
     type_dict: TypeDict,
@@ -611,21 +625,15 @@ def prepare_unit_test_files(
     """
     non_param_vars = {v.name: v for v in global_vars.values() if not v.parameter}
     prepare_main(subroutines, type_dict, instance_to_type, case_dir)
-    add_pointer_inits(type_dict,case_dir)
+    add_pointer_inits(type_dict, case_dir)
+
     # Write DeepCopyMod for UnitTest
     # create_deepcopy_module(type_dict, case_dir, "DeepCopyMod")
     generate_elmtypes_io_netcdf(type_dict, instance_to_type, case_dir)
     generate_constants_io_netcdf(vars=non_param_vars, casedir=case_dir)
 
-    # generate_constants_io_hdf5(vars=non_param_vars,casedir=case_dir)
-    # generate_elmtypes_io_hdf5(type_dict, instance_to_type, case_dir)
     create_update_mod(non_param_vars, case_dir)
 
-    # OLD WAY
-    # create_constants_io(mode="r", global_vars=global_vars, casedir=case_dir)
-    # create_constants_io(mode="w", global_vars=global_vars, casedir=case_dir)
-    # clean_use_statements(mod_list=mod_list, file="initializeParameters", case_dir=case_dir)
-    # clean_use_statements(mod_list=mod_list, file="update_accMod", case_dir=case_dir)
     prep_elm_init(type_dict, case_dir)
 
     # create list of variables that should be used for verification.
@@ -644,23 +652,12 @@ def prep_elm_init(type_dict: TypeDict, case_dir: str):
     """
     Modifies elm_initializeMod.
     """
-    # allocations_to_add = create_type_allocators(type_dict,case_dir)
 
     ifile = open(f"{spel_mods_dir}/elm_initializeMod.F90", "r")
     lines = ifile.readlines()
     ifile.close()
 
-    # type_init_token = "!#VAR_INIT_START"
-    # lines = insert_at_token(
-    #     lines=lines, token=type_init_token, lines_to_add=allocations_to_add,
-    # )
-
-    active_instances = {
-        inst_var.name: inst_var
-        for dtype in type_dict.values()
-        for inst_var in dtype.instances.values()
-        if inst_var.active
-    }
+    active_instances, _, elminst_vars = hio.get_var_usage_and_elm_inst_vars(type_dict)
 
     tabs = hio.indent(hio.Tab.reset)
     use_statements: set[str] = set()
@@ -673,6 +670,19 @@ def prep_elm_init(type_dict: TypeDict, case_dir: str):
         lines=lines,
         token="!#USE_START",
         lines_to_add=use_statements,
+    )
+
+    # Insert 'read_elmtypes' call
+    arg_str = "io_inputs, bounds"
+    for _, elmvar in elminst_vars:
+        arg_str = f"{arg_str}, {elmvar.name}={elmvar.name}"
+
+    tabs = hio.indent(hio.Tab.shift, 2)
+    io_call = [f"{tabs}call read_elmtypes({arg_str})\n"]
+    lines = insert_at_token(
+        lines=lines,
+        token="!#SPEL_IO",
+        lines_to_add=io_call,
     )
 
     # write adjusted main to file in case dir
@@ -804,7 +814,7 @@ def duplicate_clumps(typedict: dict[str, DerivedType]):
             for var in dtype.instances.values():
                 if var.active:
                     for field_var in dtype.components.values():
-                        if field_var.pointer: 
+                        if field_var.pointer:
                             continue
                         active = field_var.active
                         bounds = field_var.bounds
@@ -855,7 +865,7 @@ def duplicate_clumps(typedict: dict[str, DerivedType]):
                 if not var.active:
                     continue
                 for field_var in dtype.components.values():
-                    if field_var.pointer: 
+                    if field_var.pointer:
                         continue
                     active = field_var.active
                     bounds = field_var.bounds
@@ -1592,16 +1602,14 @@ def create_fortls(case_dir: str):
     Function that creates placeholder .fortls for lsp
     """
 
-    lines = textwrap.dedent(
-        """
+    lines = textwrap.dedent("""
     {
     "nthreads" : 4,
        "sort_keywords": false,
        "debug_log": false,
        "lowercase_intrinsics": true,
     }
-    """
-    )
+    """)
 
     with open(f"{case_dir}/.fortls.json", "w") as ofile:
         ofile.writelines(lines)

@@ -100,7 +100,8 @@ block
     do while (.true.)
 
        if (step .ne. 0) then
-          call read_elmtypes(io_inputs, bounds_proc)
+          !#IO_READ
+
        end if
        if (io_inputs%end_run .or. step > max_step) exit
 
@@ -110,8 +111,8 @@ block
           !#CALL_SUB
 
        end do
+       !#IO_WRITE
 
-       call write_elmtypes(io_outputs, bounds_proc)
        step = step + 1
     end do
 end block
