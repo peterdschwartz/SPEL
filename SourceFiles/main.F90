@@ -57,7 +57,7 @@ ELSEIF (COMMAND_ARGUMENT_COUNT() == 2) THEN
 END IF
 
 block 
-   character(len=256) :: input_path = "/home/me/SPEL_Openacc/unit-tests/input-data/"
+   character(len=256) :: input_path = "/home/me/SPEL/unit-tests/input-data/"
    call io_constants%init(base_fn=trim(input_path)//'spel-constants',max_tpf=720,read_io=.true.)
    call io_inputs%init(base_fn=trim(input_path)//'spel-inputs',max_tpf=720,read_io=.true.)
    call io_outputs%init(base_fn=trim(input_path)//'fut-outputs',max_tpf=720,read_io=.false.)
@@ -100,7 +100,8 @@ block
     do while (.true.)
 
        if (step .ne. 0) then
-          call read_elmtypes(io_inputs, bounds_proc)
+          !#IO_READ
+
        end if
        if (io_inputs%end_run .or. step > max_step) exit
 
@@ -110,8 +111,8 @@ block
           !#CALL_SUB
 
        end do
+       !#IO_WRITE
 
-       call write_elmtypes(io_outputs, bounds_proc)
        step = step + 1
     end do
 end block

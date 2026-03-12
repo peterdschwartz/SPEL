@@ -12,10 +12,7 @@ contains
 
    subroutine elm_init(nsets, pproc_input, dt, yr, bounds)
 
-      !use elm_varsur, only: wt_lunit, urban_valid, wt_glc_mec
       use duplicateMod, only: duplicate_clumps, duplicate_weights
-      ! use ReadConstantsMod, only: readConstants
-      ! use InitalizeParametersMod
       use ReadWriteMod, only: read_elmtypes
       use FUTConstantsMod, only: read_constants
       use elm_varctl
@@ -26,7 +23,6 @@ contains
       use pftvarcon
       use decompInitMod
       use domainMod
-      ! use UnitTestAllocatorMod
 
       implicit none
 
@@ -53,7 +49,9 @@ contains
       clump_pproc = pproc_input
 
       call read_constants(io_constants)
-      call read_elmtypes(io_inputs, bounds)
+      !#SPEL_IO
+
+
       begp = bounds%begp; endp = bounds%endp
       begc = bounds%begc; endc = bounds%endc
       begg = bounds%begg; endg = bounds%endg

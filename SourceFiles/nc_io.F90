@@ -68,6 +68,11 @@ integer function nc_create_or_open_file(fn, mode) result(ncid)
    character(len=*), intent(in) :: fn
    integer, intent(in) :: mode
    if (mode == read_file) then
+          block 
+             logical :: exists
+             inquire(file=fn,exist=exists)
+             if (.not. exists) stop "Error: " // trim(fn) // " Not Found"
+          end block
       call check(nf90_open(trim(fn), nf90_nowrite + nf90_netcdf4, ncid))
    else if(mode == append_file) then
       call check(nf90_open(trim(fn), nf90_write + nf90_netcdf4, ncid))
@@ -125,10 +130,10 @@ character(len=256) function get_fn(this) result(new_fn)
   if(this%read_mode) this%end_run = .not. (this%check_file_exists(new_fn))
 end function get_fn
 
-subroutine nc_define_var(ncid, ndim, dims, dim_names, varname, xtype, var_id, time)
+subroutine nc_define_var(ncid, ndim, dims, dim_list, varname, xtype, var_id, time)
    integer, intent(in) :: ncid, ndim
    integer, intent(in) :: dims(ndim)
-   character(len=32), dimension(ndim), intent(in) :: dim_names
+   character(len=32), dimension(ndim), intent(in) :: dim_list
    character(len=*), intent(in) :: varname
    integer, intent(in) :: xtype  ! e.g. NF90_DOUBLE, NF90_INT, NF90_CHAR, NF90_STRING
    integer, intent(out) :: var_id
@@ -136,11 +141,15 @@ subroutine nc_define_var(ncid, ndim, dims, dim_names, varname, xtype, var_id, ti
    ! Locals
    integer :: i, status, total_dims
    integer, allocatable :: dim_ids(:)
+   character(len=32), allocatable :: dim_names(:)
 
+   allocate(dim_names(ndim))
+   dim_names(:) = dim_list(:)
+
+   total_dims = ndim
    if (time) then 
       total_dims = ndim + 1
-   else
-      total_dims = ndim
+      dim_names = [dim_names, 'time']
    end if
 
    allocate (dim_ids(total_dims))
