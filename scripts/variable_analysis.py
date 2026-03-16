@@ -52,15 +52,10 @@ def find_global_var_bounds(
 
     for gv in global_vars.values():
         if not gv.bounds and gv.dim > 0:
-            gv.bounds = generate_dim_names(gv)
+            gv.bounds = gv.generate_dim_names()
     return
 
 
-def generate_dim_names(var: Variable) -> str:
-    if var.dim == 0:
-        sys.exit(1)
-    bounds = [f"{var.name}_dim{i}" for i in range(1, var.dim + 1)]
-    return ",".join(bounds)
 
 
 def add_global_vars(

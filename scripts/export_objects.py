@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 import pickle
 import sys
 
@@ -9,7 +10,6 @@ from scripts.analyze_subroutines import Subroutine
 from scripts.config import E3SM_SRCROOT, django_database, scripts_dir
 from scripts.DerivedType import DerivedType
 from scripts.fortran_modules import FortranModule
-from scripts.fortran_parser.spel_ast import expr_to_json
 from scripts.types import CallBinding, ReadWrite, Scope
 from scripts.utilityFunctions import Variable
 
@@ -74,10 +74,12 @@ def unpickle_unit_test(commit=None) -> tuple[ModDict, SubDict, TypeDict]:
     """
     Function to load SPEL's output from pickled files.
     """
-    if not commit:
-        import subprocess as sp
-
-        fn = sp.getoutput(f"ls -t {scripts_dir}/*pkl | head -n 1")
+    if commit is None:
+        scripts_path = Path(scripts_dir)
+        files = scripts_path.glob("*.pkl")
+        files = [str(f).split('/')[-1] for f in files]
+        assert len(files) == 3, "Couldn't find pkl files!"
+        fn = files[0]
         commit = fn.split("-")[1].split(".")[0]
         print(fn, commit)
 

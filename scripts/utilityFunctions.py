@@ -136,6 +136,12 @@ class Variable(object):
     def printVariable(self, ofile=sys.stdout):
         ofile.write(f"{self}\n")
 
+    def generate_dim_names(self) -> str:
+        if self.dim == 0:
+            sys.exit(1)
+        bounds = [f"{self.name}_dim{i}" for i in range(1, self.dim + 1)]
+        return ",".join(bounds)
+
 
 def split_func_line(line):
     """
@@ -1078,3 +1084,4 @@ def retrieve_lines(infile: str,lns: list[int])->list[LineTuple]:
             olines.append(LineTuple(line=full_line,ln=ln))
 
     return olines
+

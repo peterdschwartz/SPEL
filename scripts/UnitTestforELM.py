@@ -130,6 +130,8 @@ def create_unit_test(
         for utype, dtype in mod.defined_types.items():
             type_dict[utype] = dtype
 
+    for dtype in type_dict.values():
+        dtype.get_allocation_bounds(mod_dict)
     intrinsic_types = {"real", "integer", "character", "logical", "complex"}
     for mod in mod_dict.values():
         for var in mod.global_vars.values():

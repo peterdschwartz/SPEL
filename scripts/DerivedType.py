@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import field
 import re
 import subprocess as sp
 import sys
@@ -186,6 +187,37 @@ class DerivedType(object):
 
         return None
 
+    def get_allocation_bounds(self, mod_dict: dict[str,FortranModule]):
+        """
+        Attempt to find any allocation statements for components of a derived type
+        and set the bounds information, accordingly
+        """
+
+        init_mod = mod_dict[f"{self.declaration}"]
+        lines = init_mod.module_lines
+
+        alloc_lines = [ lt for lt in lines if re.match(r'^(allocate\b)',lt.line) ]
+        field_list = [f for f in self.components.keys()]
+        fields_str = '|'.join(field_list)
+
+        regex_field = re.compile(rf'\b({fields_str})\b')
+        var_lines = [
+            line for line in filter(lambda x: regex_field.search(x.line), alloc_lines)
+        ]
+
+        for lpair in var_lines:
+            line = lpair.line.strip()
+            regex_var_and_bounds = re.compile(rf"({fields_str})\s*(\(.+?\))")
+            for match in regex_var_and_bounds.finditer(line):
+                varname = match.group(1)
+                bounds = match.group(2)
+                self.components[varname].bounds = bounds[1:-1]
+
+        for var in self.components.values():
+            if not var.bounds and var.dim > 0:
+                var.bounds = var.generate_dim_names()
+        return
+
 
 def get_component(
     instance_dict: dict[str, DerivedType],
@@ -322,3 +354,4 @@ def parse_derived_type_definition(
         dtypes[dtype.type_name] = dtype
 
     return dtypes
+

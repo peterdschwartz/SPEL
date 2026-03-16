@@ -31,6 +31,7 @@ from scripts.types import (
     PreProcTuple,
     SubInit,
     SubStart,
+    split_semicolon_lines,
 )
 from scripts.utilityFunctions import (
     find_file_for_subroutine,
@@ -167,15 +168,17 @@ def set_comment(state: ParseState, logger: Logger = None):
     state.line_it.comment_cont_block()
     return
 
+
 def check_contains(state: ParseState, logger: Logger = None):
-    if state.in_sub == 0 and state.in_func == 0: 
+    if state.in_sub == 0 and state.in_func == 0:
         return
     state.host_program = state.line_it.i
 
     if state.in_sub > 0:
-        finalize_subroutine(state,logger)
+        finalize_subroutine(state, logger)
     elif state.in_func > 0:
-        finalize_function(state,logger)
+        finalize_function(state, logger)
+
 
 def set_in_subroutine(state: ParseState, logger: Logger):
     """
@@ -281,7 +284,7 @@ def finalize_function(state: ParseState, logger: Logger):
         )
         sys.exit(1)
     func_init = state.func_init.pop()
-    create_init_obj(state=state, logger=logger,func_init=func_init)
+    create_init_obj(state=state, logger=logger, func_init=func_init)
     # reset function state:
     state.in_func -= 1
     return
@@ -471,10 +474,11 @@ def get_used_mods(
     lines = file.readlines()
     file.close()
 
-    lpairs = [LineTuple(line=line, ln=i) for i, line in enumerate(lines)]
+    lpairs = [LineTuple(line=line, ln=ln) for ln, line in enumerate(lines)]
     line_it = LogicalLineIterator(lines=lpairs, log_name="get_used_mods")
     fort_mod.num_lines = len(lines)
-    fort_mod.module_lines = [LineTuple(line=line, ln=i) for i, line in enumerate(lines)]
+    fort_mod.module_lines = [lpair for lpair in lpairs]
+    line_it.reset()
 
     regex_type_start = re.compile(r"^\s*type\s*(?!\()", re.IGNORECASE)
     regex_skip = re.compile(r"^type\s*\(")
@@ -489,7 +493,7 @@ def get_used_mods(
     use_stmts = parse_use_stmts(use_lines)
     for stmt in use_stmts:
         mod = stmt.module
-        if mod in bad_modules or re.search(r'betr',mod.lower()):
+        if mod in bad_modules or re.search(r"betr", mod.lower()):
             continue
         needed_modfile = get_filename_from_module(mod, verbose=verbose)
         if needed_modfile is None:
@@ -616,7 +620,7 @@ def remove_cpp_directives(
                 )
                 match_assert = False
             mapping[orig_ln] = i
-            work_lines.append(LineTuple(line=cpp_lines[i], ln=orig_ln, commented=False))
+            work_lines.append(LineTuple(line=cpp_lines[i].lower(), ln=orig_ln, commented=False))
             orig_ln += 1
 
     return work_lines
@@ -662,7 +666,7 @@ def modify_file(
 
     cpp_file = True
     cpp_lines = apply_preprocessor(fn)
-    lines = [line.line for line in orig_lines]
+    lines = [line.line.lower() for line in orig_lines]
 
     work_lines = remove_cpp_directives(cpp_lines, fn, logger)
     ### SANITY CHECK ####
@@ -672,8 +676,9 @@ def modify_file(
                 r"(__file__|__line__|include|assert)", lines[lt.ln].lower()
             ):
                 assert (
-                    lt.line.rstrip("\n").strip() == lines[lt.ln].rstrip("\n").strip()
-                ), f"Couldn't map cpp lines for {base_fn}\n{lt.line}\n /=\n{lines[lt.ln]}"
+                    lt.line.rstrip("\n").strip().lower() == lines[lt.ln].rstrip("\n").strip().lower()
+                ), f"Couldn't map cpp lines for {base_fn}\n{lt.ln}{lt.line}\n /=\n{lines[lt.ln]}"
+
 
     state = ParseState(
         module_name=mod_name,

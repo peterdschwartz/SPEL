@@ -13,7 +13,6 @@ IOMode = Enum("IOMode", ["read", "write"])
 VarDict = dict[str, Variable]
 TypeDict = dict[str, DerivedType]
 
-
 def sanitize_netcdf_name(name: str):
     name = name.replace(")", "").replace("(", "").strip()
     # Replace any illegal character with '_'
@@ -87,7 +86,7 @@ def get_var_usage_and_elm_inst_vars(
         )
         return (
             not all_ptrs
-            and inst_name not in ["filter", "filter_inactive_and_active"]
+            and inst_name not in ["filter", "filter_inactive_and_active",]
             and not re.match("(c13|c14)", inst_name)
         )
 

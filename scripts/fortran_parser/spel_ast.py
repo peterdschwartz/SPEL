@@ -1122,6 +1122,16 @@ class UseStatement(Statement):
             "objs": [expr.to_dict() for expr in self.objs],
         }
 
+# class AllocationStatement(Statement):
+#     def __init__(self, tok: Token):
+#         self.token = tok
+#
+#     def token_literal(self) -> str:
+#         return self.token.literal
+#
+#     def statement_node(self) -> None:
+#         return super().statement_node()
+#
 
 def expr_from_dict(d: dict | None) -> Optional[Expression]:
     if d is None:

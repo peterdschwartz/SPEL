@@ -422,23 +422,6 @@ class Subroutine(object):
         regex_all = re.compile(r"(.*)")
         if not mod_lines:
             self.logger.error("no mod lines!!!")
-            # lines = s
-            #     fpath=fileinfo.fpath,
-            #     start_ln=fileinfo.startln,
-            #     end_ln=fileinfo.endln,
-            #     pattern=regex_all,
-            # )
-            # fline_list: list[LineTuple] = []
-            # ln: int = 0
-            # while ln < len(lines):
-            #     full_line, new_ln = line_unwrapper(lines, ln)
-            #     if full_line:
-            #         fline_list.append(LineTuple(line=full_line, ln=ln))
-            #     ln = new_ln + 1
-            #
-            # fline_list = [
-            #     LineTuple(line=f.line, ln=f.ln + fileinfo.startln) for f in fline_list
-            # ]
         else:
             fline_list = [
                 linetuple

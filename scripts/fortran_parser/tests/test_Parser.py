@@ -28,6 +28,9 @@ var_txt = """
          &              -1.1316126_SHR_KIND_R8,    1.0896928_SHR_KIND_R8/)
 
 
+    !! long stupid commnet ;lasd;fkjjk kkjasd;f;;askdf;lkjasdf;lkj
+    !! ;las;dflkjkjksjddkflj (I))()(kjas;dlfkj ;lkjasd;lfkjl)
+
     ! 2) Attributes present → must use ::
     integer*8, intent(in), value :: n_in
 

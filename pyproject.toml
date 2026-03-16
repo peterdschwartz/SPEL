@@ -19,6 +19,8 @@ dependencies = [
 	"colorlog>=6.9.0",
 	"mysqlclient",
 	"dotenv",
+	"mpi4py",
+	"scikit-learn",
 ]
 
 [tool.setuptools.packages.find]

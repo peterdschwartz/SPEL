@@ -2,8 +2,12 @@ import argparse
 import os
 import subprocess
 
-from scripts.fortran_parser.spel_repl import parse_line
+from scripts.export_objects import unpickle_unit_test
+from scripts.ml_training.dataset_analysis import summarize_data
+from scripts.ml_training.prepare_dataset import separate_inputs_outputs
+from scripts.ml_training.sample_spel_output import sample
 from scripts.profiler_context import profile_ctx
+from scripts.ml_training.train import train
 
 SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -31,6 +35,24 @@ def diff(args):
 
     find_diffs(refn=args.ref, compfn=args.test, var=args.var)
     return
+
+def sample_training(args):
+    n = int(args.num_samples)
+    _, sub_dict, _ = unpickle_unit_test()
+    input_set: set[str] = set()
+    output_set: set[str] = set()
+    separate_inputs_outputs(sub_dict, inputs=input_set, outputs=output_set)
+    sample("spel-inputs",samples_per_file=n, var_name_set=input_set)
+    sample("spel-outputs",samples_per_file=n, var_name_set=output_set)
+
+    # train()
+    summarize_data()
+    return
+
+def _train(args):
+    train()
+    return
+
 
 
 def run(args):
@@ -183,8 +205,22 @@ def main():
     repl_parser = subparsers.add_parser("repl", help="Start repl ")
     repl_parser.set_defaults(func=repl)
 
+    #Parser for 'spel sample'
+    sample_parser = subparsers.add_parser("sample", help="Randomly sample nsteps from spel input/outputs files for training")
+    sample_parser.add_argument(
+        "-n",
+        required=True,
+        dest="num_samples",
+        help="number of samples per file",
+    )
+    sample_parser.set_defaults(func=sample_training)
+    train_parser = subparsers.add_parser("train", help="train nn")
+    train_parser.set_defaults(func=_train)
+
+
     args = parser.parse_args()
     args.func(args)
+
 
 
 if __name__ == "__main__":

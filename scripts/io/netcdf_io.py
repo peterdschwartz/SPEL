@@ -28,7 +28,7 @@ def create_nc_define_vars(
     for type_mod, inst in elminst_vars:
         arg_str = f"{arg_str}, {inst.name}"
         var_type = inst.type
-        decls.append(f"{tabs}{tabs}type({var_type}), intent(inout) :: {inst.name}")
+        decls.append(f"{tabs}{tabs}type({var_type}), intent(in) :: {inst.name}")
     lines: list[str] = [f"{tabs}subroutine define_vars(ncid{arg_str})\n"]
     tabs = hio.indent(hio.Tab.shift)
     lines.append(f"{tabs}integer, intent(in) :: ncid\n")
@@ -72,26 +72,9 @@ def generate_elmtypes_io_netcdf(
         ]
     )
 
-    def active_mask(dtype: DerivedType, inst_name: str) -> bool:
-        all_ptrs = bool(
-            len([field for field in dtype.components.values() if not field.pointer])
-            == 0
-        )
-        return (
-            not all_ptrs
-            and inst_name not in ["filter", "filter_inactive_and_active"]
-            and not re.match("(c13|c14)", inst_name)
-        )
+    active_instances, use_statements, elminst_vars = hio.get_var_usage_and_elm_inst_vars(type_dict)
 
-    active_instances = {
-        inst_var.name: inst_var
-        for dtype in type_dict.values()
-        for inst_var in dtype.instances.values()
-        if inst_var.active and active_mask(dtype,inst_var.name)
-    }
-    use_statements, elminst_vars = hio.var_use_statements(active_instances, type_dict)
     lines.extend(list(use_statements))
-
     lines.extend(
         [
             f"{tabs}implicit none\n",
@@ -214,18 +197,19 @@ def create_netcdf_io_routine(
         arg_str: str = "io_inst"
         define_args: str = "ncid"
 
+    intent = "inout" if mode == hio.IOMode.read else "in"
     decls: list[str] = []
     for type_mod, inst in elminst_vars:
         arg_str = f"{arg_str}, {inst.name}"
         define_args = f"{define_args}, {inst.name}"
         var_type = inst.type
-        decls.append(f"{tabs}{tabs}type({var_type}), intent(inout) :: {inst.name}")
+        decls.append(f"{tabs}{tabs}type({var_type}), intent({intent}) :: {inst.name}")
 
     lines: list[str] = [f"{tabs}subroutine {sub_name}({arg_str})\n"]
     tabs = hio.indent(hio.Tab.shift)
 
     mode_str = "create_file" if mode == hio.IOMode.write else "read_file"
-    stmt = f"{tabs}type(bounds_type), intent(inout) :: bounds\n" if bounds else ""
+    stmt = f"{tabs}type(bounds_type), intent({intent}) :: bounds\n" if bounds else ""
     lines.extend([f"{decl}\n" for decl in decls])
 
     # Arguments + Locals:
@@ -298,15 +282,13 @@ def create_nc_def(vars: dict[str, Variable], time: bool) -> list[str]:
         time_str = ".true." if time and var.dim > 0 else ".false."
         if nc_type == "nf90_char":
             dim_str = f"[len({var.name})]"
-            dim = 1 + time
             stmt = f"call nc_define_var(ncid, 1, {dim_str}, dim_names, '{varname}', {nc_type}, varid, {time_str})\n"
         else:
             dim_str = f"shape({var.name})" if var.dim > 0 else "[0]"
-            dim = var.dim + time
             stmt = f"call nc_define_var(ncid, {var.dim}, {dim_str}, dim_names, '{varname}', {nc_type}, varid, {time_str})\n"
 
         if var.dim > 0 or nc_type == "nf90_char":
-            lines.append(f"{tabs}dim_names(1:{dim}) = {dim_names_str}\n")
+            lines.append(f"{tabs}dim_names(1:{var.dim}) = {dim_names_str}\n")
         lines.append(f"{tabs}{stmt}")
         # if array store lbounds and ubounds:
         if var.dim > 0:
@@ -327,9 +309,14 @@ def get_dim_names(var: Variable, time: bool) -> str:
         len(dim_names) == var.dim
     ), f"(get_dim_names) Inconsistent dimensions\n name: {var.name}bounds: {var.bounds} dim: {var.dim}"
     dim_names = [f"'{hio.get_subgrid(dim)}'" for dim in dim_names]
-    if time:
-        dim_names.append("'time'")
+    # if time:
+    #     dim_names.append("'time'")
 
+    def adjust_dim_label(label: str, i:int)-> str:
+        if label != "'_'":
+            return label
+        return f"'unk_{i}_{var.name}'"
+    dim_names = [ adjust_dim_label(i=i,label=name) for i, name in enumerate(dim_names)]
     dim_str = ",".join(dim_names)
     return f"[character(len=32) :: {dim_str}]"
 
@@ -369,15 +356,14 @@ def create_nc_write(vars: dict[str, Variable], time: bool) -> list[str]:
             stmt = f"call nc_write_var_array(ncid, {var.name}, '{varname}')\n"
         else:
             stmt = f"call nc_write_var_scalar(ncid, {var.name}, '{varname}')\n"
-        lines.append(f"{tabs}{stmt}")
+        lines.append(f"{tabs}! print *, '{varname}'\n{tabs}{stmt}")
 
     for var in arrays:
         dim_names_str = get_dim_names(var, time)
         reshape_str = f"reshape({var.name}, [product(shape({var.name}))])"
         varname = var.name.replace("%", "__")
         stmt = f"call nc_write_var_array(ncid,{var.dim}, shape({var.name}), {dim_names_str}, {reshape_str}, '{varname}'{timestep})\n"
-        # lines.append(f"{tabs}print *, 'Writing {var.name}'\n")
-        lines.append(f"{tabs}{stmt}")
+        lines.append(f"{tabs}! print *, '{varname}'\n{tabs}{stmt}")
 
     return lines
 
@@ -803,10 +789,10 @@ def gen_nc_define_var() -> str:
     tabs = hio.indent(Tab.reset)
     return textwrap.dedent(
         f"""
-    {tabs}subroutine nc_define_var(ncid, ndim, dims, dim_names, varname, xtype, var_id, time)
+    {tabs}subroutine nc_define_var(ncid, ndim, dims, dim_list, varname, xtype, var_id, time)
     {tabs}   integer, intent(in) :: ncid, ndim
     {tabs}   integer, intent(in) :: dims(ndim)
-    {tabs}   character(len=32), dimension(ndim), intent(in) :: dim_names
+    {tabs}   character(len=32), dimension(ndim), intent(in) :: dim_list
     {tabs}   character(len=*), intent(in) :: varname
     {tabs}   integer, intent(in) :: xtype  ! e.g. NF90_DOUBLE, NF90_INT, NF90_CHAR, NF90_STRING
     {tabs}   integer, intent(out) :: var_id
@@ -814,11 +800,15 @@ def gen_nc_define_var() -> str:
     {tabs}   ! Locals
     {tabs}   integer :: i, status, total_dims
     {tabs}   integer, allocatable :: dim_ids(:)
+    {tabs}   character(len=32), allocatable :: dim_names(:)
 
+    {tabs}   allocate(dim_names(ndim))
+    {tabs}   dim_names(:) = dim_list(:)
+
+    {tabs}   total_dims = ndim
     {tabs}   if (time) then 
     {tabs}      total_dims = ndim + 1
-    {tabs}   else
-    {tabs}      total_dims = ndim
+    {tabs}      dim_names = [dim_names, 'time']
     {tabs}   end if
 
     {tabs}   allocate (dim_ids(total_dims))

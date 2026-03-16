@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import logging
 import re
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
 from logging import Logger
@@ -23,12 +23,14 @@ class SubStart(NamedTuple):
     subname: str
     start_ln: int
     cpp_ln: Optional[int]
-    parent: str=""
+    parent: str = ""
+
 
 class ArgUsage(Enum):
     DIRECT = auto()
     INDIRECT = auto()
     NESTED = auto()
+
 
 class ArgLabel(Enum):
     dummy = 1
@@ -111,8 +113,12 @@ class ArgDesc:
     keyword: bool  # passed as a keyword argument
     key_ident: str  # identifier of keyword
     argtype: ArgType  # overall type and dimension
-    locals: list[VarNode] = field(default_factory=list) # local variables passed to this argument
-    globals: list[VarNode] = field(default_factory=list)  # global variables passed to this argument
+    locals: list[VarNode] = field(
+        default_factory=list
+    )  # local variables passed to this argument
+    globals: list[VarNode] = field(
+        default_factory=list
+    )  # global variables passed to this argument
     dummy_args: list[VarNode] = field(default_factory=list)  # track dummy arguments
 
     def to_dict(self):
@@ -152,7 +158,7 @@ class CallDesc:
         else:
             return {k: v for k, v in asdict(self).items() if k not in ["args"]}
 
-    def aggregate_vars(self,sub:Subroutine) -> None:
+    def aggregate_vars(self, sub: Subroutine) -> None:
         """
         Populates the globals, locals, and dummy_args field for the entire CallDesc
         """
@@ -212,7 +218,7 @@ class CallDesc:
                 nested_level=vn.arg_node.nested_level,
                 callee=self.fn,
                 scope=self.determine_scope(var_name),
-                arg_usage=vn.arg_node.arg_usage
+                arg_usage=vn.arg_node.arg_usage,
             )
 
         symbols = self.globals + self.locals + self.dummy_args
@@ -387,8 +393,12 @@ class ParseState:
     removed_subs: list[str]  # list of subroutines that have been completely removed
     sub_init_dict: dict[str, SubInit]  # Init objects for all subroutines in File
     logger: Logger
-    sub_start: list[SubStart] = field(default_factory=list)  # Holds start of subroutine info
-    func_init: list[FunctionReturn] = field(default_factory=list) # holds start of function info
+    sub_start: list[SubStart] = field(
+        default_factory=list
+    )  # Holds start of subroutine info
+    func_init: list[FunctionReturn] = field(
+        default_factory=list
+    )  # holds start of function info
     in_sub: int = 0  # flag if parser is currently in a subroutine
     in_func: int = 0  # flag if parser is in a function
     host_program: int = -1
@@ -544,12 +554,22 @@ class CallTree:
             child.print_tree(level + 1)
 
 
+def split_semicolon_lines(lines):
+    """Yield (line, original_ln) for each semicolon‑separated part."""
+    for ln, line in enumerate(lines):
+        parts = line.split(";")
+        for part in parts:
+            stripped = part.strip()
+            yield stripped, ln
+
+
 class LogicalLineIterator:
     def __init__(self, lines: list[LineTuple], log_name: str = ""):
         self.lines = lines
         self.i: int = 0
         self.start_index: int = 0
         self.curr_line: LineTuple = lines[0]
+        self._pending_parts: list[LineTuple] = []
         if not log_name:
             self.logger: Logger = get_logger("LineIter", level=logging.INFO)
         else:
@@ -561,6 +581,7 @@ class LogicalLineIterator:
     def reset(self, ln: int = 0):
         self.i = ln
         self.start_index = ln
+        self._pending_parts = []
 
     def get_start_ln(self) -> int:
         idx = self.start_index
@@ -569,10 +590,21 @@ class LogicalLineIterator:
     def get_curr_idx(self) -> int:
         return self.i
 
-    def strip_comment(self) -> str:
+    def _scan_with_comment_and_split(
+        self,
+        line: str,
+        split_char: str | None = None,
+    ) -> list[str]:
+        """
+        Scan a line, respecting Fortran-style '!' comments and quotes.
+        - Stops scanning when an unquoted '!' is hit.
+        - Tracks strings delimited by ' or ".
+        - Optionally splits on a given split_char when outside strings.
+        """
         in_string = None  # None, "'", or '"'
-        line = self.lines[self.i].line
-        result = []
+        parts: list[str] = []
+        current: list[str] = []
+
         i = 0
         while i < len(line):
             c = line[i]
@@ -580,21 +612,45 @@ class LogicalLineIterator:
                 if in_string is None:
                     in_string = c
                 elif in_string == c:
-                    # handle escaped quote inside string
+                    # handle escaped/doubled quote inside string
                     if i + 1 < len(line) and line[i + 1] == c:
-                        result.append(c)  # add one quote, skip next
+                        current.append(c)  # add one quote, skip next
                         i += 1
                     else:
                         in_string = None  # close string
-                result.append(c)
+                current.append(c)
             elif c == "!" and in_string is None:
-                break  # comment starts here
+                # comment starts here: stop processing
+                break
+            elif split_char is not None and c == split_char and in_string is None:
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
             else:
-                result.append(c)
+                current.append(c)
             i += 1
-        return "".join(result)
+
+        tail = "".join(current).strip()
+        if tail:
+            parts.append(tail)
+
+        return parts
+
+    def strip_comment(self) -> str:
+        """
+        Return the line with comments stripped,
+        without any splitting (equivalent to split_char=None, first part).
+        """
+        line = self.lines[self.i].line
+        parts = self._scan_with_comment_and_split(line, split_char=None)
+        return parts[0] if parts else ""
 
     def __next__(self):
+
+        if self._pending_parts:
+            self.curr_line = self._pending_parts.pop(0)
+            return self.curr_line
         if self.i >= len(self.lines):
             raise StopIteration
         self.start_index = self.i
@@ -620,7 +676,21 @@ class LogicalLineIterator:
 
         # result = (full_line.lower(), self.i)
         self.i += 1
-        self.curr_line = LineTuple(line=full_line.lower(), ln=cur_ln)
+
+        # semicolon splitting, preserving original ln
+        parts = self._scan_with_comment_and_split(full_line,split_char=';')
+        # filter out completely empty pieces
+        parts = [p.strip() for p in parts if p.strip()]
+
+        if not parts:
+            # empty after stripping; just yield empty logical line
+            self.curr_line = LineTuple(line="", ln=cur_ln)
+            return self.curr_line
+
+        # first part is returned now; remaining queued for subsequent __next__ calls
+        first_part = parts[0].lower()
+        self._pending_parts = [LineTuple(line=p.lower(), ln=cur_ln) for p in parts[1:]]
+        self.curr_line = LineTuple(line=first_part, ln=cur_ln)
         return self.curr_line
 
     def next_n(self, n):
@@ -835,8 +905,8 @@ class Precedence(Enum):
     BOUNDS = 7
     CALL = 8
 
+
 @dataclass
 class DTypeVariable:
     instance: Variable
     member_path: Variable
-
