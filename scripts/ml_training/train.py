@@ -39,6 +39,16 @@ class NetCDFFunctionDataset(Dataset):
         ds_in_sel = self.ds_in[in_vars]
         ds_out_sel = self.ds_out[out_vars]
 
+        ds_in_sel.attrs["spel_input_vars"] = ",".join([str(v) for v in in_vars])
+        ds_out_sel.attrs["spel_output_vars"] = ",".join([str(v) for v in out_vars])
+
+        ds_in_sel.to_netcdf(
+            Path(unittests_dir) / "input-data" / "model-inputs-order.nc"
+        )
+        ds_out_sel.to_netcdf(
+            Path(unittests_dir) / "input-data" / "model-outputs-order.nc"
+        )
+
         # Stack time + column into a single sample dimension
         X = (
             ds_in_sel.to_array("feature")  # (feature, time, column, [other dims...])
@@ -90,9 +100,9 @@ class NetCDFFunctionDataset(Dataset):
         Y = (Y - Y_mean) / Y_std
 
         self.X_mean = X_mean.astype(np.float32)
-        self.X_std  = X_std.astype(np.float32)
+        self.X_std = X_std.astype(np.float32)
         self.Y_mean = Y_mean.astype(np.float32)
-        self.Y_std  = Y_std.astype(np.float32)
+        self.Y_std = Y_std.astype(np.float32)
 
         self.X = torch.from_numpy(X.astype(np.float32))
         self.Y = torch.from_numpy(Y.astype(np.float32))
@@ -132,7 +142,7 @@ def train():
     print("Y mean/std:", dataset.Y.mean().item(), dataset.Y.std().item())
 
     Y_std = dataset.Y_std  # numpy
-    Y_var_mean = (Y_std ** 2).mean()  # average output variance
+    Y_var_mean = (Y_std**2).mean()  # average output variance
     print("Avg target variance:", Y_var_mean)
 
     # Train/val split
@@ -182,7 +192,9 @@ def train():
                 val_loss_sum += loss.item() * xb.size(0)
         val_loss = val_loss_sum / n_val
         val_loss_real = val_loss * Y_var_mean
-        print(f"Epoch {epoch} - norm MSE: {train_loss_norm:.3e},real MSE: {train_loss_real:.3e} Val: {val_loss_real:.3e}")
+        print(
+            f"Epoch {epoch} - norm MSE: {train_loss_norm:.3e},real MSE: {train_loss_real:.3e} Val: {val_loss_real:.3e}"
+        )
 
     torch.save(
         {

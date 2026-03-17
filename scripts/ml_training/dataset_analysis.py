@@ -209,7 +209,6 @@ def summarize_and_print(
 
 
 def summarize_data():
-    # Example CLI usage:
     data_dir = Path(unittests_dir)/ "input-data"
     input_nc = data_dir / "spel-inputs-training_samples.nc"
     output_nc = data_dir / "spel-outputs-training_samples.nc"

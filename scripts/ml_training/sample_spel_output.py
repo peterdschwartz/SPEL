@@ -111,4 +111,4 @@ def sample(base_fn: str, samples_per_file: int, var_name_set: set[str]):
     perm = rng.permutation(combined.sizes["time"])
     combined = combined.isel(time=perm).load()
     # write output
-    combined.to_netcdf(f"{base_fn}-training_samples.nc")#,engine="scipy")
+    combined.to_netcdf(out_fn)

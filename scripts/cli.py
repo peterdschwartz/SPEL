@@ -44,8 +44,6 @@ def sample_training(args):
     separate_inputs_outputs(sub_dict, inputs=input_set, outputs=output_set)
     sample("spel-inputs",samples_per_file=n, var_name_set=input_set)
     sample("spel-outputs",samples_per_file=n, var_name_set=output_set)
-
-    # train()
     summarize_data()
     return
 
@@ -214,6 +212,7 @@ def main():
         help="number of samples per file",
     )
     sample_parser.set_defaults(func=sample_training)
+
     train_parser = subparsers.add_parser("train", help="train nn")
     train_parser.set_defaults(func=_train)
 
