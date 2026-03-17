@@ -1,8 +1,7 @@
 module field_mod
-   use iso_fortran_env, only: real64
+   use kinds, only : rkind, ikind
    implicit none
 
-   integer, parameter :: rkind = real64
 
    type, public:: field_desc_t
       real(rkind), pointer :: a1d(:) => null()
@@ -12,6 +11,7 @@ module field_mod
       integer :: rank = 0
       integer :: n_mask = 0
       integer, pointer :: mask(:) => null()
+
       ! Flattened size this field contributes per masked index (e.g. nlev)
       integer :: per_index_size = 0
       ! Offset of this field in the flat feature/target vector

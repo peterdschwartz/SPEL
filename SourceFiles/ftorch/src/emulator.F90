@@ -1,8 +1,9 @@
 module emulator_mod
    use field_mod, only: field_list_t
-   use iso_fortran_env
+   use kinds ,only : rkind, ikind
    implicit none
-   integer, parameter :: rkind = real64
+
+
    type :: emulator_t
       type(torch_model)   :: model
       type(torch_tensor)  :: input_tensor
@@ -11,7 +12,7 @@ module emulator_mod
       character(len=16)   :: device = "cpu"
       integer :: in_dim, out_dim
    contains
-      procedure :: init_from_field_lists
+      procedure :: init => init_from_field_lists
       procedure :: infer
    end type emulator_t
 
@@ -64,7 +65,7 @@ contains
     ! Copy buffer into FTorch input tensor
     call torch_tensor_from_array(this%input_tensor, buf_in)
 
-    ! Forward pass: single input tensor -> single output tensor
+    ! Forward pass:  input tensor -> output tensor
     call torch_model_forward(this%model, [this%input_tensor], [this%output_tensor])
 
     ! Copy FTorch output tensor back to buffer

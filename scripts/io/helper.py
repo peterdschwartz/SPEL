@@ -13,6 +13,7 @@ IOMode = Enum("IOMode", ["read", "write"])
 VarDict = dict[str, Variable]
 TypeDict = dict[str, DerivedType]
 
+
 def sanitize_netcdf_name(name: str):
     name = name.replace(")", "").replace("(", "").strip()
     # Replace any illegal character with '_'
@@ -75,9 +76,21 @@ def var_use_statements(
     return (list(lines), elm_inst_vars)
 
 
-def get_var_usage_and_elm_inst_vars(
-    type_dict: TypeDict,
-) -> tuple[VarDict, list[str], list[tuple[str, Variable]]]:
+def var_type_use_statements(var_dict: VarDict, type_dict: TypeDict) -> list[str]:
+    lines: set[str] = set()
+    tabs = indent()
+    for var in var_dict.values():
+        if var.name == "bounds":
+            stmt = f"{tabs}use {var.declaration}, only : {var.type}\n"
+        else:
+            type_mod = type_dict[var.type].declaration
+            stmt = f"{tabs}use {type_mod}, only: {var.type}\n"
+        lines.add(stmt)
+
+    return list(lines)
+
+
+def get_active_instances(type_dict: TypeDict) -> dict[str, Variable]:
 
     def active_mask(dtype: DerivedType, inst_name: str) -> bool:
         all_ptrs = bool(
@@ -86,16 +99,27 @@ def get_var_usage_and_elm_inst_vars(
         )
         return (
             not all_ptrs
-            and inst_name not in ["filter", "filter_inactive_and_active",]
+            and inst_name
+            not in [
+                "filter",
+                "filter_inactive_and_active",
+            ]
             and not re.match("(c13|c14)", inst_name)
         )
 
-    active_instances = {
+    return {
         inst_var.name: inst_var
         for dtype in type_dict.values()
         for inst_var in dtype.instances.values()
         if inst_var.active and active_mask(dtype, inst_var.name)
     }
+
+
+def get_var_usage_and_elm_inst_vars(
+    type_dict: TypeDict,
+) -> tuple[VarDict, list[str], list[tuple[str, Variable]]]:
+
+    active_instances = get_active_instances(type_dict)
     use_statements, elminst_vars = var_use_statements(active_instances, type_dict)
     return active_instances, use_statements, elminst_vars
 
