@@ -3,18 +3,19 @@ import re
 from pathlib import Path
 
 # Configure path information
-scripts_dir = os.path.dirname(__file__)
-spel_dir = f"{scripts_dir}/../"
-django_database = f"{spel_dir}/spel/spel/app/management/commands/csv/"
-unittests_dir = spel_dir + "unit-tests/"
-spel_mods_dir = spel_dir + "SourceFiles/"
-spel_output_dir = scripts_dir + "/script-output/"
+scripts_dir = Path(os.path.dirname(__file__))
+spel_dir = Path(f"{scripts_dir}/../")
+database_csv =  spel_dir / "/spel/spel/app/management/commands/csv/"
+presets = spel_dir / "spel/spel/app/management/comands/presets/"
+unittests_dir = spel_dir / "unit-tests/"
+spel_mods_dir = spel_dir / "SourceFiles/"
+spel_output_dir = scripts_dir / "/script-output/"
 
 # E3SM root directory.
-E3SM_SRCROOT = spel_dir + "../E3SM"
+E3SM_SRCROOT = spel_dir / "../E3SM"
 # path for modules shared by components (eg, shr_kind_mod)
-SHR_SRC = E3SM_SRCROOT + "/share/util/"
-ELM_SRC = E3SM_SRCROOT + "/components/elm/src/"  # elm source directory
+SHR_SRC = E3SM_SRCROOT / "/share/util/"
+ELM_SRC = E3SM_SRCROOT / "/components/elm/src/"  # elm source directory
 E3SM_dir = ELM_SRC
 
 # List to hold physical property data types that are

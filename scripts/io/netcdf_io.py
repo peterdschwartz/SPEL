@@ -227,7 +227,7 @@ def create_netcdf_io_routine(
             lines.extend(
                 [
                     f"{tabs}if( io_inst%new_file) then\n",
-                    f"{tabs}{tabs}print *, 'creating file', trim(new_fn)\n"
+                    f"{tabs}{tabs}print *, 'creating file: ', trim(new_fn)\n"
                     f"{tabs}{tabs}ncid = nc_create_or_open_file(trim(new_fn), create_file)\n",
                     f"{tabs}{tabs}io_inst%new_file = .false.\n",
                     f"{tabs}{tabs}call define_vars({define_args})\n",
@@ -356,14 +356,14 @@ def create_nc_write(vars: dict[str, Variable], time: bool) -> list[str]:
             stmt = f"call nc_write_var_array(ncid, {var.name}, '{varname}')\n"
         else:
             stmt = f"call nc_write_var_scalar(ncid, {var.name}, '{varname}')\n"
-        lines.append(f"{tabs}! print *, '{varname}'\n{tabs}{stmt}")
+        lines.append(f"{tabs} print *, '{varname}'\n{tabs}{stmt}")
 
     for var in arrays:
         dim_names_str = get_dim_names(var, time)
         reshape_str = f"reshape({var.name}, [product(shape({var.name}))])"
         varname = var.name.replace("%", "__")
         stmt = f"call nc_write_var_array(ncid,{var.dim}, shape({var.name}), {dim_names_str}, {reshape_str}, '{varname}'{timestep})\n"
-        lines.append(f"{tabs}! print *, '{varname}'\n{tabs}{stmt}")
+        lines.append(f"{tabs} print *, '{varname}'\n{tabs}{stmt}")
 
     return lines
 

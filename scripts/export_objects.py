@@ -7,7 +7,7 @@ import sys
 import pandas as pd
 
 from scripts.analyze_subroutines import Subroutine
-from scripts.config import E3SM_SRCROOT, django_database, scripts_dir
+from scripts.config import E3SM_SRCROOT, database_csv, scripts_dir
 from scripts.DerivedType import DerivedType
 from scripts.fortran_modules import FortranModule
 from scripts.types import CallBinding, ReadWrite, Scope
@@ -123,9 +123,9 @@ def export_table_csv(commit: str):
 
     inst_to_dtype["bounds"] = type_dict["bounds_type"]
 
-    prefix = django_database
-    if not os.path.isdir(django_database):
-        os.system(f"mkdir {django_database}")
+    prefix = database_csv
+    if not os.path.isdir(database_csv):
+        os.system(f"mkdir {database_csv}")
 
     export_modules(mod_dict, prefix)
     export_module_usage(mod_dict, prefix)

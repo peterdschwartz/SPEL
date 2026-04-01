@@ -49,7 +49,7 @@ Thumbs.db
 **/unit-tests
 **/.ccls-cache
 **/__pycache__/*
-**/spel/spel/app/management/commands/csv/
+**/app/management/commands/csv/
 **/scripts/database/csv/
 *.egg-info/
 .sfdx/
