@@ -108,6 +108,8 @@ def create_unit_test(
         overwrite=True,
         verbose=False,
     )
+    if "elm_instmod" in mod_dict:
+        sys.exit("IN MOD DICT")
 
     for s in sub_name_list:
         if '::' in s:

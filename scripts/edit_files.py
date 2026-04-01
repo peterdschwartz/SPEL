@@ -87,6 +87,8 @@ bad_modules = {
     "dynedmod",
     "elm_interface_pflotranmod",
     "elm_interface_funcsmod",
+    "temperaturetype",
+    "elm_instmod",
 }
 
 fates_mod = ["elmfatesinterfacemod"]

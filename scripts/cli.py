@@ -104,6 +104,15 @@ def upload(args):
     return
 
 
+def config(args):
+    import scripts.config as cfg
+    import textwrap
+    print(textwrap.dedent(f"""
+    E3SM SRCROOT: {cfg.E3SM_SRCROOT}
+    ELM SRC     : {cfg.ELM_SRC}
+    SHR SRC     : {cfg.SHR_SRC}
+    """))
+
 def main():
     desc = (
         "spel create: "
@@ -216,6 +225,9 @@ def main():
     train_parser = subparsers.add_parser("train", help="train nn")
     train_parser.set_defaults(func=_train)
 
+
+    cfg_parser = subparsers.add_parser("config",help="Display or adjust config for SPEL")
+    cfg_parser.set_defaults(func=config)
 
     args = parser.parse_args()
     args.func(args)

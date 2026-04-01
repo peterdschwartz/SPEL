@@ -47,20 +47,17 @@ subroutine create_emulator_fields(      canopystate_vars,&
     type(field_list_t) :: in_list, out_list
 
     ! Build input list in the exact order used during training
-        call in_list%add(canopystate_vars%altmax_col, filter%num_soilc, filter%soilc)
-    call in_list%add(col_cf%decomp_cpools_sourcesink, filter%num_soilc, filter%soilc)
-    call in_list%add(soillittverttranspparamsinst%cryoturb_diffusion_k, filter%num_soilc, filter%soilc)
-    call in_list%add(canopystate_vars%altmax_lastyear_col, filter%num_soilc, filter%soilc)
-    call in_list%add(cnstate_vars%scalaravg_col, filter%num_soilc, filter%soilc)
-    call in_list%add(col_nf%decomp_npools_sourcesink, filter%num_soilc, filter%soilc)
-    call in_list%add(col_pf%decomp_ppools_sourcesink, filter%num_soilc, filter%soilc)
-    call in_list%add(col_ns%decomp_npools_vr, filter%num_soilc, filter%soilc)
-    call in_list%add(decomp_cascade_con%is_cwd, filter%num_soilc, filter%soilc)
-    call in_list%add(decomp_cascade_con%spinup_factor, filter%num_soilc, filter%soilc)
-    call in_list%add(soillittverttranspparamsinst%som_diffus, filter%num_soilc, filter%soilc)
-    call in_list%add(soillittverttranspparamsinst%max_altdepth_cryoturbation, filter%num_soilc, filter%soilc)
-    call in_list%add(col_ps%decomp_ppools_vr, filter%num_soilc, filter%soilc)
-    call in_list%add(col_cs%decomp_cpools_vr, filter%num_soilc, filter%soilc)
+      call in_list%add(canopystate_vars%altmax_col, filter%num_soilc, filter%soilc)
+      call in_list%add(col_cf%decomp_cpools_sourcesink, filter%num_soilc, filter%soilc)
+      call in_list%add(canopystate_vars%altmax_lastyear_col, filter%num_soilc, filter%soilc)
+      call in_list%add(cnstate_vars%scalaravg_col, filter%num_soilc, filter%soilc)
+      call in_list%add(col_nf%decomp_npools_sourcesink, filter%num_soilc, filter%soilc)
+      call in_list%add(col_pf%decomp_ppools_sourcesink, filter%num_soilc, filter%soilc)
+      call in_list%add(col_ns%decomp_npools_vr, filter%num_soilc, filter%soilc)
+      call in_list%add(decomp_cascade_con%is_cwd, filter%num_soilc, filter%soilc)
+      call in_list%add(decomp_cascade_con%spinup_factor, filter%num_soilc, filter%soilc)
+      call in_list%add(col_ps%decomp_ppools_vr, filter%num_soilc, filter%soilc)
+      call in_list%add(col_cs%decomp_cpools_vr, filter%num_soilc, filter%soilc)
 
     ! Build output list in the exact order used during training
         call out_list%add(col_cf%decomp_cpools_transport_tendency,filter%num_soilc, filter%soilc)

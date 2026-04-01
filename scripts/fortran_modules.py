@@ -378,3 +378,11 @@ class ModTree:
         print(f"{indent}>{self.node}")
         for child in self.children:
             child.print_tree(level + 1)
+
+    def find_dependency(self, dep_name: str)->list[str]:
+        nodes: list[str] = []
+        for node in self.traverse_preorder():
+            if dep_name in node.children:
+                nodes.append(node.node)
+        return nodes
+

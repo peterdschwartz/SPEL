@@ -1,5 +1,6 @@
 import os
 import re
+from pathlib import Path
 
 # Configure path information
 scripts_dir = os.path.dirname(__file__)
