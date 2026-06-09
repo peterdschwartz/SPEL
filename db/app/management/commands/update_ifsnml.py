@@ -1,6 +1,6 @@
 import csv
 
-from app.models import (
+from db.app.models import (
     FlatIf,
     FlatIfNamelistVar,
     IntrinsicGlobals,

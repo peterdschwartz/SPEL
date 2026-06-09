@@ -1,7 +1,7 @@
 import csv
 import os
 
-from app.models import Modules, UserTypeInstances, UserTypes
+from db.app.models import Modules, UserTypeInstances, UserTypes
 from django.core.management.base import BaseCommand, sys
 
 

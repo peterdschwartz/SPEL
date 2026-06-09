@@ -68,6 +68,11 @@ integer function nc_create_or_open_file(fn, mode) result(ncid)
    character(len=*), intent(in) :: fn
    integer, intent(in) :: mode
    if (mode == read_file) then
+          block 
+             logical :: exists
+             inquire(file=fn,exist=exists)
+             if (.not. exists) stop "Error: " // trim(fn) // " Not Found"
+          end block
       call check(nf90_open(trim(fn), nf90_nowrite + nf90_netcdf4, ncid))
    else if(mode == append_file) then
       call check(nf90_open(trim(fn), nf90_write + nf90_netcdf4, ncid))

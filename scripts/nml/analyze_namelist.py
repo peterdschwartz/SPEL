@@ -102,6 +102,3 @@ def change_default(if_block, namelist, namelist_variable, value):
     """
     namelist[namelist_variable].variable.default_value = value
     set_default(if_block, namelist)
-
-def apply_nml(cfg=''):
-    return

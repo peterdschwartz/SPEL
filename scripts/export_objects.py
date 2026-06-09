@@ -1,8 +1,8 @@
 import json
 import os
-from pathlib import Path
 import pickle
 import sys
+from pathlib import Path
 
 import pandas as pd
 
@@ -49,21 +49,21 @@ def pickle_unit_test(
     commit = output[1]
 
     for mod in mod_dict.values():
-        mod.filepath = mod.filepath.replace(E3SM_SRCROOT, "")
+        mod.filepath = mod.filepath.replace(f"{ E3SM_SRCROOT }", "")
 
     dbfile = open(f"{scripts_dir}/mod_dict-{commit}.pkl", "ab")
     pickle.dump(mod_dict, dbfile)
     dbfile.close()
 
     for sub in sub_dict.values():
-        sub.filepath = sub.filepath.replace(E3SM_SRCROOT, "")
+        sub.filepath = sub.filepath.replace(str(E3SM_SRCROOT), "")
 
     dbfile = open(f"{scripts_dir}/sub_dict-{commit}.pkl", "ab")
     pickle.dump(sub_dict, dbfile)
     dbfile.close()
 
     for dtype in type_dict.values():
-        dtype.filepath = dtype.filepath.replace(E3SM_SRCROOT, "")
+        dtype.filepath = dtype.filepath.replace(str(E3SM_SRCROOT), "")
 
     dbfile = open(f"{scripts_dir}/type_dict-{commit}.pkl", "ab")
     pickle.dump(type_dict, dbfile)
@@ -77,7 +77,7 @@ def unpickle_unit_test(commit=None) -> tuple[ModDict, SubDict, TypeDict]:
     if commit is None:
         scripts_path = Path(scripts_dir)
         files = scripts_path.glob("*.pkl")
-        files = [str(f).split('/')[-1] for f in files]
+        files = [str(f).split("/")[-1] for f in files]
         assert len(files) == 3, "Couldn't find pkl files!"
         fn = files[0]
         commit = fn.split("-")[1].split(".")[0]
@@ -139,7 +139,7 @@ def export_table_csv(commit: str):
     export_nml_ifs(sub_dict, prefix)
     export_cascade_ifs(sub_dict, prefix)
     export_arg_access_by_ln(sub_dict, prefix)
-    export_call_binding(sub_dict,type_dict, prefix)
+    export_call_binding(sub_dict, type_dict, prefix)
     export_propagated_by_ln(sub_dict, type_dict, prefix)
     return
 

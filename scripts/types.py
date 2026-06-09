@@ -473,6 +473,11 @@ class SubroutineCall:
     """
     namedtuple to log the subroutines called and their arguments
     to properly match read/write status of variables.
+
+    Fields:
+    * subname
+    * args
+    * ln
     """
 
     def __init__(self, subname, args, ln):
@@ -497,8 +502,8 @@ class SubroutineCall:
 class CallTuple(NamedTuple):
     """
     Fields:
-        nested
-        subname
+    * nested
+    * subname
     """
 
     nested: int

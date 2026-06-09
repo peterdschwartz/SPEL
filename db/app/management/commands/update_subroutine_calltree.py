@@ -1,7 +1,7 @@
 import csv
 import os
 
-from app.models import Modules, SubroutineCalltree, Subroutines
+from db.app.models import Modules, SubroutineCalltree, Subroutines
 from django.core.management.base import BaseCommand
 
 

@@ -17,7 +17,7 @@ def populate_interface_list():
     """
     returns a list of all interfaces
     """
-    cmd = f'grep -rin --exclude-dir={ELM_SRC}external_models/ -E "^[[:space:]]+(interface)" {ELM_SRC}*'
+    cmd = f'grep -rin --exclude-dir={ELM_SRC}/external_models/ -E "^[[:space:]]+(interface)" {ELM_SRC}/*'
     output = sp.getoutput(cmd)
     output = output.split("\n")
     global interface_list

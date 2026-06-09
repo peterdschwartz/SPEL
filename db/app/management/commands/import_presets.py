@@ -4,7 +4,7 @@ from pathlib import Path
 
 from django.core.management import call_command
 
-from app.models import  NamelistVariable, PresetConfig
+from db.app.models import  NamelistVariable, PresetConfig
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils.text import slugify

@@ -6,9 +6,15 @@ import subprocess as sp
 import sys
 from collections import namedtuple
 from copy import deepcopy
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from scripts.fortran_parser.spel_ast import GenericOperatorExpression, Identifier, InfixExpression, UseStatement
+from scripts.fortran_parser.spel_ast import (
+    GenericOperatorExpression,
+    Identifier,
+    InfixExpression,
+    UseStatement,
+)
 from scripts.fortran_parser.spel_parser import Parser
 from scripts.fortran_parser.tracing import Trace
 from scripts.utilityFunctions import Variable
@@ -130,16 +136,16 @@ def parse_only_clause(stmt: UseStatement) -> set[PointerAlias]:
     only_objs_set = set()
     # Go through list of objects, determine '=>' usage.
     for ptrobj in stmt.objs:
-        if isinstance(ptrobj,InfixExpression):
-            assert ptrobj.operator == '=>'
+        if isinstance(ptrobj, InfixExpression):
+            assert ptrobj.operator == "=>"
             ptr = str(ptrobj.left_expr)
             obj = str(ptrobj.right_expr)
             only_objs_set.add(PointerAlias(ptr=ptr, obj=obj))
-        elif isinstance(ptrobj,Identifier):
+        elif isinstance(ptrobj, Identifier):
             obj = str(ptrobj)
             only_objs_set.add(PointerAlias(ptr=None, obj=obj))
-        elif isinstance(ptrobj,GenericOperatorExpression):
-            # TODO: 
+        elif isinstance(ptrobj, GenericOperatorExpression):
+            # TODO:
             continue
         else:
             sys.exit(f"Error - unexpected expression in UseStatement {ptrobj}")
@@ -165,7 +171,9 @@ def build_module_tree(modules: dict[str, FortranModule]) -> list[ModTree]:
 
 
 def insert_header_for_unittest(
-    mod_list: list[str], mod_dict: dict[str, FortranModule], casedir: str
+    mod_list: list[str],
+    mod_dict: dict[str, FortranModule],
+    casedir: Path,
 ):
     """
     Function that will insert the header file into files needed for unit test
@@ -179,7 +187,7 @@ def insert_header_for_unittest(
         f = get_filename_from_module(mod_name)
         assert f
         # Change path to unit test case directory
-        fpath = casedir + "/" + f.split("/")[-1]
+        fpath = f"{ casedir }/{ f.split("/")[-1] }"
         fort_mod = mod_dict[mod_name]
 
         ifile = open(fpath, "r")
@@ -379,10 +387,9 @@ class ModTree:
         for child in self.children:
             child.print_tree(level + 1)
 
-    def find_dependency(self, dep_name: str)->list[str]:
+    def find_dependency(self, dep_name: str) -> list[str]:
         nodes: list[str] = []
         for node in self.traverse_preorder():
             if dep_name in node.children:
                 nodes.append(node.node)
         return nodes
-

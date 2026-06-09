@@ -79,6 +79,7 @@ def generate_elmtypes_io_netcdf(
         [
             f"{tabs}implicit none\n",
             f"{tabs}public :: read_elmtypes, write_elmtypes, define_vars\n",
+            f"{tabs}logical, parameter :: verbose = .False.\n"
             "contains\n",
         ]
     )
@@ -147,6 +148,7 @@ def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: str):
         [
             f"{tabs}implicit none\n",
             f"{tabs}public :: read_constants, write_constants, define_vars\n",
+            f"{tabs}logical, parameter :: verbose=.False.\n"
             "contains\n",
         ]
     )
@@ -356,14 +358,14 @@ def create_nc_write(vars: dict[str, Variable], time: bool) -> list[str]:
             stmt = f"call nc_write_var_array(ncid, {var.name}, '{varname}')\n"
         else:
             stmt = f"call nc_write_var_scalar(ncid, {var.name}, '{varname}')\n"
-        lines.append(f"{tabs} print *, '{varname}'\n{tabs}{stmt}")
+        lines.append(f"{tabs} if(verbose) print *, '{varname}'\n{tabs}{stmt}")
 
     for var in arrays:
         dim_names_str = get_dim_names(var, time)
         reshape_str = f"reshape({var.name}, [product(shape({var.name}))])"
         varname = var.name.replace("%", "__")
         stmt = f"call nc_write_var_array(ncid,{var.dim}, shape({var.name}), {dim_names_str}, {reshape_str}, '{varname}'{timestep})\n"
-        lines.append(f"{tabs} print *, '{varname}'\n{tabs}{stmt}")
+        lines.append(f"{tabs} if(verbose) print *, '{varname}'\n{tabs}{stmt}")
 
     return lines
 
@@ -773,6 +775,11 @@ def gen_nc_file() -> str:
     {tabs}   character(len=*), intent(in) :: fn
     {tabs}   integer, intent(in) :: mode
     {tabs}   if (mode == read_file) then
+                block 
+                   logical :: exists
+                   inquire(file=fn,exist=exists)
+                   if (.not. exists) stop "Error: " // trim(fn) // " Not Found"
+                end block
     {tabs}      call check(nf90_open(trim(fn), nf90_nowrite + nf90_netcdf4, ncid))
     {tabs}   else if(mode == append_file) then
     {tabs}      call check(nf90_open(trim(fn), nf90_write + nf90_netcdf4, ncid))
@@ -1048,3 +1055,6 @@ def gen_nc_read_timeslices() -> str:
     {tabs}end function nc_read_timeslices
     """
     )
+
+if __name__ == "__main__":
+    generate_nc_io()

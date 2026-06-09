@@ -59,7 +59,6 @@ from .utils.populate_config_tables import propagate_bindings
 from .utils.tables import VIEWS_TABLE_DICT
 from .utils.view_helper import (
     combine_many_statuses,
-    propagated_row_matches_instance,
     reachable_subroutine_ids,
 )
 
@@ -437,14 +436,7 @@ def subroutine_details(request, sub_name: str):
     module = subroutine.module.module_name
 
     reachable_ids = reachable_subroutine_ids(subroutine, cfg_hash)
-    # for id in reachable_ids:
-    #     debug_inactive_ifs(sub_id=id, config_hash=cfg_hash)
 
-    # reachable_names = set(
-    #     Subroutines.objects.filter(subroutine_id__in=reachable_ids).values_list(
-    #         "subroutine_name", flat=True
-    #     )
-    # )
     # ---------- Calltree (filter out edges in inactive IF ranges) ----------
     # inactive = any IfEvaluationByHash range (for this parent) that covers the edge.lineno and is_active == False
     # --- Calltree (parent == this subroutine) ---
@@ -697,7 +689,7 @@ def trace_dtype_var(
 
     # Rows where this member is referenced AND its ln is NOT covered by inactive IFs
     rows_qs = (
-        SubroutineElmtypesByConfig.objects.filter(var_name=inst_name, member_path=member_name)
+        SubroutineElmtypesByConfig.objects.filter(var_name=inst_name, member_path=member_name,cfg_hash=cfg_hash)
         .select_related("subroutine")
         .order_by("subroutine__subroutine_name", "ln")
     )

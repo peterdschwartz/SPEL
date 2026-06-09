@@ -21,7 +21,7 @@ ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split("
 SECURE_PROXY_SSL_HEADER =os.getenv("DJANGO_SECURE_PROXY_SSL_HEADER", "False").lower() == "true" 
 
 # HTTPS settings
-SECURE_SSL_REDIRECT = os.getenv("DJANGO_SECURE_SSL_REDIRECT", "True").lower() == "true"
+SECURE_SSL_REDIRECT = os.getenv("DJANGO_SECURE_SSL_REDIRECT", "False").lower() == "true"
 SESSION_COOKIE_SECURE = os.getenv("DJANGO_SESSION_COOKIE_SECURE", "False").lower() == "true"
 CSRF_COOKIE_SECURE = os.getenv("DJANGO_CSRF_COOKIE_SECURE", "False").lower() == "true" 
 # Set after you confirm HTTPS everywhere (adjust max-age as you like):
@@ -37,7 +37,7 @@ CSRF_TRUSTED_ORIGINS = (
 # Application definition
 
 INSTALLED_APPS = [
-    "app",
+    "db.app",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -56,7 +56,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = "spel.urls"
+ROOT_URLCONF = "db.spel.urls"
 
 TEMPLATES = [
     {
@@ -75,7 +75,7 @@ TEMPLATES = [
 ]
 
 
-WSGI_APPLICATION = "spel.wsgi.application"
+WSGI_APPLICATION = "db.spel.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",

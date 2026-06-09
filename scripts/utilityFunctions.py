@@ -316,7 +316,7 @@ def find_file_for_subroutine(name, fn="", ignore_interface=False, verbose=False)
     """
     func_name = "find_file_for_subroutine"
     if not fn:
-        search_file = f"{ELM_SRC}*"
+        search_file = f"{ELM_SRC.resolve()}/*"
     else:
         search_file = f"{fn}"
 
@@ -386,7 +386,7 @@ def get_interface_list():
            Unit Test creation
     """
 
-    cmd = f'grep -rin --exclude-dir={ELM_SRC}external_models/ -E "^[[:space:]]+(interface)" {ELM_SRC}*'
+    cmd = f'grep -rin --exclude-dir={ELM_SRC}/external_models/ -E "^[[:space:]]+(interface)" {ELM_SRC}/*'
     output = sp.getoutput(cmd)
     output = output.split("\n")
     interface_list = []

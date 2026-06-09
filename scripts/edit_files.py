@@ -8,6 +8,7 @@ import sys
 from logging import Logger
 from pprint import pprint
 from typing import Optional
+from pathlib import Path
 
 from scripts.analyze_subroutines import Subroutine
 from scripts.check_sections import check_function_start, create_init_obj
@@ -630,7 +631,7 @@ def remove_cpp_directives(
 
 def apply_preprocessor(fn: str) -> list[str]:
     base_fn = fn.split("/")[-1]
-    new_fn = f"{spel_output_dir}cpp_{base_fn}"
+    new_fn = f"{spel_output_dir}/cpp_{base_fn}"
 
     # Set up cmd for preprocessing. Get macros used:
     macros_string = "-D" + " -D".join(macros)
@@ -649,7 +650,7 @@ def modify_file(
     orig_lines: list[LineTuple],
     fort_mod: FortranModule,
     pass_manager: PassManager,
-    case_dir: str,
+    case_dir: Path,
     overwrite: bool,
 ) -> ModParseResult:
     """
@@ -746,7 +747,7 @@ def modify_file(
 
 
 def process_for_unit_test(
-    case_dir: str,
+    case_dir: Path,
     mod_dict: dict[str, FortranModule],
     sub_dict: dict[str, Subroutine],
     mods: list[str],

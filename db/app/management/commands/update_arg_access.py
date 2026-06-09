@@ -2,7 +2,7 @@ import csv
 
 from django.core.management.base import BaseCommand, sys
 
-from app.models import ArgAccess, Modules, SubroutineArgs, Subroutines
+from db.app.models import ArgAccess, Modules, SubroutineArgs, Subroutines
 
 
 class Command(BaseCommand):

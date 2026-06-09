@@ -2,6 +2,8 @@ import logging
 import re
 import sys
 
+import scripts.config as cfg
+import scripts.db_utils as db_utils
 import scripts.dynamic_globals as dg
 from scripts.aggregate import aggregate_dtype_vars
 from scripts.analyze_subroutines import Subroutine
@@ -21,7 +23,6 @@ from scripts.nml.analyze_namelist import find_all_namelist, find_nml_ifs
 from scripts.types import ReadWrite
 from scripts.utilityFunctions import Variable
 from scripts.variable_analysis import determine_global_variable_status
-import scripts.config as cfg
 
 ModDict = dict[str, FortranModule]
 SubDict = dict[str, Subroutine]
@@ -53,7 +54,7 @@ def create_unit_test(
     if not casename:
         casename = "fut"
 
-    case_dir = unittests_dir + casename
+    case_dir = unittests_dir / casename
 
     if not sub_names:
         sys.exit("Error- No subroutines provided for analysis")
@@ -112,13 +113,17 @@ def create_unit_test(
         sys.exit("IN MOD DICT")
 
     for s in sub_name_list:
-        if '::' in s:
+        if "::" in s:
             subroutines[s] = main_sub_dict[s]
             subroutines[s].unit_test_function = True
         else:
-            candidates = {k for k in main_sub_dict.keys() if re.search(rf"(?<=::){s}\b",k)}
+            candidates = {
+                k for k in main_sub_dict.keys() if re.search(rf"(?<=::){s}\b", k)
+            }
             if len(candidates) > 1:
-                logger.warning(f"Multiple Subroutines match {s}, Adding them all: {candidates}\nRe-run with <mod_name>::<sub_name>")
+                logger.warning(
+                    f"Multiple Subroutines match {s}, Adding them all: {candidates}\nRe-run with <mod_name>::<sub_name>"
+                )
             for c in candidates:
                 subroutines[c] = main_sub_dict[c]
                 subroutines[c].unit_test_function = True
@@ -167,7 +172,7 @@ def create_unit_test(
             sub.id for sub in main_sub_dict.values() if sub.unit_test_function
         }
         for sub_id in fut_subs:
-            parent_sub= main_sub_dict[sub_id]
+            parent_sub = main_sub_dict[sub_id]
             merge_elmtype_from_children(parent_sub, main_sub_dict)
         for sub in main_sub_dict.values():
             sub.match_arg_to_inst(type_dict)
@@ -247,12 +252,12 @@ def create_unit_test(
         )
 
         cmds: list[str] = [
-            f"cp {spel_output_dir}duplicateMod.F90 {case_dir}",
-            f"cp {spel_mods_dir}nc_io.F90 {case_dir}",
-            f"cp {spel_mods_dir}nc_allocMod.F90 {case_dir}",
-            f"cp {spel_mods_dir}unittest_defs.h {case_dir}",
-            f"cp {spel_mods_dir}decompInitMod.F90 {case_dir}",
-            f"cp {spel_mods_dir}check_config.sh {case_dir}",
+            f"cp {spel_output_dir}/duplicateMod.F90 {case_dir}",
+            f"cp {spel_mods_dir}/nc_io.F90 {case_dir}",
+            f"cp {spel_mods_dir}/nc_allocMod.F90 {case_dir}",
+            f"cp {spel_mods_dir}/unittest_defs.h {case_dir}",
+            f"cp {spel_mods_dir}/decompInitMod.F90 {case_dir}",
+            f"cp {spel_mods_dir}/check_config.sh {case_dir}",
         ]
         for cmd in cmds:
             logger.info(cmd)
@@ -279,9 +284,9 @@ def process_subroutines_for_unit_test(
         3) construct subroutine call trees (abstract=child subs represented only once)
         4) analyze status of variables used by subroutines.
     """
-    fut_subs: set[str] = {
-        sub.id for sub in sub_dict.values() if sub.unit_test_function
-    }
+    from scripts.nml.nml_queries import query_active_variables
+
+    fut_subs: set[str] = {sub.id for sub in sub_dict.values() if sub.unit_test_function}
     nml_dict = find_all_namelist()
 
     active_global_variables: dict[str, Variable] = {}
@@ -299,43 +304,52 @@ def process_subroutines_for_unit_test(
         if dtype.init_sub_name:
             dtype.init_sub_ptr = sub_dict[dtype.init_sub_name]
 
-    for sub_id in fut_subs:
-        sub = sub_dict[sub_id]
-        sub.collect_var_and_call_info(
-            dtype_dict=type_dict,
-            sub_dict=sub_dict,
-            mod_dict=mod_dict,
-            verbose=False,
-        )
-        flat_list = construct_call_tree(
-            sub=sub,
-            sub_dict=sub_dict,
-            dtype_dict=type_dict,
-            mod_dict=mod_dict,
-            nested=0,
-        )
+    if False: #not cfg.options.db_mode:
+        ok = query_active_variables(sub_dict)
+        if not ok:
+            sys.exit("Expected database to return non-empty result")
+        for sub in sub_dict.values():
+            sub.summarize_readwrite(verbose=True)
+    else:
+        for sub_id in fut_subs:
+            sub = sub_dict[sub_id]
+            sub.collect_var_and_call_info(
+                dtype_dict=type_dict,
+                sub_dict=sub_dict,
+                mod_dict=mod_dict,
+                verbose=False,
+            )
+            flat_list = construct_call_tree(
+                sub=sub,
+                sub_dict=sub_dict,
+                dtype_dict=type_dict,
+                mod_dict=mod_dict,
+                nested=0,
+            )
 
-        if sub.abstract_call_tree:
-            for tree in sub.abstract_call_tree.traverse_postorder():
-                subname = tree.node.subname
-                sub_obj = sub_dict[subname]
-                if sub_obj.library:
-                    continue
-                if not sub_obj.args_analyzed and sub_obj.arguments:
-                    sub_obj.parse_arguments(sub_dict, type_dict)
-                if not sub_obj.vars_analyzed:
-                    sub_obj.analyze_variables(sub_dict)
-                if not sub_obj.ifs_analyzed:
-                    get_if_blocks(sub_obj)
+            if sub.abstract_call_tree:
+                for tree in sub.abstract_call_tree.traverse_postorder():
+                    subname = tree.node.subname
+                    sub_obj = sub_dict[subname]
+                    if sub_obj.library:
+                        continue
+                    if not sub_obj.args_analyzed and sub_obj.arguments:
+                        sub_obj.parse_arguments(sub_dict)
+                    if not sub_obj.vars_analyzed:
+                        sub_obj.analyze_variables(sub_dict)
+                    if not sub_obj.ifs_analyzed:
+                        get_if_blocks(sub_obj)
 
-    if nml_dict:
-        find_nml_ifs(sub_dict, nml_dict)
+        if nml_dict:
+            find_nml_ifs(sub_dict, nml_dict)
 
     return
 
-def merge_elmtype_from_children(parent_sub: Subroutine, sub_dict: dict[str,Subroutine]):
-    """
-    """
+
+def merge_elmtype_from_children(
+    parent_sub: Subroutine, sub_dict: dict[str, Subroutine]
+):
+    """ """
     for tree in parent_sub.abstract_call_tree.traverse_postorder():
         curr_sub = sub_dict[tree.node.subname]
         for ln, desc in curr_sub.sub_call_desc.items():
@@ -345,7 +359,7 @@ def merge_elmtype_from_children(parent_sub: Subroutine, sub_dict: dict[str,Subro
             for var, status in temp_dict.items():
                 t_status = status
                 t_status.ln = ln
-                curr_sub.elmtype_access_by_ln.setdefault(var,[]).append(t_status)
-    
+                curr_sub.elmtype_access_by_ln.setdefault(var, []).append(t_status)
+
     parent_sub.summarize_readwrite()
     return

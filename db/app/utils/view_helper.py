@@ -9,6 +9,10 @@ Dtype = str
 RW = tuple[int, str, SubName]
 
 def reachable_subroutine_ids(root_subroutine, cfg_hash: str) -> set[int]:
+    """
+    Function to determine which subroutines in the call tree are reached
+    based on evaluation of namelist conditions
+    """
     root_id = root_subroutine.subroutine_id
     seen: set[int] = {root_id}
     frontier: list[int] = [root_id]

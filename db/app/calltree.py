@@ -190,7 +190,7 @@ def build_calltree(root_subroutine_name, active_subs=None):
     If active_subs is provided (a set or list of subroutine names),
     only include children whose names are in active_subs.
     """
-    from app.models import SubroutineCalltree, Subroutines
+    from db.app.models import SubroutineCalltree, Subroutines
 
     try:
         root_sub = Subroutines.objects.get(subroutine_name=root_subroutine_name)

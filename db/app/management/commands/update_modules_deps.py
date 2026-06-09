@@ -1,7 +1,7 @@
 import csv
 import os
 
-from app.models import ModuleDependency, Modules
+from db.app.models import ModuleDependency, Modules
 from django.core.management.base import BaseCommand
 
 

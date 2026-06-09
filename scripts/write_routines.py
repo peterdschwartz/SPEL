@@ -523,7 +523,7 @@ def prepare_main(
     """
     Function to insert USE dependencies into main.F90 and subroutine calls for the FUT subs
     """
-    iofile = open(f"{spel_mods_dir}main.F90", "r")
+    iofile = open(f"{spel_mods_dir}/main.F90", "r")
     lines = iofile.readlines()
     iofile.close()
 

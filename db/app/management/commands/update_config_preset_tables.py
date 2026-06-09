@@ -1,6 +1,6 @@
 
 import sys
-from app.models import PresetConfig
+from db.app.models import PresetConfig
 from django.core.management.base import BaseCommand
 
 from ...utils.ifs import compute_if_evals_for_hash
