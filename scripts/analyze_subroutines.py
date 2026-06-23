@@ -1123,7 +1123,7 @@ class Subroutine(object):
                                 + f"\n Calltag: {calltag}\nBinding: {binding}\nArgvar: {argvar}\nRWs: {rws}"
                             )
                         elif binding.arg_usage == ArgUsage.NESTED:
-                            new_rw.status = "r" # No assertion because var isn't actually passed to child
+                            new_rw.status = "r"  # No assertion because var isn't actually passed to child
 
                         # Add overall read write status to parent line info at the call site
                         scope = self._determine_scope(new_key)
@@ -1184,6 +1184,56 @@ class Subroutine(object):
 
     def _get_ptr_targets(self, pot_ptr: str) -> list[str]:
         return self.ptr_vars.get(pot_ptr, [pot_ptr])
+
+    def elmtype_accesses_exclusive_to_namelist_ifs(
+        self,
+    ) -> dict[str, list[tuple[ReadWrite, FlatIfs]]]:
+        """
+        Return ELM derived-type fields whose accesses occur only inside namelist-gated
+        flat if blocks.
+
+        Each returned access is paired with the innermost matching FlatIfs, whose
+        condition is the effective namelist-dependent Expression for that block.
+        """
+
+        nml_ifs = [
+            flat_if
+            for flat_if in self.flat_ifs
+            if flat_if.nml_vars or flat_if.nml_cascades
+        ]
+
+        def matching_namelist_ifs(ln: int) -> list[FlatIfs]:
+            matches = [
+                flat_if
+                for flat_if in nml_ifs
+                if flat_if.start_ln <= ln <= flat_if.end_ln
+            ]
+
+            matches.sort(key=lambda flat_if: flat_if.end_ln - flat_if.start_ln)
+            return matches
+
+        exclusive: dict[str, list[tuple[ReadWrite, FlatIfs]]] = {}
+
+        for elm_field, accesses in self.elmtype_access_by_ln.items():
+            if not accesses:
+                continue
+
+            guarded_accesses: list[tuple[ReadWrite, FlatIfs]] = []
+
+            for access in accesses:
+                matches = matching_namelist_ifs(access.ln)
+
+                if not matches:
+                    guarded_accesses = []
+                    break
+
+                innermost_nml_if = matches[0]
+                guarded_accesses.append((access, innermost_nml_if))
+
+            if guarded_accesses:
+                exclusive[elm_field] = guarded_accesses
+
+        return exclusive
 
     def sort_inputs_outputs(self):
         inputs: set[str] = set()

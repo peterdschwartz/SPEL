@@ -8,7 +8,8 @@ from enum import Enum, auto
 from logging import Logger
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
 
-from scripts.fortran_parser.spel_ast import Expression
+from scripts.fortran_parser.spel_ast import BlockStatement, Expression, IfConstruct
+from scripts.fortran_parser.tokens import Token, TokenTypes
 from scripts.logging_configs import get_logger
 
 if TYPE_CHECKING:
@@ -683,7 +684,7 @@ class LogicalLineIterator:
         self.i += 1
 
         # semicolon splitting, preserving original ln
-        parts = self._scan_with_comment_and_split(full_line,split_char=';')
+        parts = self._scan_with_comment_and_split(full_line, split_char=";")
         # filter out completely empty pieces
         parts = [p.strip() for p in parts if p.strip()]
 
@@ -786,11 +787,19 @@ class LogicalLineIterator:
 
         return
 
-    def get_lines(self, regex: re.Pattern) -> list[LineTuple]:
+    def get_lines_by_regex(self, regex: re.Pattern) -> list[LineTuple]:
         self.reset()
         res = [lpair for lpair in self if regex.search(lpair.line)]
         self.reset()
         return res
+
+    def get_full_line(self, lineno: int) -> LineTuple:
+        """Returns LogicalLine starting at lineno"""
+        if lineno - 1 < 0:
+            self.logger.error("get_full_line expects 1-based indexing!")
+            raise ValueError
+        self.reset(ln=lineno - 1)
+        return next(self)
 
 
 @dataclass
@@ -819,6 +828,17 @@ class FlatIfs:
 
     def __str__(self):
         return f"{self.kind.name} L{self.start_ln}-{self.end_ln} {self.condition}"
+
+    def __repr__(self):
+        return f"{self.kind.name}@L{self.start_ln}-{self.end_ln}({self.condition})"
+
+    def to_if_construct(self):
+        tok = Token(token=TokenTypes.IF, literal="if")
+        return IfConstruct(
+            tok=tok,
+            cond=self.condition,
+            consequence=BlockStatement(tok=tok),
+        )
 
 
 class Pairs(NamedTuple):
@@ -871,20 +891,17 @@ class PassManager:
 
 
 class NameList:
-    def __init__(self) -> None:
+    def __init__(self, name, group) -> None:
         """
         Class to hold infomation on namelist variables:
         * self.name : namelist name
         * self.group : the group the namelist variable belongs to
-        * self.if_blocks : list of number lines that if statments where the namelist variable is present in
         * self.variable : a pointer to a Variable class
         * self.filepath : file where namelist variable was found
         """
-        self.name: str = ""
-        self.group: str = ""
+        self.name: str = name
+        self.group: str = group
         self.variable: Optional[Variable] = None
-        self.ln: int = -1
-        self.filepath: str = ""
 
     def __str__(self) -> str:
         type_str = self.variable.type if self.variable else ""

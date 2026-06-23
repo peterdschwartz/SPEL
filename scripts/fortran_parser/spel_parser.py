@@ -15,7 +15,7 @@ from scripts.fortran_parser.spel_ast import (ArrayInit, AttributeSpec,
                                              ImpliedDo, InfixExpression,
                                              IntegerLiteral, IOExpression,
                                              LogicalLiteral, MacroDefine,
-                                             MacroIf, PrefixExpression,
+                                             MacroIf, NameListStatement, PrefixExpression,
                                              PrintStatement,
                                              ProcedureStatement, Program,
                                              Statement, StringLiteral,
@@ -175,7 +175,7 @@ class Parser:
     def register_infix_fns(self, tok_type: Tok, fn: InfixParseFn):
         self.infix_parse_fns[tok_type] = fn
 
-    def parse_identifier(self) -> Expression:
+    def parse_identifier(self) -> Identifier:
         return Identifier(tok=self.cur_token, value=self.cur_token.literal)
 
     def parseIntegerLiteral(self) -> Expression:
@@ -219,7 +219,7 @@ class Parser:
     def peekTokenIs(self, etype: Tok):
         return self.peek_token.token == etype
 
-    def expect_peek(self, etype: Tok) -> bool:
+    def expect_peek_and_advance(self, etype: Tok) -> bool:
         if self.peekTokenIs(etype):
             self.next_token()
             return True
@@ -281,7 +281,7 @@ class Parser:
             # consume IFDEF or IFNDEF
             self.next_token()
             token = self.cur_token
-            self.expect_peek(Tok.IDENT)
+            self.expect_peek_and_advance(Tok.IDENT)
             symbol = self.cur_token.literal
             self.next_token()
             body = self.parse_block_statement(token, [Token(Tok.M_ENDIF, "#endif")])
@@ -290,7 +290,7 @@ class Parser:
         elif self.peekTokenIs(Tok.DEF):
             self.next_token()
             token = self.cur_token
-            if not self.expect_peek(Tok.IDENT):
+            if not self.expect_peek_and_advance(Tok.IDENT):
                 self.logger.error("Expected macro name after #define")
                 return None
             macro_name = self.cur_token.literal
@@ -346,11 +346,36 @@ class Parser:
                 stmt = self.parse_procedure_stmt()
             case Tok.USE:
                 stmt = self.parse_use_statement()
+            case Tok.NAMELIST:
+                stmt = self.parse_namelist_statement()
             case _:
                 stmt = self.parse_expression_statement()
         if stmt:
             stmt.lineno = startln
         return stmt
+
+    @Trace.trace_decorator("parse_nml_stmt")
+    def parse_namelist_statement(self)->Statement:
+        """
+        Parses fortran statements: namelist /group/ <comma sep list of vars>
+        """
+
+        tok = self.cur_token
+
+        self.expect_peek_and_advance(Tok.SLASH) # cur token become SLASH
+        self.next_token() # cur token is group name
+
+        group_name: Identifier = self.parse_identifier() # doesn't advance tokens
+        self.expect_peek_and_advance(Tok.SLASH)
+        self.next_token()
+
+        vars: list[Identifier] = [self.parse_identifier()]
+        while self.peekTokenIs(Tok.COMMA):
+            self.next_token() # comma
+            self.next_token() # identifier
+            vars.append(self.parse_identifier())
+
+        return NameListStatement(tok=tok,namelist_group=group_name,vars=vars)
 
     @Trace.trace_decorator("parse_uses")
     def parse_use_statement(self)->Statement:
@@ -365,9 +390,9 @@ class Parser:
         only_clause = False
         if self.peekTokenIs(Tok.COMMA):
             self.next_token() # COMMA
-            self.expect_peek(Tok.IDENT) # 'only'
+            self.expect_peek_and_advance(Tok.IDENT) # 'only'
             assert self.cur_token.literal == "only", f"Expect 'only' identifier got: {self.cur_token}"
-            self.expect_peek(Tok.COLON) # ':'
+            self.expect_peek_and_advance(Tok.COLON) # ':'
             self.next_token()
             only_clause = True
 
@@ -394,16 +419,16 @@ class Parser:
             return None
         if self.cur_token.literal == "assignment" :
             tok = Token(token=Tok.IDENT,literal="assignment")
-            _ = self.expect_peek(Tok.LPAREN) # not needed but advances tokens
-            _ = self.expect_peek(Tok.ASSIGN)
+            _ = self.expect_peek_and_advance(Tok.LPAREN) # not needed but advances tokens
+            _ = self.expect_peek_and_advance(Tok.ASSIGN)
             spec: Identifier = Identifier(tok=self.cur_token,value='=')
-            _ = self.expect_peek(Tok.RPAREN)
+            _ = self.expect_peek_and_advance(Tok.RPAREN)
         elif self.cur_token.literal == "operator":
             tok = Token(token=Tok.IDENT,literal="operator")
-            _ = self.expect_peek(Tok.LPAREN)
+            _ = self.expect_peek_and_advance(Tok.LPAREN)
             self.next_token()
             spec: Identifier = self.parse_identifier()
-            _ = self.expect_peek(Tok.RPAREN)
+            _ = self.expect_peek_and_advance(Tok.RPAREN)
         else:
             self.errors.append(f"(check_operator_def) Unexpected token {self.cur_token}")
             self.error_exit()
@@ -426,7 +451,7 @@ class Parser:
 
         assert self.curTokenIs(Tok.IDENT), f"Expected type name: {self.cur_token}"
         type_name = self.cur_token.literal
-        self.expect_peek(Tok.NEWLINE)
+        self.expect_peek_and_advance(Tok.NEWLINE)
         body = self.parse_block_statement(
             tok=tok,
             terminators=[
@@ -579,7 +604,7 @@ class Parser:
         elif self.peekTokenIs(Tok.IDENT):
             self.next_token()  # Ident = index
             index = self.cur_token
-            if not self.expect_peek(Tok.ASSIGN):  # expect_peek advances token
+            if not self.expect_peek_and_advance(Tok.ASSIGN):  # expect_peek advances token
                 raise ParseError("Couldn't Parse Do LOOP")
             self.next_token()
             start_expr, end_expr, step = self.parse_do_bounds()
@@ -601,7 +626,7 @@ class Parser:
         """
         start_expr = self.parse_expression(Precedence.LOWEST)
 
-        self.expect_peek(Tok.COMMA)
+        self.expect_peek_and_advance(Tok.COMMA)
         self.next_token()  # skip the comma
 
         end_expr = self.parse_expression(Precedence.LOWEST)
@@ -658,7 +683,7 @@ class Parser:
             Token(Tok.ELSE, "ELSE"),
         ]
 
-        if not self.expect_peek(Tok.LPAREN):
+        if not self.expect_peek_and_advance(Tok.LPAREN):
             self.logger.error(f"Expected IF condition Got: {self.peek_token}")
 
         condition = self.parse_expression(Precedence.LOWEST)
@@ -686,9 +711,9 @@ class Parser:
         while self.curTokenIs(Tok.ELSEIF):
             tok = self.cur_token
             elif_ln = self.lineno
-            self.expect_peek(Tok.LPAREN)
+            self.expect_peek_and_advance(Tok.LPAREN)
             elif_cond = self.parse_expression(Precedence.LOWEST)
-            self.expect_peek(Tok.THEN)
+            self.expect_peek_and_advance(Tok.THEN)
             self.next_token()
 
             consequence = self.parse_block_statement(tok, blk_terminators)
@@ -702,7 +727,7 @@ class Parser:
         if self.curTokenIs(Tok.ELSE):
             else_lineno = self.lineno
             else_tok = self.cur_token
-            self.expect_peek(Tok.NEWLINE)
+            self.expect_peek_and_advance(Tok.NEWLINE)
             self.next_token()
             alternative = self.parse_block_statement(
                 else_tok, [Token(Tok.ENDIF, "ENDIF")]
@@ -750,7 +775,7 @@ class Parser:
         self.next_token()
 
         expr = self.parse_expression(Precedence.LOWEST)
-        if not self.expect_peek(Tok.RPAREN):
+        if not self.expect_peek_and_advance(Tok.RPAREN):
             self.errors.append("Failed to Parse Grouped Expression" + str(expr))
         return expr
 
@@ -818,7 +843,7 @@ class Parser:
             args.append(self.parse_expression(Precedence.LOWEST))
 
         # Note expect peek advances tokens, to cur_token = RPAREN at return
-        if not self.expect_peek(Tok.RPAREN):
+        if not self.expect_peek_and_advance(Tok.RPAREN):
             raise ParseError("Couldn't Parse Arguments")
         return args
 
@@ -850,14 +875,14 @@ class Parser:
     @Trace.trace_decorator("parse_write_statement")
     def parse_write_statement(self) -> WriteStatement:
         tok = self.cur_token  # 'write'
-        self.expect_peek(Tok.LPAREN)
+        self.expect_peek_and_advance(Tok.LPAREN)
         self.next_token()
 
         # parse log unit
         unit = self.parse_expression(Precedence.LOWEST)
 
         if self.peekTokenIs(Tok.COMMA):
-            self.expect_peek(Tok.COMMA)
+            self.expect_peek_and_advance(Tok.COMMA)
             self.next_token()
             # parse format
             fmt = self.parse_expression(Precedence.LOWEST)
@@ -865,7 +890,7 @@ class Parser:
             # statement is of form write(logunit) expr
             fmt = IOExpression(Token(Tok.ASTERISK, "*"))
 
-        self.expect_peek(Tok.RPAREN)
+        self.expect_peek_and_advance(Tok.RPAREN)
         self.next_token()
         # parse expressions
         exprs: list[Expression] = []
@@ -882,7 +907,7 @@ class Parser:
         self.next_token()
         fmt = self.parse_expression(Precedence.LOWEST)
 
-        self.expect_peek(Tok.COMMA)
+        self.expect_peek_and_advance(Tok.COMMA)
         self.next_token()
 
         exprs: list[Expression] = []
@@ -922,7 +947,7 @@ class Parser:
     @Trace.trace_decorator("parse_implied_do")
     def parse_implied_do(self) -> ImpliedDo:
         var_tok = self.cur_token
-        self.expect_peek(Tok.ASSIGN)
+        self.expect_peek_and_advance(Tok.ASSIGN)
         self.next_token()
         start_expr, end_expr, step = self.parse_do_bounds()
 

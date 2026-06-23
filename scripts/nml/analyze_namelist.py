@@ -1,15 +1,20 @@
 import re
 import subprocess
+from collections import defaultdict
 
 from scripts.analyze_subroutines import Subroutine
 from scripts.config import ELM_SRC
-from scripts.nml.analyze_elm import single_line_unwrapper
-from scripts.nml.analyze_ifs import set_default
-from scripts.types import NameList
+from scripts.fortran_parser.boolen_expression import infer_condition_expectations
+from scripts.fortran_parser.spel_ast import NameListStatement, Program
+from scripts.fortran_parser.spel_parser import Parser
 from scripts.nml.namelist_cascade import NML_CASCADES
+from scripts.types import LineTuple, LogicalLineIterator, NameList
 
 
 def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList]):
+    """
+    Function to find the namelist vars used in if statements and their expected value
+    """
     nml_str = "|".join(list(nml_dict.keys()))
     regex_nml = re.compile(rf"\b({nml_str})\b")
 
@@ -24,81 +29,74 @@ def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList])
 
             # check nml dependents:
             dep_vars = regex_deps.findall(cond)
-            if_node.nml_cascades.update({v: NML_CASCADES[v] for v in dep_vars })
+            if_node.nml_cascades.update({v: NML_CASCADES[v] for v in dep_vars})
+            if temp or dep_vars:
+                variables = { v for v in dep_vars + nml_vars }
+                infer_condition_expectations(expr=if_node.condition,variables=variables)
+
+
+    return
+
+
+def check_calltree_for_nml_guarded_vars(
+    root_sub: Subroutine,
+    sub_dict: dict[str, Subroutine],
+):
+    """
+    Given a root subroutine node, traverse the calltree and determine
+    if any global variables are ONLY accessed under certain NML options
+    """
+    from pprint import pprint
+
+    exclusive_by_sub: dict[str, dict] = defaultdict(dict)
+    if root_sub.abstract_call_tree:
+        for subnode in root_sub.abstract_call_tree.traverse_postorder():
+            subname = subnode.node.subname
+            sub = sub_dict[subname]
+            exclusive = sub.elmtype_accesses_exclusive_to_namelist_ifs()
+            if exclusive:
+                exclusive_by_sub[subname] = {key: val for key, val in exclusive.items()}
+
+    pprint(exclusive_by_sub)
 
     return
 
 
 def find_all_namelist() -> dict[str, NameList]:
     """
-    Find all namelist variables across ELM
+    Find all namelist variables across ELM.
+    NOTE: Grep is 1-based indexed for lineno's
     """
 
     output = subprocess.getoutput(
-        f'grep -rin --include=*.F90 --exclude-dir=external_models/ "namelist\s*\/" {ELM_SRC}'
+        rf'grep -rin --include=*.F90 --exclude-dir=external_models/ "namelist\s*\/" {ELM_SRC}'
     )
-    namelist_dict = {}
+    namelist_dict: dict[str, NameList] = {}
     if output.strip() == "":
         return namelist_dict
-    file_set: set[str] = {line.split(":")[0] for line in output.split("\n")}
+    entries: dict[str, list[int]] = defaultdict(list)
+
     for line in output.split("\n"):
         line = line.split(":")
         filename = line[0]
-        line_number = int(line[1]) - 1
-        info = line[2]
-        full_line, _ = single_line_unwrapper(filename, line_number)
+        line_number = int(line[1])
+        entries[filename].append(line_number)
 
-        group = re.findall(r"namelist\s*\/\s*(\w+)\s*\/", info, re.IGNORECASE)[0]
-        flags = full_line.lower().split("/")[-1].split(",")
-        for flag in flags:
-            f = NameList()
-            f.name = flag.strip().lower()
-            f.group = group.lower()
-            f.filepath = filename
-            f.ln = line_number
+    nml_lines: list[LineTuple] = []
+    for fn, lns in entries.items():
+        in_stream = open(fn, "r")
+        lines = in_stream.readlines()
+        line_iter = LogicalLineIterator(
+            lines=[LineTuple(ln=ln, line=line) for ln, line in enumerate(lines)]
+        )
+        for ln in lns:
+            nml_lines.append(line_iter.get_full_line(ln))
 
-            namelist_dict[flag.strip().lower()] = f
+    # Now Parse!
+    parser = Parser(lines=nml_lines)
+    program = parser.parse_program()
+    for stmt in program.statements:
+        assert isinstance(stmt, NameListStatement), "Expected only NameListStatement"
+        for var in stmt.vars:
+            namelist_dict[var] = NameList(name=var, group=stmt.namelist_group)
     return namelist_dict
-
-
-def generate_namelist_dict(mod_dict, namelist_dict, ifs, subroutine_calls):
-    """
-    Find used namelists variables within the if-condition
-    Attach variable objects to each namelist
-    """
-    for mod in mod_dict.values():
-        for namelist in namelist_dict.keys():
-            current_namelist_var = namelist_dict[namelist]
-
-            matching_var = [v for v in mod.global_vars if v.name == namelist]
-            if matching_var:
-                var = matching_var[0]
-                if_blocks = []
-                for pair in ifs:
-                    if re.search(
-                        r"\b\s*{}\b\s*".format(re.escape(namelist)), pair.condition
-                    ):
-                        if_blocks.append(pair)
-
-                    for index, call in enumerate(pair.calls):
-                        ln = call[0]
-                        name = call[1]
-                        if isinstance(name, tuple):
-                            continue
-
-                        if subroutine_calls.get(name) != None:
-                            for s in subroutine_calls[name]:
-                                if ln == s.ln:
-                                    pair.calls[index] = (name, s)
-
-                current_namelist_var.if_blocks.extend(if_blocks)
-                current_namelist_var.variable = var
-
-
-def change_default(if_block, namelist, namelist_variable, value):
-    """
-    Change namelist_variable's default to value
-    if_block is parent ifblocks
-    """
-    namelist[namelist_variable].variable.default_value = value
-    set_default(if_block, namelist)

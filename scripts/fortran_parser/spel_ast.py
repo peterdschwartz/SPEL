@@ -1133,6 +1133,35 @@ class UseStatement(Statement):
 #         return super().statement_node()
 #
 
+class NameListStatement(Statement):
+    """
+    * token
+    * namelist_group
+    * vars
+    """
+
+    def __init__(self, tok: Token, namelist_group: Identifier, vars: list[Identifier]):
+        self.token = tok  # Should be namelist
+        self.namelist_group: str = namelist_group.value
+        self.vars: list[str] = [v.value for v in vars]
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def statement_node(self) -> None:
+        return super().statement_node()
+
+    def __str__(self) -> str:
+        _s = ",\n".join(self.vars)
+        return f"namelist /{self.namelist_group}/ {_s}"
+
+    def to_dict(self):
+        return {
+            "Node": "NameListStatement",
+            "nml_group": self.namelist_group,
+            "vars": self.vars.copy(),
+        }
+
 def expr_from_dict(d: dict | None) -> Optional[Expression]:
     if d is None:
         return None

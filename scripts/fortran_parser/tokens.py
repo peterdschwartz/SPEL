@@ -74,6 +74,7 @@ class TokenTypes(Enum):
     ENDTYPE = "end type"
     PROC = "procedure"
     USE = "use"
+    NAMELIST = "namelist"
 
 
 keywords: dict[str, TokenTypes] = {
@@ -117,6 +118,7 @@ keywords: dict[str, TokenTypes] = {
     "endtype": TokenTypes.ENDTYPE,
     "procedure": TokenTypes.PROC,
     "use": TokenTypes.USE,
+    "namelist": TokenTypes.NAMELIST,
 }
 
 

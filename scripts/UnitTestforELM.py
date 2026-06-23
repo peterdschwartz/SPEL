@@ -19,7 +19,7 @@ from scripts.fortran_modules import FortranModule, get_filename_from_module
 from scripts.helper_functions import construct_call_tree
 from scripts.logging_configs import get_logger
 from scripts.nml.analyze_ifs import get_if_blocks
-from scripts.nml.analyze_namelist import find_all_namelist, find_nml_ifs
+from scripts.nml.analyze_namelist import check_calltree_for_nml_guarded_vars, find_all_namelist, find_nml_ifs
 from scripts.types import ReadWrite
 from scripts.utilityFunctions import Variable
 from scripts.variable_analysis import determine_global_variable_status
@@ -360,6 +360,13 @@ def merge_elmtype_from_children(
                 t_status = status
                 t_status.ln = ln
                 curr_sub.elmtype_access_by_ln.setdefault(var, []).append(t_status)
+
+    fut_subs: list[Subroutine] = [sub for sub in sub_dict.values() if sub.unit_test_function]
+    for sub_obj in fut_subs:
+        print(sub_obj)
+        if "filter" not in sub_obj.name:
+            check_calltree_for_nml_guarded_vars(root_sub=sub_obj,sub_dict=sub_dict)
+            sys.exit(0)
 
     parent_sub.summarize_readwrite()
     return

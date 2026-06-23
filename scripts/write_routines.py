@@ -732,15 +732,20 @@ def create_update_mod(vars: dict[str, Variable], casedir: str):
     return
 
 
-def duplicate_clumps(typedict: dict[str, DerivedType]):
+def duplicate_clumps(type_dict: dict[str, DerivedType]):
     """
     Function that writes a Fortran module containing
     subroutines needed to duplicate the input data
     to an arbirtary number of gridcells
     """
-    file = open(f"{spel_output_dir}duplicateMod.F90", "w")
-    spaces = " " * 2
+    file = open(f"{spel_output_dir}/duplicateMod.F90", "w")
+    spaces = hio.indent(hio.Tab.reset)
     file.write("module duplicateMod\n")
+    
+    active_instances, use_statements, elminst_vars = hio.get_var_usage_and_elm_inst_vars(type_dict)
+    for stmt in  use_statements:
+        file.write(stmt)
+    file.write(f"\n{spaces}use elm_instMod\n")
     file.write("contains\n")
 
     file.write("subroutine duplicate_weights(unique_sites,total_gridcells)\n")
@@ -763,13 +768,6 @@ def duplicate_clumps(typedict: dict[str, DerivedType]):
     file.write("subroutine duplicate_clumps(mode,unique_sites,num_sites)\n")
 
     # Use statements
-    for type_name, dtype in typedict.items():
-        if dtype.active:
-            for var in dtype.instances.values():
-                if var.active:
-                    mod = var.declaration
-                    vname = var.name
-                    file.write(spaces + "use {}, only : {}\n".format(mod, vname))
 
     file.write(
         spaces + "use decompMod, only : bounds_type, get_clump_bounds, procinfo\n"
@@ -809,34 +807,34 @@ def duplicate_clumps(typedict: dict[str, DerivedType]):
 
     # First create mode for duplicating decomp related data.
     ignore_list = ["is_veg", "is_bareground", "wt_ed"]
-    for type_name, dtype in typedict.items():
-        if dtype.active and type_name in PHYSICAL_PROP_TYPE_LIST:
-            for var in dtype.instances.values():
-                if var.active:
-                    for field_var in dtype.components.values():
-                        if field_var.pointer:
-                            continue
-                        active = field_var.active
-                        bounds = field_var.bounds
-                        if not active:
-                            continue
-                        if "%" not in field_var.name:
-                            fname = var.name + "%" + field_var.name
-                            comp_name = field_var.name
-                        else:
-                            fname = field_var.name
-                            comp_name = field_var.name.split("%")[1]
-                        if comp_name in ignore_list:
-                            continue
+    for var in active_instances.values():
+        type_name = var.type
+        if type_name in PHYSICAL_PROP_TYPE_LIST:
+            dtype = type_dict[type_name]
+            for field_var in dtype.components.values():
+                if field_var.pointer:
+                    continue
+                active = field_var.active
+                bounds = field_var.bounds
+                if not active:
+                    continue
+                if "%" not in field_var.name:
+                    fname = var.name + "%" + field_var.name
+                    comp_name = field_var.name
+                else:
+                    fname = field_var.name
+                    comp_name = field_var.name.split("%")[1]
+                if comp_name in ignore_list:
+                    continue
 
-                        dim = bounds
-                        newdim = get_delta_from_dim(dim, "y")
-                        dim1 = get_delta_from_dim(dim, "n")
-                        dim1 = dim1.replace("_all", "")
-                        if newdim == "(:)" or newdim == "":
-                            continue
-                        file.write(spaces * 3 + fname + newdim + " &" + "\n")
-                        file.write(spaces * 4 + "= " + fname + dim1 + "\n")
+                dim = bounds
+                newdim = get_delta_from_dim(dim, "y")
+                dim1 = get_delta_from_dim(dim, "n")
+                dim1 = dim1.replace("_all", "")
+                if newdim == "(:)" or newdim == "":
+                    continue
+                file.write(spaces * 3 + fname + newdim + " &" + "\n")
+                file.write(spaces * 4 + "= " + fname + dim1 + "\n")
 
     file.write(spaces * 2 + "end do\n")
 
@@ -859,9 +857,11 @@ def duplicate_clumps(typedict: dict[str, DerivedType]):
     file.write(spaces * 3 + "begp=bounds%begp; endp=bounds%endp\n")
 
     # Duplicate statements for unit test variables
-    for type_name, dtype in typedict.items():
-        if dtype.active and type_name not in PHYSICAL_PROP_TYPE_LIST:
-            for var in dtype.instances.values():
+    for var in active_instances.values():
+        type_name = var.type
+        if type_name not in PHYSICAL_PROP_TYPE_LIST:
+            dtype = type_dict[type_name]
+            for field_var in dtype.components.values():
                 if not var.active:
                     continue
                 for field_var in dtype.components.values():

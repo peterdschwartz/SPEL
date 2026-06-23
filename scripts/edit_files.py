@@ -492,7 +492,7 @@ def get_used_mods(
     in_type: bool = False
 
     match_use = re.compile(r"^(use)\s+")
-    use_lines = line_it.get_lines(match_use)
+    use_lines = line_it.get_lines_by_regex(match_use)
     use_stmts = parse_use_stmts(use_lines)
     for stmt in use_stmts:
         mod = stmt.module
