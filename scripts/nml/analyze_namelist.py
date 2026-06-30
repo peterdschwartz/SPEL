@@ -4,11 +4,11 @@ from collections import defaultdict
 
 from scripts.analyze_subroutines import Subroutine
 from scripts.config import ELM_SRC
-from scripts.fortran_parser.boolen_expression import infer_condition_expectations
+from scripts.fortran_parser.boolen_expression import NO_EXPECTATION, ConditionExpectation, Expectation, expected_constraints, infer_condition_expectations, simplify_expectations
 from scripts.fortran_parser.spel_ast import NameListStatement, Program
 from scripts.fortran_parser.spel_parser import Parser
 from scripts.nml.namelist_cascade import NML_CASCADES
-from scripts.types import LineTuple, LogicalLineIterator, NameList
+from scripts.types import FlatIfs, LineTuple, LogicalLineIterator, NameList
 
 
 def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList]):
@@ -31,16 +31,19 @@ def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList])
             dep_vars = regex_deps.findall(cond)
             if_node.nml_cascades.update({v: NML_CASCADES[v] for v in dep_vars})
             if temp or dep_vars:
-                variables = { v for v in dep_vars + nml_vars }
-                infer_condition_expectations(expr=if_node.condition,variables=variables)
-
+                variables = {v for v in dep_vars + nml_vars}
+                if_node.condtional_expectation = infer_condition_expectations(
+                    expr=if_node.condition,
+                    variables=variables,
+                )
+                for v in variables:
+                    if_node.expected_namelist_values |= expected_constraints(if_node.condtional_expectation,v)
 
     return
 
 
-def check_calltree_for_nml_guarded_vars(
+def check_sub_for_nml_guarded_vars(
     root_sub: Subroutine,
-    sub_dict: dict[str, Subroutine],
 ):
     """
     Given a root subroutine node, traverse the calltree and determine
@@ -48,17 +51,18 @@ def check_calltree_for_nml_guarded_vars(
     """
     from pprint import pprint
 
-    exclusive_by_sub: dict[str, dict] = defaultdict(dict)
-    if root_sub.abstract_call_tree:
-        for subnode in root_sub.abstract_call_tree.traverse_postorder():
-            subname = subnode.node.subname
-            sub = sub_dict[subname]
-            exclusive = sub.elmtype_accesses_exclusive_to_namelist_ifs()
-            if exclusive:
-                exclusive_by_sub[subname] = {key: val for key, val in exclusive.items()}
-
-    pprint(exclusive_by_sub)
-
+    exclusive = root_sub.elmtype_accesses_exclusive_to_namelist_ifs()
+    pprint(exclusive)
+    var_dict: dict[str,ConditionExpectation] = {}
+    if exclusive:
+        for v, flatifs in exclusive.items():
+            combined_expectations: set[Expectation] = set()
+            for _if in flatifs:
+                combined_expectations.update(_if.expected_namelist_values)
+            combined = simplify_expectations(combined_expectations)
+            if combined != NO_EXPECTATION:
+                var_dict[v] = combined
+    pprint(var_dict)
     return
 
 

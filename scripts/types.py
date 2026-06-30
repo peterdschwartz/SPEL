@@ -8,6 +8,7 @@ from enum import Enum, auto
 from logging import Logger
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
 
+from scripts.fortran_parser.boolen_expression import ConditionExpectation, Expectation
 from scripts.fortran_parser.spel_ast import BlockStatement, Expression, IfConstruct
 from scripts.fortran_parser.tokens import Token, TokenTypes
 from scripts.logging_configs import get_logger
@@ -818,13 +819,16 @@ class IfType(Enum):
 
 
 class FlatIfs:
-    def __init__(self, start, end, cond, kind):
+    def __init__(self, start:int, end:int, cond:Expression, kind:IfType):
         self.start_ln: int = start
         self.end_ln: int = end
         self.condition: Expression = cond
         self.kind: IfType = kind
         self.nml_vars: dict[str, NameList] = {}
         self.nml_cascades: dict[str, Dependence] = {}
+        self.condtional_expectation: ConditionExpectation
+        self.expected_namelist_values: set[Expectation] = set()
+
 
     def __str__(self):
         return f"{self.kind.name} L{self.start_ln}-{self.end_ln} {self.condition}"
@@ -839,6 +843,21 @@ class FlatIfs:
             cond=self.condition,
             consequence=BlockStatement(tok=tok),
         )
+    def copy(self)->FlatIfs:
+        return deepcopy(self)
+
+    def __hash__(self):
+        return hash((self.start_ln, self.end_ln, str(self.condition)))
+
+    def __eq__(self,other):
+        if not isinstance(other,FlatIfs):
+            return False
+        else:
+            return bool(
+                self.start_ln == other.start_ln 
+                and self.end_ln == other.end_ln
+                and str(self.condition) == str(self.condition)
+            )
 
 
 class Pairs(NamedTuple):

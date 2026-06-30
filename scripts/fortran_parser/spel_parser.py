@@ -162,7 +162,9 @@ class Parser:
             self.cur_token = Token(Tok.TYPE, "type")
         elif not self.is_first_token() and self.curTokenIs(Tok.TYPE_DEF):
             self.cur_token = Token(Tok.IDENT, "type")
+
         # self.logger.debug(f"{self.cur_token} -> {self.peek_token}")
+
         self.lineno = self.lexer.cur_ln
         return
 
@@ -788,6 +790,7 @@ class Parser:
 
         return expr
 
+    @Trace.trace_decorator("parse_infix_expr")
     def parse_infix_expr(self, left: Expression) -> Expression:
         """
         (parse_infix_expr)

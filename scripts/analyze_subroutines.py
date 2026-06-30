@@ -5,7 +5,7 @@ import os.path
 import re
 import sys
 from collections import defaultdict
-from pprint import pformat
+from pprint import pformat, pprint
 from typing import Any, Optional
 
 import scripts.config as cfg
@@ -1185,15 +1185,10 @@ class Subroutine(object):
     def _get_ptr_targets(self, pot_ptr: str) -> list[str]:
         return self.ptr_vars.get(pot_ptr, [pot_ptr])
 
-    def elmtype_accesses_exclusive_to_namelist_ifs(
-        self,
-    ) -> dict[str, list[tuple[ReadWrite, FlatIfs]]]:
+    def elmtype_accesses_exclusive_to_namelist_ifs(self) -> dict[str, set[FlatIfs]]:
         """
         Return ELM derived-type fields whose accesses occur only inside namelist-gated
         flat if blocks.
-
-        Each returned access is paired with the innermost matching FlatIfs, whose
-        condition is the effective namelist-dependent Expression for that block.
         """
 
         nml_ifs = [
@@ -1202,37 +1197,22 @@ class Subroutine(object):
             if flat_if.nml_vars or flat_if.nml_cascades
         ]
 
-        def matching_namelist_ifs(ln: int) -> list[FlatIfs]:
-            matches = [
-                flat_if
-                for flat_if in nml_ifs
-                if flat_if.start_ln <= ln <= flat_if.end_ln
-            ]
+        def matching_namelist_if(access: ReadWrite) -> Optional[FlatIfs]:
+            for x_if in nml_ifs:
+                if x_if.start_ln <= access.ln <= x_if.end_ln:
+                    return x_if.copy()
+            return None
 
-            matches.sort(key=lambda flat_if: flat_if.end_ln - flat_if.start_ln)
-            return matches
+        exclusive: dict[str, set[FlatIfs]] = {}
 
-        exclusive: dict[str, list[tuple[ReadWrite, FlatIfs]]] = {}
 
         for elm_field, accesses in self.elmtype_access_by_ln.items():
-            if not accesses:
-                continue
+            guarded_accesses = [ matching_namelist_if(rw) for rw in accesses]
+            guarded_accesses = [_if for _if in guarded_accesses if _if is not None]
 
-            guarded_accesses: list[tuple[ReadWrite, FlatIfs]] = []
-
-            for access in accesses:
-                matches = matching_namelist_ifs(access.ln)
-
-                if not matches:
-                    guarded_accesses = []
-                    break
-
-                innermost_nml_if = matches[0]
-                guarded_accesses.append((access, innermost_nml_if))
-
-            if guarded_accesses:
-                exclusive[elm_field] = guarded_accesses
-
+            # check if every access is a guarded access
+            if len(guarded_accesses) == len(accesses):
+                exclusive[elm_field] = set(guarded_accesses)
         return exclusive
 
     def sort_inputs_outputs(self):

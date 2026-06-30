@@ -1,14 +1,13 @@
 from __future__ import annotations
-import sys
 
-from pprint import pformat
 import re
+import sys
 from copy import deepcopy
+from pprint import pformat
 from typing import TYPE_CHECKING, Optional
 
 from scripts.fortran_parser.sections import parse_blocks
-from scripts.fortran_parser.spel_ast import (Expression, IfConstruct,
-                                             InfixExpression)
+from scripts.fortran_parser.spel_ast import Expression, IfConstruct, InfixExpression
 
 if TYPE_CHECKING:
     from scripts.analyze_subroutines import Subroutine
@@ -29,7 +28,10 @@ def AND(a, b):
     )
 
 
-def flatten_if(if_node: IfConstruct, context_guard: Optional[Expression]=None) -> list[FlatIfs]:
+def flatten_if(
+    if_node: IfConstruct,
+    context_guard: Optional[Expression] = None,
+) -> list[FlatIfs]:
     """
     Takes an if node turns it into a flattened list of conditions and start/end line numbers
     """
@@ -41,7 +43,7 @@ def flatten_if(if_node: IfConstruct, context_guard: Optional[Expression]=None) -
     # First, the main IF
     start_ln = if_node.lineno
     end_ln = if_node.end_ln
-    flat_blocks.append(FlatIfs(start_ln, end_ln, g_if, IfType.IF))
+    flat_blocks.append(FlatIfs(start=start_ln, end=end_ln, cond=g_if, kind=IfType.IF))
 
     for stmt in if_node.consequence.statements:
         if isinstance(stmt, IfConstruct):
@@ -51,7 +53,7 @@ def flatten_if(if_node: IfConstruct, context_guard: Optional[Expression]=None) -
     for idx, elif_node in enumerate(if_node.else_ifs, start=1):
         g_elif = AND(context_guard, guards[idx])
         flat_blocks.append(
-            FlatIfs(elif_node.lineno, elif_node.end_ln, g_elif, IfType.ELSEIF)
+            FlatIfs(start=elif_node.lineno, end=elif_node.end_ln, cond=g_elif, kind=IfType.ELSEIF)
         )
         for stmt in elif_node.consequence.statements:
             if isinstance(stmt, IfConstruct):
@@ -60,7 +62,7 @@ def flatten_if(if_node: IfConstruct, context_guard: Optional[Expression]=None) -
     if if_node.else_ and else_guard is not None:
         g_else = AND(context_guard, else_guard)
         flat_blocks.append(
-            FlatIfs(if_node.else_.lineno, if_node.else_.end_ln, g_else, IfType.ELSE)
+            FlatIfs(start=if_node.else_.lineno, end=if_node.else_.end_ln, cond=g_else, kind=IfType.ELSE)
         )
         for stmt in if_node.else_.alternative.statements:
             if isinstance(stmt, IfConstruct):
@@ -77,7 +79,7 @@ def get_if_blocks(sub: Subroutine):
     """
     lines = sub.sub_lines
 
-    debug_sub = 'xxxx'
+    debug_sub = "xxxx"
     verbose = True if sub.name == debug_sub else False
 
     regex_if_start = re.compile(r"^\s*if\s*\((.*?)\)\s*(then)?")
@@ -96,7 +98,7 @@ def get_if_blocks(sub: Subroutine):
         sub.if_blocks = if_statements
         flat_ifs: list[FlatIfs] = []
         for ifnode in if_statements:
-            assert isinstance(ifnode,IfConstruct)
+            assert isinstance(ifnode, IfConstruct)
             flat_ifs.extend(flatten_if(ifnode))
         sub.flat_ifs = flat_ifs
     sub.ifs_analyzed = True

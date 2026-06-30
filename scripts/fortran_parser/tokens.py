@@ -128,7 +128,7 @@ class Token:
     literal: str
 
     def __str__(self):
-        return f"{self.literal}"
+        return f"{self.literal}[{self.token}]"
 
 
 def lookup_identifer(ident: str) -> TokenTypes:

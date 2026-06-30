@@ -1,4 +1,5 @@
 import logging
+from pprint import pprint
 import re
 import sys
 
@@ -19,7 +20,11 @@ from scripts.fortran_modules import FortranModule, get_filename_from_module
 from scripts.helper_functions import construct_call_tree
 from scripts.logging_configs import get_logger
 from scripts.nml.analyze_ifs import get_if_blocks
-from scripts.nml.analyze_namelist import check_calltree_for_nml_guarded_vars, find_all_namelist, find_nml_ifs
+from scripts.nml.analyze_namelist import (
+    check_sub_for_nml_guarded_vars,
+    find_all_namelist,
+    find_nml_ifs,
+)
 from scripts.types import ReadWrite
 from scripts.utilityFunctions import Variable
 from scripts.variable_analysis import determine_global_variable_status
@@ -81,6 +86,7 @@ def create_unit_test(
         else:
             os.system(f"rm -rf {case_dir}/*")
             os.system(f"rm {scripts_dir}/*.pkl")
+            os.system(f"rm {spel_output_dir}/*.F90")
             preprocess = True
 
     # Retrieve possible interfaces
@@ -304,7 +310,7 @@ def process_subroutines_for_unit_test(
         if dtype.init_sub_name:
             dtype.init_sub_ptr = sub_dict[dtype.init_sub_name]
 
-    if False: #not cfg.options.db_mode:
+    if False:  # not cfg.options.db_mode:
         ok = query_active_variables(sub_dict)
         if not ok:
             sys.exit("Expected database to return non-empty result")
@@ -361,11 +367,13 @@ def merge_elmtype_from_children(
                 t_status.ln = ln
                 curr_sub.elmtype_access_by_ln.setdefault(var, []).append(t_status)
 
-    fut_subs: list[Subroutine] = [sub for sub in sub_dict.values() if sub.unit_test_function]
+    fut_subs: list[Subroutine] = [
+        sub for sub in sub_dict.values() if sub.unit_test_function
+    ]
     for sub_obj in fut_subs:
         print(sub_obj)
         if "filter" not in sub_obj.name:
-            check_calltree_for_nml_guarded_vars(root_sub=sub_obj,sub_dict=sub_dict)
+            check_sub_for_nml_guarded_vars(root_sub=sub_obj)
             sys.exit(0)
 
     parent_sub.summarize_readwrite()

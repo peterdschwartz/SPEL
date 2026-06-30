@@ -1,3 +1,10 @@
+from __future__ import annotations
+from collections.abc import Iterable
+from itertools import combinations
+
+from dataclasses import dataclass
+from typing import TypeAlias
+
 from scripts.fortran_parser.spel_ast import (
     Expression,
     Identifier,
@@ -5,6 +12,66 @@ from scripts.fortran_parser.spel_ast import (
     InfixExpression,
     PrefixExpression,
 )
+
+
+@dataclass(frozen=True)
+class Expectation:
+    variable: str
+    constraint: str
+
+    def to_fortran(self)->str:
+        if self.constraint == 'False':
+            return f".not. {self.variable}"
+        elif self.constraint == 'True':
+            return self.variable
+        else:
+            return f"{self.variable} {self.constraint}"
+
+@dataclass(frozen=True)
+class AllOf:
+    items: tuple["ConditionExpectation", ...]
+
+    def to_fortran(self)->str:
+        return ' .and. '.join([item.to_fortran() for item in self.items])
+
+
+@dataclass(frozen=True)
+class AnyOf:
+    items: tuple["ConditionExpectation", ...]
+
+    def to_fortran(self)->str:
+        return ' .or. '.join([item.to_fortran() for item in self.items])
+
+
+ConditionExpectation: TypeAlias = Expectation | AllOf | AnyOf
+
+
+def expected_constraints(
+    condition: ConditionExpectation,
+    variable: str,
+) -> set[Expectation]:
+    """
+    Helper function to pick out the constraints from a specific variable of interest
+    from a ConditionExpectation instance
+    """
+    match condition:
+        case Expectation(var, constraint):
+            if var == variable:
+                return {Expectation(variable=var,constraint=constraint)}
+            return set()
+
+        case AllOf(items):
+            constraints: set[Expectation] = set()
+            for item in items:
+                constraints |= expected_constraints(item, variable)
+            return constraints
+
+        case AnyOf(items):
+            constraints: set[Expectation] = set()
+            for item in items:
+                constraints |= expected_constraints(item, variable)
+            return constraints
+
 
 _LOGICAL_AND = {".and.", "and"}
 _LOGICAL_OR = {".or.", "or"}
@@ -44,6 +111,38 @@ _REVERSED_COMPARISON = {
     ".le.": ".ge.",
 }
 
+NO_EXPECTATION = AllOf(())
+
+
+
+def simplify_expectations(items: set[Expectation])->ConditionExpectation:
+    """
+    """
+    res: set[Expectation] = items.copy()
+    to_remove: set[Expectation] = set()
+    for left, right in combinations(items,2):
+        if _are_complete(left,right):
+            to_remove.add(left)
+            to_remove.add(right)
+
+    res.difference_update(to_remove)
+    return _any_of(*res)
+
+def _are_complete(left: Expectation, right: Expectation)->bool:
+    """
+    Checks if two Expectations for the same variable form the complete
+    range of possible values for the variable
+    """
+
+    if left.variable != right.variable:
+        return False
+
+    if left.constraint in ['True', 'False']:
+        lvalue = left.constraint
+        rvalue = right.constraint
+        return not (rvalue == lvalue)
+    return False
+
 
 def _negate_comparison_operator(op: str) -> str:
     return _NEGATED_COMPARISON.get(op.lower(), f".not. ({op})")
@@ -53,37 +152,110 @@ def _reverse_comparison_operator(op: str) -> str:
     return _REVERSED_COMPARISON.get(op.lower(), op)
 
 
-def _merge_expectation_maps(
-    left: dict[str, list[str]], right: dict[str, list[str]]
-) -> dict[str, list[str]]:
-    merged = {name: values.copy() for name, values in left.items()}
-    for name, values in right.items():
-        merged.setdefault(name, []).extend(values)
-    return merged
+def _is_no_expectation(expectation: ConditionExpectation) -> bool:
+    return isinstance(expectation, AllOf) and not expectation.items
 
 
-def _combine_expectation_alternatives(
-    left: list[dict[str, list[str]]], right: list[dict[str, list[str]]]
-) -> list[dict[str, list[str]]]:
-    return [_merge_expectation_maps(a, b) for a in left for b in right]
+def _all_of(*items: ConditionExpectation) -> ConditionExpectation:
+    """
+    """
+    flattened: list[ConditionExpectation] = []
+
+    for item in items:
+        if _is_no_expectation(item):
+            continue
+
+        if isinstance(item, AllOf):
+            flattened.extend(item.items)
+        else:
+            flattened.append(item)
+
+    if not flattened:
+        return NO_EXPECTATION
+
+    if len(flattened) == 1:
+        return flattened[0]
+
+    return AllOf(tuple(flattened))
+
+
+def _any_of(*items: ConditionExpectation) -> ConditionExpectation:
+    """
+    _any_of(*A):
+    * For A = _NO_EXPECTATION, returns _NO_EXPECTATION
+    * For A = A, AnyOf(B,C), return AnyOf(A,B,C)
+    else returns AnyOf(A,X)
+    """
+    flattened: list[ConditionExpectation] = []
+
+    for item in items:
+        if isinstance(item, AnyOf):
+            flattened.extend(item.items)
+        else:
+            flattened.append(item)
+
+    if not flattened:
+        return NO_EXPECTATION
+
+    if len(flattened) == 1:
+        return flattened[0]
+
+    return AnyOf(tuple(flattened))
+
+
+def _expectation_alternatives(
+    expectation: ConditionExpectation,
+) -> tuple[tuple[Expectation, ...], ...]:
+    if isinstance(expectation, Expectation):
+        return ((expectation,),)
+
+    if isinstance(expectation, AnyOf):
+        alternatives: list[tuple[Expectation, ...]] = []
+        for item in expectation.items:
+            alternatives.extend(_expectation_alternatives(item))
+        return tuple(alternatives)
+
+    alternatives = [()]
+    for item in expectation.items:
+        item_alternatives = _expectation_alternatives(item)
+        alternatives = [
+            alternative + item_alternative
+            for alternative in alternatives
+            for item_alternative in item_alternatives
+        ]
+
+    return tuple(alternatives)
 
 
 def infer_condition_expectations(
     expr: Expression,
     variables: set[str],
     truth: bool = True,
-) -> list[dict[str, list[str]]]:
+) -> ConditionExpectation:
     """
-    Return possible expectation alternatives for tracked variables.
+    Return tracked-variable expectations required for an expression.
+
+    `AllOf` means every child expectation must hold.
+    `AnyOf` means any child expectation may make the condition hold.
+    `AllOf(())` means no useful tracked-variable expectation was inferred.
 
     Example:
         a > 3 .and. flag
 
     returns:
-        [{"a": ["> 3"], "flag": ["True"]}]
+        AllOf((
+            Expectation("a", "> 3"),
+            Expectation("flag", "True"),
+        ))
 
-    For `.or.`, multiple alternatives are returned because either side may make
-    the condition true.
+    Example:
+        a > 3 .or. flag
+
+    returns:
+        AnyOf((
+            Expectation("a", "> 3"),
+            Expectation("flag", "True"),
+        ))
     """
     if isinstance(expr, PrefixExpression) and expr.operator.lower() in _LOGICAL_NOT:
         return infer_condition_expectations(expr.right_expr, variables, not truth)
@@ -96,29 +268,32 @@ def infer_condition_expectations(
             right = infer_condition_expectations(expr.right_expr, variables, truth)
 
             if truth:
-                return _combine_expectation_alternatives(left, right)
+                return _all_of(left, right)
 
-            return left + right
+            return _any_of(left, right)
 
         if op in _LOGICAL_OR:
             left = infer_condition_expectations(expr.left_expr, variables, truth)
             right = infer_condition_expectations(expr.right_expr, variables, truth)
 
             if truth:
-                return left + right
+                return _any_of(left, right)
 
-            return _combine_expectation_alternatives(left, right)
+            return _all_of(left, right)
 
         if op in _NEGATED_COMPARISON:
-            expectations: dict[str, list[str]] = {}
+            expectations: list[ConditionExpectation] = []
 
             if (
                 isinstance(expr.left_expr, Identifier)
                 and expr.left_expr.value in variables
             ):
                 expected_op = op if truth else _negate_comparison_operator(op)
-                expectations.setdefault(expr.left_expr.value, []).append(
-                    f"{expected_op} {expr.right_expr}"
+                expectations.append(
+                    Expectation(
+                        expr.left_expr.value,
+                        f"{expected_op} {expr.right_expr}",
+                    )
                 )
 
             if (
@@ -129,34 +304,39 @@ def infer_condition_expectations(
                 expected_op = (
                     reversed_op if truth else _negate_comparison_operator(reversed_op)
                 )
-                expectations.setdefault(expr.right_expr.value, []).append(
-                    f"{expected_op} {expr.left_expr}"
+                expectations.append(
+                    Expectation(
+                        expr.right_expr.value,
+                        f"{expected_op} {expr.left_expr}",
+                    )
                 )
 
-            return [expectations] if expectations else [{}]
+            return _all_of(*expectations)
 
     if isinstance(expr, Identifier) and expr.value in variables:
-        return [{expr.value: [str(truth)]}]
+        return Expectation(expr.value, str(truth))
 
-    return [{}]
+    return NO_EXPECTATION
 
 
 def log_if_condition_expectations(
     if_construct: IfConstruct,
     variables: dict[str, object],
     logger=print,
-) -> list[dict[str, list[str]]]:
+) -> ConditionExpectation:
     """
     Log tracked-variable expectations required for an IfConstruct condition
     to evaluate True.
     """
-    alternatives = infer_condition_expectations(
+    expectation = infer_condition_expectations(
         if_construct.condition,
-        { v for v in variables },
+        set(variables),
         truth=True,
     )
 
-    useful_alternatives = [alt for alt in alternatives if alt]
+    alternatives = _expectation_alternatives(expectation)
+    useful_alternatives = [alternative for alternative in alternatives if alternative]
+
     for idx, alternative in enumerate(useful_alternatives, start=1):
         alt_suffix = (
             f" alternative {idx}/{len(useful_alternatives)}"
@@ -164,12 +344,12 @@ def log_if_condition_expectations(
             else ""
         )
 
-        for name, expected_values in alternative.items():
-            current_value = variables.get(name)
-            for expected in expected_values:
-                logger(
-                    f"if line {if_construct.lineno}{alt_suffix}: "
-                    f"{name} current={current_value!r}, expected {expected}"
-                )
+        for item in alternative:
+            current_value = variables.get(item.variable)
+            logger(
+                f"if line {if_construct.lineno}{alt_suffix}: "
+                f"{item.variable} current={current_value!r}, "
+                f"expected {item.constraint}"
+            )
 
-    return alternatives
+    return expectation

@@ -1,4 +1,9 @@
 from scripts.fortran_parser.boolen_expression import (
+    AllOf,
+    AnyOf,
+    ConditionExpectation,
+    Expectation,
+    expected_constraints,
     infer_condition_expectations,
     log_if_condition_expectations,
 )
@@ -12,7 +17,8 @@ from scripts.fortran_parser.spel_ast import (
 )
 from scripts.fortran_parser.tokens import Token, TokenTypes
 
-tok = Token(token=TokenTypes.EOF, literal='temp')
+tok = Token(token=TokenTypes.EOF, literal="temp")
+
 
 def test_infer_condition_expectations_steps_boolean_expression():
     # (temperature > 273.15 .and. active) .or. .not. frozen
@@ -25,15 +31,15 @@ def test_infer_condition_expectations_steps_boolean_expression():
             left=InfixExpression(
                 tok=tok,
                 op=">",
-                left=Identifier(tok=tok,value="temperature"),
-                right=FloatLiteral(tok=tok,val=273.15,prec=""),
+                left=Identifier(tok=tok, value="temperature"),
+                right=FloatLiteral(tok=tok, val=273.15, prec=""),
             ),
-            right=Identifier(tok=tok,value="active"),
+            right=Identifier(tok=tok, value="active"),
         ),
         right=PrefixExpression(
-            tok = tok,
+            tok=tok,
             op=".not.",
-            right=Identifier(tok=tok,value="frozen"),
+            right=Identifier(tok=tok, value="frozen"),
         ),
     )
 
@@ -44,24 +50,32 @@ def test_infer_condition_expectations_steps_boolean_expression():
         "ignored": 1,
     }
 
+    # (temperature > 273.15 .and. active) .or. .not. frozen
     expectations = infer_condition_expectations(
         expr,
         tracked_variables,
         truth=True,
     )
 
-    assert expectations == [
-        {
-            "temperature": ["> 273.15"],
-            "active": ["True"],
-        },
-        {
-            "frozen": ["False"],
-        },
-    ]
+    print("constraints for temperature: ", expected_constraints(expectations,'frozen'))
+
+    answer = AnyOf(
+        (
+            AllOf(
+                (
+                    Expectation("temperature", "> 273.15"),
+                    Expectation("active", "True"),
+                )
+            ),
+            Expectation("frozen","False"),
+        )
+    )
+
+    assert expectations == answer
 
 
 def test_log_if_condition_expectations_logs_each_true_alternative():
+    """"""
     messages = []
 
     if_construct = IfConstruct(
@@ -69,11 +83,11 @@ def test_log_if_condition_expectations_logs_each_true_alternative():
         cond=InfixExpression(
             tok=tok,
             op=".or.",
-            left=Identifier(tok=tok,value="active"),
+            left=Identifier(tok=tok, value="active"),
             right=PrefixExpression(
                 tok=tok,
                 op=".not.",
-                right=Identifier(tok=tok,value="frozen"),
+                right=Identifier(tok=tok, value="frozen"),
             ),
         ),
         consequence=BlockStatement(tok=tok),
