@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["scripts*","db*"]
+include = ["spel*"]
 
 [project.scripts]
-spel = "scripts.cli:main"
+spel = "spel.cli:main"
