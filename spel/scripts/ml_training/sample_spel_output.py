@@ -40,8 +40,9 @@ def build_soil_filters(ds: Dataset):
     return soil_cols, soil_pfts
 
 
-def sample(base_fn: str, samples_per_file: int, var_name_set: set[str]):
-    data_dir = Path(unittests_dir) / "input-data"
+def sample(case_name: str, base_fn: str, samples_per_file: int, var_name_set: set[str]):
+    data_dir = Path(unittests_dir) / "input-data" / case_name
+    assert data_dir.exists(), f"Mising {data_dir} directory"
 
     out_fn = data_dir / f"{base_fn}-training_samples.nc"
     if out_fn.exists():
@@ -71,10 +72,7 @@ def sample(base_fn: str, samples_per_file: int, var_name_set: set[str]):
         if ntime < samples_per_file:
             raise ValueError(f"{f} has fewer than {samples_per_file} timesteps")
 
-        # randomly choose indices
         idx = rng.choice(ntime, size=samples_per_file, replace=False)
-
-        # sort so time stays ordered
         idx = np.sort(idx)
 
         # subset
@@ -104,11 +102,10 @@ def sample(base_fn: str, samples_per_file: int, var_name_set: set[str]):
 
         sampled_datasets.append(ds_compressed)
 
-    # combine samples from all files
     combined = xr.concat(sampled_datasets, dim="time")
 
-    # optional: shuffle time dimension again
+    # shuffle time dimension again
     perm = rng.permutation(combined.sizes["time"])
     combined = combined.isel(time=perm).load()
-    # write output
+
     combined.to_netcdf(out_fn)

@@ -8,6 +8,8 @@ import spel.scripts.io.helper as hio
 from spel.scripts.DerivedType import DerivedType
 from spel.scripts.export_objects import unpickle_unit_test
 from spel.scripts.fortran_modules import FortranModule
+from spel.scripts.ml_training.ml_config import MODEL_ORDER_NAME
+from spel.scripts.types import FunctionalUnitTest
 from spel.scripts.utilityFunctions import Variable
 
 SUB_NAME = "create_emulator_fields"
@@ -53,14 +55,14 @@ def gen_subroutine_signature(
 
     stmts = hio.var_type_use_statements(active_instances, type_dict)
     tabs = hio.indent(hio.Tab.shift)
-    stmts.append(f"{tabs}use filtermod, only : clumpfilter\n")
+    stmts.append(f"use filtermod, only : clumpfilter\n")
 
     arg_str = ",&\n".join([f"{tabs}{inst}" for inst in needed_instances.keys()])
     if arg_str:
         arg_str = f"{arg_str},&\n"
     arg_decls = (
         [
-            f"{tabs}type({var.type}), intent(in) :: {var.name}"
+            f"type({var.type}), intent(in) :: {var.name}"
             for var in active_instances.values()
         ]
         if arg_str
@@ -69,8 +71,8 @@ def gen_subroutine_signature(
 
     sig = textwrap.dedent(f"""
     subroutine {SUB_NAME}({arg_str}{tabs}emulator, filter)
-{''.join(stmts)}
-{'\n'.join(arg_decls)}
+        {''.join(stmts)}
+        {'\n'.join(arg_decls)}
        type({EMULATOR_TYPE}), intent(inout) :: emulator
        type(clumpfilter), intent(in)    :: filter
       """)
@@ -82,9 +84,8 @@ def generate_mapping_module(
     inputs_nc: Path,
     outputs_nc: Path,
     out_f90: Path,
+    fut: FunctionalUnitTest,
 ) -> None:
-
-    mod_dict, sub_dict, type_dict = unpickle_unit_test()
 
     in_order = read_var_order(inputs_nc, "spel_input_vars")
     out_order = read_var_order(outputs_nc, "spel_output_vars")
@@ -95,17 +96,13 @@ def generate_mapping_module(
     # TODO: choose correct filters from the call signature of elm subroutine
     in_add_lines = []
     for v in in_order:
-        in_add_lines.append(
-            f"{tabs}call in_list%add({v}, filter%num_soilc, filter%soilc)"
-        )
+        in_add_lines.append(f"call in_list%add({v}, filter%num_soilc, filter%soilc)")
 
     out_add_lines = []
     for v in out_order:
-        out_add_lines.append(
-            f"{tabs}call out_list%add({v},filter%num_soilc, filter%soilc)"
-        )
+        out_add_lines.append(f"call out_list%add({v},filter%num_soilc, filter%soilc)")
 
-    sig = gen_subroutine_signature(in_order, out_order, type_dict)
+    sig = gen_subroutine_signature(in_order, out_order, fut.type_dict)
     body = textwrap.dedent(f"""
     {sig}
 
@@ -137,24 +134,29 @@ def generate_mapping_module(
     end module {FORT_MOD_NAME}""")
 
     out_f90.write_text(f90_src)
+    return
 
 
-def main():
-    from spel.scripts.config import spel_mods_dir, unittests_dir
+def gen_ftorch_bindings(case_name: str):
+    """
+    Function that will generate the FTorch bindings corresponding to the trained emulator
+    """
+    from spel.scripts.config import input_data_dir, spel_mods_dir, unittests_dir
 
-    root = Path(unittests_dir)
-    order_dir = root / "input-data"
-
-    inputs_nc = order_dir / "model-inputs-order.nc"
-    outputs_nc = order_dir / "model-outputs-order.nc"
+    inputs_nc = input_data_dir / case_name / f"{MODEL_ORDER_NAME}-inputs.nc"
+    outputs_nc = input_data_dir / case_name / f"{MODEL_ORDER_NAME}-outputs.nc"
 
     assert inputs_nc.exists(), f"{inputs_nc} does not exist"
     assert outputs_nc.exists(), f"{outputs_nc} does not exist"
 
-    out_f90 = Path(spel_mods_dir) / "ftorch" / "src" / f"{FORT_MOD_NAME}.F90"
-    generate_mapping_module(inputs_nc, outputs_nc, out_f90)
-    print("Wrote", out_f90)
+    case_dir = unittests_dir / case_name
+    assert case_dir.exists(), f"No matching unit-test directory for {case_dir}"
 
+    out_f90 = case_dir / f"{FORT_MOD_NAME}.F90"
+    if out_f90.exists():
+        out_f90.unlink()
 
-if __name__ == "__main__":
-    main()
+    fut = unpickle_unit_test(casename=case_name)
+    generate_mapping_module(inputs_nc, outputs_nc, out_f90, fut)
+
+    return

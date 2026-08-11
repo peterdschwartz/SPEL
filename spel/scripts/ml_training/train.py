@@ -7,126 +7,14 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from spel.scripts.config import unittests_dir
+from spel.scripts.ml_training.dataset_adapter import NetCDFAdapter
+from spel.scripts.ml_training.model import SpelEmulator
+from spel.scripts.ml_training.mlp import build_mlp
 
 
-class NetCDFFunctionDataset(Dataset):
-    def __init__(
-        self,
-        input_path,
-        output_path,
-        input_dims=("time", "column"),
-    ):
-        self.ds_in = xr.open_dataset(input_path)
-        self.ds_out = xr.open_dataset(output_path)
 
-        # Ensure matching time/column sizes
-        for d in input_dims:
-            assert self.ds_in.sizes[d] == self.ds_out.sizes[d], f"dim mismatch on {d}"
+def train(data_dir: Path):
 
-        # Select float variables only (ignore ints/indices)
-        in_vars = [
-            v
-            for v in self.ds_in.data_vars
-            if np.issubdtype(self.ds_in[v].dtype, np.floating)
-        ]
-        out_vars = [
-            v
-            for v in self.ds_out.data_vars
-            if np.issubdtype(self.ds_out[v].dtype, np.floating)
-        ]
-
-        # Restrict to the common dims only (time, column, and any shared extra dims)
-        ds_in_sel = self.ds_in[in_vars]
-        ds_out_sel = self.ds_out[out_vars]
-
-        ds_in_sel.attrs["spel_input_vars"] = ",".join([str(v) for v in in_vars])
-        ds_out_sel.attrs["spel_output_vars"] = ",".join([str(v) for v in out_vars])
-
-        ds_in_sel.to_netcdf(
-            Path(unittests_dir) / "input-data" / "model-inputs-order.nc"
-        )
-        ds_out_sel.to_netcdf(
-            Path(unittests_dir) / "input-data" / "model-outputs-order.nc"
-        )
-
-        # Stack time + column into a single sample dimension
-        X = (
-            ds_in_sel.to_array("feature")  # (feature, time, column, [other dims...])
-            .transpose("time", "column", "feature", ...)
-            .stack(sample=("time", "column"))  # (sample, feature, [other...])
-        )
-
-        Y = (
-            ds_out_sel.to_array("target")
-            .transpose("time", "column", "target", ...)
-            .stack(sample=("time", "column"))
-        )
-
-        print(
-            "Y per-feature std (min/median/max):",
-            np.min(np.std(Y, axis=0)),
-            np.median(np.std(Y, axis=0)),
-            np.max(np.std(Y, axis=0)),
-        )
-
-        # Explicitly enforce same number of samples (time * column)
-        n_samples = self.ds_in.sizes["time"] * self.ds_in.sizes["column"]
-        assert X.sizes["sample"] == n_samples
-        assert Y.sizes["sample"] == n_samples
-
-        X = X.data
-        Y = Y.data
-
-        # Flatten non-sample dims into feature/target vectors
-        X = X.reshape(n_samples, -1)
-        Y = Y.reshape(n_samples, -1)
-
-        # Mask out NaNs / fill values
-        # Here we just drop samples with any NaN in X or Y
-        x_mask = np.isfinite(X).all(axis=1)
-        y_mask = np.isfinite(Y).all(axis=1)
-        mask = x_mask & y_mask
-        X = X[mask]
-        Y = Y[mask]
-
-        assert X.shape[0] == Y.shape[0], "X and Y must have same number of samples"
-
-        X_mean = X.mean(axis=0, keepdims=True)
-        X_std = X.std(axis=0, keepdims=True) + 1e-6
-        X = (X - X_mean) / X_std
-
-        Y_mean = Y.mean(axis=0, keepdims=True)
-        Y_std = Y.std(axis=0, keepdims=True) + 1e-6
-        Y = (Y - Y_mean) / Y_std
-
-        self.X_mean = X_mean.astype(np.float32)
-        self.X_std = X_std.astype(np.float32)
-        self.Y_mean = Y_mean.astype(np.float32)
-        self.Y_std = Y_std.astype(np.float32)
-
-        self.X = torch.from_numpy(X.astype(np.float32))
-        self.Y = torch.from_numpy(Y.astype(np.float32))
-
-    def __len__(self):
-        return self.X.shape[0]
-
-    def __getitem__(self, idx):
-        return self.X[idx], self.Y[idx]
-
-
-def build_mlp(in_dim, out_dim, hidden_dim=128, num_layers=2):
-    layers = []
-    dim = in_dim
-    for _ in range(num_layers):
-        layers.append(nn.Linear(dim, hidden_dim))
-        layers.append(nn.ReLU())
-        dim = hidden_dim
-    layers.append(nn.Linear(dim, out_dim))
-    return nn.Sequential(*layers)
-
-
-def train():
-    data_dir = Path(unittests_dir) / "input-data"
     input_nc = data_dir / "spel-inputs-training_samples.nc"
     output_nc = data_dir / "spel-outputs-training_samples.nc"
     assert input_nc.exists(), f"Error {input_nc} Does Not Exist"
@@ -134,14 +22,25 @@ def train():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = NetCDFFunctionDataset(input_nc, output_nc)
+    dataset = NetCDFAdapter(input_nc, output_nc)
     in_dim = dataset.X.shape[1]
     out_dim = dataset.Y.shape[1]
+
     print(f"Samples: {len(dataset)}, in_dim: {in_dim}, out_dim: {out_dim}")
     print("X mean/std:", dataset.X.mean().item(), dataset.X.std().item())
     print("Y mean/std:", dataset.Y.mean().item(), dataset.Y.std().item())
 
-    Y_std = dataset.Y_std  # numpy
+    X_mean = dataset.X.mean(dim=0, keepdim=True)
+    X_std = dataset.X.std(dim=0, keepdim=True)
+    Y_mean = dataset.Y.mean(dim=0, keepdim=True)
+    Y_std = dataset.Y.std(dim=0,keepdim=True)
+
+    # X_std = X.std(axis=0, keepdims=True) + 1e-6
+    # X = (X - X_mean) / X_std
+    #
+    # Y_mean = Y.mean(axis=0, keepdims=True)
+    # Y_std = Y.std(axis=0, keepdims=True) + 1e-6
+    # Y = (Y - Y_mean) / Y_std
     Y_var_mean = (Y_std**2).mean()  # average output variance
     print("Avg target variance:", Y_var_mean)
 
@@ -159,7 +58,11 @@ def train():
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
     val_loader = DataLoader(validation_dataset, batch_size=128, shuffle=False)
 
-    model = build_mlp(in_dim, out_dim, hidden_dim=256, num_layers=2).to(device)
+    hidden_dim = 256
+    num_layers = 2
+    model = build_mlp(in_dim, out_dim, hidden_dim=hidden_dim, num_layers=num_layers).to(
+        device
+    )
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=0e-4)
     loss_fn = nn.MSELoss()
 
@@ -196,12 +99,24 @@ def train():
             f"Epoch {epoch} - norm MSE: {train_loss_norm:.3e},real MSE: {train_loss_real:.3e} Val: {val_loss_real:.3e}"
         )
 
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "in_dim": in_dim,
-            "out_dim": out_dim,
-        },
-        "spel_emulator.pt",
+
+def export_model(emu: SpelEmulator):
+
+    # Verify that serialization itself does not change the results.
+    loaded_model = torch.jit.load("spel_emulator_torchscript.pt")
+    loaded_model.eval()
+
+    test_input = torch.randn(8, in_dim)
+
+    with torch.no_grad():
+        expected = inference_model(test_input)
+        actual = loaded_model(test_input)
+
+    torch.testing.assert_close(
+        actual,
+        expected,
+        rtol=1.0e-6,
+        atol=1.0e-6,
     )
-    print("Saved model to spel_emulator.pt")
+
+    print("Saved FTorch-compatible model: spel_emulator_torchscript.pt")

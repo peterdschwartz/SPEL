@@ -8,7 +8,9 @@ from spel.scripts.export_objects import unpickle_unit_test
 
 
 def separate_inputs_outputs(
-    sub_dict: dict[str, Subroutine], inputs: set[str], outputs: set[str]
+    sub_dict: dict[str, Subroutine],
+    inputs: set[str],
+    outputs: set[str],
 ):
 
     subroutines = {
@@ -19,7 +21,7 @@ def separate_inputs_outputs(
     ignore = {"col_pp", "lun_pp", "veg_pp", "grc_pp", "top_pp"}
     for sub in subroutines.values():
         for var, rw in sub.elmtype_access_summary.items():
-            if var.split('%')[0] in ignore:
+            if var.split("%")[0] in ignore:
                 continue
             varname = var.replace("%", "__")
             if rw.status == "r":
@@ -31,19 +33,6 @@ def separate_inputs_outputs(
                 outputs.add(varname)
             else:
                 raise ValueError(f"Unknown variable status {var} {rw}")
-    return
-
-
-def prepare_data():
-    commit = "c76c282"
-    mod_dict, sub_dict, type_dict = unpickle_unit_test(commit)
-
-    input_base_fn = "spel-inputs"
-    output_base_fn = "spel-outputs"
-    data_dir = Path("../../unit-tests/input-data/")
-    inputs: set[str] = set()
-    outputs: set[str] = set()
-    separate_inputs_outputs(sub_dict, inputs, outputs)
     return
 
 

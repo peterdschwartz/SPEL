@@ -1,5 +1,6 @@
 import argparse
 import os
+from pathlib import Path
 import subprocess
 
 from spel.scripts.export_objects import unpickle_unit_test
@@ -8,6 +9,7 @@ from spel.scripts.ml_training.prepare_dataset import separate_inputs_outputs
 from spel.scripts.ml_training.sample_spel_output import sample
 from spel.scripts.ml_training.train import train
 from spel.scripts.profiler_context import profile_ctx
+from spel.scripts.config import unittests_dir
 
 SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -43,14 +45,15 @@ def sample_training(args):
     input_set: set[str] = set()
     output_set: set[str] = set()
     separate_inputs_outputs(unit_test.subroutine_dict, inputs=input_set, outputs=output_set)
-    sample("spel-inputs", samples_per_file=n, var_name_set=input_set)
-    sample("spel-outputs", samples_per_file=n, var_name_set=output_set)
-    summarize_data()
+    sample(args.case_name,"spel-inputs", samples_per_file=n, var_name_set=input_set)
+    sample(args.case_name,"spel-outputs", samples_per_file=n, var_name_set=output_set)
+    summarize_data(args.case_name)
     return
 
 
 def _train(args):
-    train()
+    data_dir = Path(unittests_dir) / f"input-data/{args.case_name}"
+    train(data_dir)
     return
 
 
@@ -236,6 +239,12 @@ def main():
     sample_parser.set_defaults(func=sample_training)
 
     train_parser = subparsers.add_parser("train", help="train nn")
+    train_parser.add_argument(
+        "-c",
+        required=True,
+        dest="case_name",
+        help="case name matching existing Pickled Functional Unit Test",
+    )
     train_parser.set_defaults(func=_train)
 
     cfg_parser = subparsers.add_parser(

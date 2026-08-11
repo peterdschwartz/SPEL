@@ -61,7 +61,7 @@ def test_sample_and_compress(tmp_path, monkeypatch):
     # run sample() in that directory
     monkeypatch.chdir(tmp_path)
     samples_per_file = 5
-    sample(base_fn=base_fn, samples_per_file=samples_per_file)
+    sample(case_name="data",base_fn=base_fn, samples_per_file=samples_per_file)
 
     out_path = tmp_path / f"{base_fn}-training_samples.nc"
     assert out_path.exists()

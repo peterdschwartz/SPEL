@@ -208,8 +208,8 @@ def summarize_and_print(
           pca.explained_variance_ratio_[:10])
 
 
-def summarize_data():
-    data_dir = Path(unittests_dir)/ "input-data"
+def summarize_data(casename: str):
+    data_dir = Path(unittests_dir)/ f"input-data/{casename}"
     input_nc = data_dir / "spel-inputs-training_samples.nc"
     output_nc = data_dir / "spel-outputs-training_samples.nc"
 

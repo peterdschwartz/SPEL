@@ -11,6 +11,7 @@ presets = database_app / "app/management/comands/presets/"
 unittests_dir = spel_dir / "unit-tests/"
 spel_mods_dir = spel_dir / "SourceFiles/"
 spel_output_dir = spel_dir / "script-output/"
+input_data_dir = unittests_dir / "input-data/"
 
 # E3SM root directory.
 E3SM_SRCROOT = spel_dir / "../E3SM"
