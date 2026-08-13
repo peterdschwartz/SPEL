@@ -19,10 +19,12 @@ dependencies = [
 	"colorlog>=6.9.0",
 	"mysqlclient",
 	"dotenv",
+	"mpi4py",
+	"scikit-learn",
 ]
 
 [tool.setuptools.packages.find]
-include = ["scripts"]
+include = ["spel*"]
 
 [project.scripts]
-spel = "scripts.cli:main"
+spel = "spel.cli:main"
