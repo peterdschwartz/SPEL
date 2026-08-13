@@ -1,10 +1,7 @@
-cmake_minimum_required(VERSION 3.16)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-project(spel_ftorch_demo LANGUAGES Fortran C)
+cmake_minimum_required(VERSION 3.18)
+project(spel_ftorch LANGUAGES Fortran C)
 
-# Assume FTorch is installed and provides a CMake package config.
-# Adjust package name / dirs to match your setup.
-find_package(FTORCH REQUIRED)
+find_package(FTorch REQUIRED)
 
 enable_language(Fortran)
 
@@ -12,25 +9,39 @@ set(CMAKE_Fortran_STANDARD 2008)
 set(CMAKE_Fortran_STANDARD_REQUIRED ON)
 
 add_library(spel_emulator
-    src/spel_emulator.F90
+    src/emulator.F90
+    src/field_mod.F90
+    src/kinds.F90
 )
 
 target_link_libraries(spel_emulator
+    PUBLIC
+    FTorch::ftorch
+)
+
+set(_spel_emulator_mods "${CMAKE_CURRENT_BINARY_DIR}/modules")
+# Place generated Fortran .mod files in a predictable directory so that
+# downstream Fortran targets (e.g. the driver test) can find them.
+set_target_properties(spel_emulator PROPERTIES
+  Fortran_MODULE_DIRECTORY "${_spel_emulator_mods}")
+
+
+target_include_directories(spel_emulator PUBLIC
+    $<BUILD_INTERFACE:${_spel_emulator_mods}>
+)
+
+enable_testing()
+
+add_executable(test_tiny
+    tests/test_tiny_emulator.F90
+)
+
+target_link_libraries(test_tiny
     PRIVATE
-        FTORCH::ftorch
+    spel_emulator
 )
 
-add_executable(test_spel_emulator
-    src/test_spel_emulator.F90
-)
-
-target_link_libraries(test_spel_emulator
-    PRIVATE
-        spel_emulator
-        FTORCH::ftorch
-)
-
-# Optional: where to place binaries
-set_target_properties(test_spel_emulator PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+add_test(
+    NAME test_tiny
+    COMMAND test_tiny
 )

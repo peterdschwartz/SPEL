@@ -84,7 +84,7 @@ def make_test_emulator(case_name: str) -> SpelEmulator:
     emulator = SpelEmulator(
         config,
         case_name,
-    )
+    ).double()
 
     with torch.no_grad():
         emulator.x_mean.copy_(torch.tensor([1.0, 2.0, 3.0, 4.0]))
@@ -107,25 +107,24 @@ def make_test_emulator(case_name: str) -> SpelEmulator:
                     [0.10, 0.40, -0.30, 0.20],
                     [-0.30, 0.10, 0.20, 0.40],
                 ],
-                dtype=torch.float32,
+                dtype=torch.float64,
             )
         )
 
         first.bias.copy_(
             torch.tensor(
                 [0.1, -0.2, 0.3, 0.0, -0.1, 0.2, -0.3, 0.4],
-                dtype=torch.float32,
+                dtype=torch.float64,
             )
         )
-
         second.weight.copy_(
             torch.tensor(
                 [[0.2, -0.1, 0.3, 0.4, -0.2, 0.1, 0.5, -0.3]],
-                dtype=torch.float32,
+                dtype=torch.float64,
             )
         )
 
-        second.bias.copy_(torch.tensor([0.25], dtype=torch.float32))
+        second.bias.copy_(torch.tensor([0.25], dtype=torch.float64))
 
     emulator.eval()
     return emulator
@@ -147,7 +146,7 @@ def test_spel_emulator_torchscript():
             [2.0, 4.0, 7.0, 8.0],
             [-1.0, 0.0, 1.0, 2.0],
         ],
-        dtype=torch.float32,
+        dtype=torch.float64,
     )
 
     emulator.make_trace()

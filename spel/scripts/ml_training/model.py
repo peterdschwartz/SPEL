@@ -36,19 +36,19 @@ class SpelEmulator(nn.Module):
 
         self.register_buffer(
             "x_mean",
-            torch.zeros(params.in_dim, dtype=torch.float32),
+            torch.zeros(params.in_dim, dtype=torch.float64),
         )
         self.register_buffer(
             "x_std",
-            torch.ones(params.in_dim, dtype=torch.float32),
+            torch.ones(params.in_dim, dtype=torch.float64),
         )
         self.register_buffer(
             "y_mean",
-            torch.zeros(params.out_dim, dtype=torch.float32),
+            torch.zeros(params.out_dim, dtype=torch.float64),
         )
         self.register_buffer(
             "y_std",
-            torch.ones(params.out_dim, dtype=torch.float32),
+            torch.ones(params.out_dim, dtype=torch.float64),
         )
         self.config = params
 
@@ -78,7 +78,7 @@ class SpelEmulator(nn.Module):
         emulator.to(device)
         emulator.eval()
 
-        return emulator
+        return emulator.double()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_normalized = (x - self.x_mean) / self.x_std
@@ -118,7 +118,7 @@ class SpelEmulator(nn.Module):
 
         example_input = torch.randn(
             (1, self.config.in_dim),
-            dtype=torch.float32,
+            dtype=torch.float64,
         )
 
         traced_model = torch.jit.trace(
