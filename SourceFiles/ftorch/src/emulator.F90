@@ -1,6 +1,6 @@
 module emulator_mod
    use iso_c_binding, only: c_int
-   use field_mod, only: field_list_t, unmap_buffer_to_fields, map_fields_to_buffer
+   use field_mod, only: field_list_t
    use kinds, only: rkind, ikind
    use ftorch, only: torch_model, torch_tensor, torch_model_load, &
                      torch_kCPU, torch_model_print_parameters, torch_model_forward, &
@@ -64,15 +64,22 @@ contains
       real(rkind), pointer, contiguous :: buf_in(:, :), buf_out(:, :)
 
       if (.not. this%initialized) then
-         stop "infer_from_field_lists: emulator not initialized"
+         error stop "emulator::infer - emulator not initialized"
       end if
+
+      if (inputs%n_fields .ne. size(inputs%fields)) then
+         error stop "emulator::infer - Didn't add all expected fields to input list"
+      end if 
+      if (outputs%n_fields .ne. size(outputs%fields)) then
+         error stop "emulator::infer - Didn't add all expected fields to output list"
+      end if 
 
       ! Allocate temporary host buffers
       allocate (buf_in(this%n_samples, this%in_dim))
       allocate (buf_out(this%n_samples, this%out_dim))
 
       ! Pack Fortran fields into flat input buffer
-      call map_fields_to_buffer(inputs, buf_in)
+      call inputs%map_to_buffer(buf_in)
 
       ! Copy buffer into FTorch input tensor
       ! (tensor, data_in, device_type, OPTIONAL: device_index, requires_grad)
@@ -81,7 +88,7 @@ contains
 
       ! Forward pass:  input tensor -> output tensor
       call torch_model_forward(this%model, [this%input_tensor], [this%output_tensor])
-      call unmap_buffer_to_fields(outputs, this%n_samples, buf_out)
+      call outputs%map_from_buffer(this%n_samples, buf_out)
 
       deallocate (buf_in)
       deallocate (buf_out)

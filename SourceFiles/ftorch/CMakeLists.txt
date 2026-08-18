@@ -8,6 +8,16 @@ enable_language(Fortran)
 set(CMAKE_Fortran_STANDARD 2008)
 set(CMAKE_Fortran_STANDARD_REQUIRED ON)
 
+set(CMAKE_Fortran_FLAGS "" CACHE STRING "Fortran Compiler Flags" FORCE)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message("DEBUG MODE")
+    string(APPEND CMAKE_Fortran_FLAGS "-g -O0 -fcheck=all")
+elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
+    message("RELEASE MODE")
+    string(APPEND CMAKE_Fortran_FLAGS "-O2")
+endif()
+
 add_library(spel_emulator
     src/emulator.F90
     src/field_mod.F90

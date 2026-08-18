@@ -5,6 +5,14 @@ module field_mod
 
    private
    type, public:: field_desc_t
+      !! Describes how a field maps to an FTorch Tensor
+      !! - a1d, a2d, a3d: pointer to underlying model variable
+      !! - rank: dimension of field
+      !! - n_mask: number of active elements for this field
+      !! - mask: index to active elements
+      !! - sample_map: maps active values to samples
+      !! - per_sample_size: flattened size this field contributes per masked index (e.g. nlev)
+      !! - offset: offset of this field in the flat feature/target vector
       real(rkind), pointer, contiguous :: a1d(:) => null()
       real(rkind), pointer, contiguous :: a2d(:, :) => null()
       real(rkind), pointer, contiguous :: a3d(:, :, :) => null()
@@ -12,16 +20,17 @@ module field_mod
       integer(ikind) :: n_mask = 0
       integer(ikind), pointer :: mask(:) => null()
 
-      ! Flattened size this field contributes per masked index (e.g. nlev)
+      integer(ikind), pointer,contiguous :: sample_map(:) =>null()
+
       integer :: per_sample_size = 0
-      ! Offset of this field in the flat feature/target vector
       ! so that buf(base+offset) = field(1)
       integer :: offset = 0
    end type field_desc_t
 
    type :: field_list_t
       logical :: initialized = .false.
-      integer :: n_fields = 0
+      integer(ikind) :: n_fields = 0
+      integer(ikind) :: n_samples = 0
       character(len=256) :: name = ""
       type(field_desc_t), allocatable :: fields(:)
    contains
@@ -36,13 +45,15 @@ module field_mod
       procedure :: print => print_field_list
       procedure :: write_formatted
       generic :: write (formatted) => write_formatted
+      procedure :: map_to_buffer => map_fields_to_buffer
+      procedure :: map_from_buffer => unmap_buffer_to_fields
    end type field_list_t
 
-   interface  field_list_t
-      module procedure  initialize_field_list
+   interface field_list_t
+      module procedure initialize_field_list
    end interface field_list_t
 
-   public :: field_list_t, unmap_buffer_to_fields,map_fields_to_buffer
+   public :: field_list_t
 
 contains
 
@@ -91,21 +102,6 @@ contains
       call this%append_field(f)
    end subroutine add_3d
 
-   ! subroutine add_4d(this, arr, numf, filter)
-   !    class(field_list_t), intent(inout) :: this
-   !    real(rkind), pointer, intent(inout) :: arr(:, :, :, :)
-   !    integer(ikind), intent(in) :: numf
-   !    integer(ikind), pointer, intent(in) :: filter(:)
-   !    type(field_desc_t) :: f
-   !
-   !    f%a4d => arr
-   !    f%rank = 4
-   !    f%n_mask = numf
-   !    f%mask => filter
-   !
-   !    call this%append_field(f)
-   ! end subroutine add_4d
-
    subroutine append_field(this, f)
       class(field_list_t), intent(inout) :: this
       type(field_desc_t), intent(in)    :: f
@@ -114,15 +110,18 @@ contains
       this%fields(this%n_fields) = f
    end subroutine append_field
 
-   function initialize_field_list(nfields, name) result(field_list)
+   function initialize_field_list(nfields, name, n_samples) result(field_list)
       integer(ikind), intent(in) :: nfields
       character(len=*), intent(in) :: name
+      integer(ikind), intent(in) :: n_samples
+
       type(field_list_t):: field_list
 
       field_list%name = name
 
       allocate (field_list%fields(nfields))
-      field_list%n_fields = 0
+      field_list%n_fields = 0_ikind
+      field_list%n_samples = n_samples
       field_list%initialized = .true.
    end function initialize_field_list
 
@@ -144,9 +143,6 @@ contains
             per_sz = size(this%fields(i)%a2d, 2)
          case (3)
             per_sz = size(this%fields(i)%a3d, 2)*size(this%fields(i)%a3d, 3)
-         ! case (4)
-         !    per_sz = size(this%fields(i)%a4d, 2)*size(this%fields(i)%a4d, 3)* &
-         !             size(this%fields(i)%a4d, 4)
          case default
             stop "Unsupported rank in compute_layout"
          end select
@@ -271,7 +267,7 @@ contains
       character(len=1) :: endl = new_line('a')
 
       unit = output_unit
-      if(present(ounit)) unit = ounit
+      if (present(ounit)) unit = ounit
       write (unit, *) "Field list "//trim(self%name)//endl
       do i_field = 1, self%n_fields
          call print_field(self%fields(i_field))
@@ -293,72 +289,72 @@ contains
          if (associated(this%mask)) then
             write (unit, '(a)', advance='no') "  mask            : ["
             do i = 1, size(this%mask)
-               if (i > 1) write(unit, '(a)', advance='no') ", "
-               write(unit, '(i0)', advance='no') this%mask(i)
+               if (i > 1) write (unit, '(a)', advance='no') ", "
+               write (unit, '(i0)', advance='no') this%mask(i)
             end do
-            write(unit, '(a)') "]"
+            write (unit, '(a)') "]"
          else
-            write(unit, '(a)') "  mask            : <not associated>"
+            write (unit, '(a)') "  mask            : <not associated>"
          end if
 
          select case (this%rank)
 
          case (1)
             if (.not. associated(this%a1d)) then
-               write(unit, '(a)') "  data            : <not associated>"
+               write (unit, '(a)') "  data            : <not associated>"
                return
             end if
 
-            write(unit, '(a,i0,a)') "  shape           : [", size(this%a1d), "]"
-            write(unit, '(a)') "  data:"
+            write (unit, '(a,i0,a)') "  shape           : [", size(this%a1d), "]"
+            write (unit, '(a)') "  data:"
             do i = lbound(this%a1d, 1), ubound(this%a1d, 1)
-               write(unit, '(a,i0,a,es16.8)') &
+               write (unit, '(a,i0,a,es16.8)') &
                   "    (", i, ") = ", this%a1d(i)
             end do
 
          case (2)
             if (.not. associated(this%a2d)) then
-               write(unit, '(a)') "  data            : <not associated>"
+               write (unit, '(a)') "  data            : <not associated>"
                return
             end if
 
-            write(unit, '(a,i0,a,i0,a)') &
+            write (unit, '(a,i0,a,i0,a)') &
                "  shape           : [", size(this%a2d, 1), ", ", size(this%a2d, 2), "]"
 
-            write(unit, '(a)') "  data:"
+            write (unit, '(a)') "  data:"
             do i = lbound(this%a2d, 1), ubound(this%a2d, 1)
-               write(unit, '(a,i0,a)', advance='no') "    row ", i, ": "
+               write (unit, '(a,i0,a)', advance='no') "    row ", i, ": "
                do j = lbound(this%a2d, 2), ubound(this%a2d, 2)
-                  write(unit, '(es16.8,1x)', advance='no') this%a2d(i, j)
+                  write (unit, '(es16.8,1x)', advance='no') this%a2d(i, j)
                end do
-               write(unit, *)
+               write (unit, *)
             end do
 
          case (3)
             if (.not. associated(this%a3d)) then
-               write(unit, '(a)') "  data            : <not associated>"
+               write (unit, '(a)') "  data            : <not associated>"
                return
             end if
 
-            write(unit, '(a,i0,a,i0,a,i0,a)') &
+            write (unit, '(a,i0,a,i0,a,i0,a)') &
                "  shape           : [", size(this%a3d, 1), ", ", &
                size(this%a3d, 2), ", ", &
                size(this%a3d, 3), "]"
 
-            write(unit, '(a)') "  data:"
+            write (unit, '(a)') "  data:"
             do i = lbound(this%a3d, 1), ubound(this%a3d, 1)
-               write(unit, '(a,i0)') "    sample/index ", i
+               write (unit, '(a,i0)') "    sample/index ", i
                do j = lbound(this%a3d, 2), ubound(this%a3d, 2)
-                  write(unit, '(a,i0,a)', advance='no') "      dim2=", j, ": "
+                  write (unit, '(a,i0,a)', advance='no') "      dim2=", j, ": "
                   do k = lbound(this%a3d, 3), ubound(this%a3d, 3)
-                     write(unit, '(es16.8,1x)', advance='no') this%a3d(i, j, k)
+                     write (unit, '(es16.8,1x)', advance='no') this%a3d(i, j, k)
                   end do
-                  write(unit, *)
+                  write (unit, *)
                end do
             end do
 
          case default
-            write(unit, '(a,i0)') "  data            : <unsupported rank ", this%rank
+            write (unit, '(a,i0)') "  data            : <unsupported rank ", this%rank
          end select
 
       end subroutine print_field

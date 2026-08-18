@@ -11,7 +11,8 @@ if [[ $narg -gt 0 || ! -d "build" ]]; then
 	cmake -S . -B build \
 		-DCMAKE_PREFIX_PATH="$HOME/.local/ftorch" \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-		-DCMAKE_Fortran_COMPILER=$fc
+		-DCMAKE_Fortran_COMPILER=$fc \
+		-DCMAKE_BUILD_TYPE="Debug"
 fi
 cmake --build build 
 
