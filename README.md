@@ -4,6 +4,12 @@ Moreover, the parsing capabilities of SPEL allow for easy script-based source-to
 Now, SPEL can export data to a database (managed by Django) so that the overall flow of ELM can be inspected at a high level in a web browser.
 The general aim of SPEL now is to serve as a platform for developing, debugging, and understanding of complicated (legacy) Fortran projects, though ELM is the only supported project currently.
 
+## Latest merge summary
+The most recent merge commit was `b51885ea0faa101d9e6d43ea679c7fe9decac7d6`
+on August 13, 2026, merging branch `piml-training` into `main`.
+That merge brought in the `ml_training` work, including a shared SPEL
+emulator class for training and importing emulators into ELM, followed by
+branch updates labeled `finish test` before the merge.
 
 ## Install Instructions
 Installation is very easy in a python virtual environment. Dependencies are managed in the `pyproject.toml`
