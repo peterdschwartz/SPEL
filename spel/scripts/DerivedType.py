@@ -244,7 +244,8 @@ def get_component(
 
 
 def expand_dtype(
-    dtype_vars: list[Variable], type_dict: dict[str, DerivedType]
+    dtype_vars: list[Variable],
+    type_dict: dict[str, DerivedType],
 ) -> dict[str, Variable]:
     """Function to take a dtype and create a dict with a key for each var%field"""
 

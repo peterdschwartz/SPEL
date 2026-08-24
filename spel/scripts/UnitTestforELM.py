@@ -19,6 +19,7 @@ from spel.scripts.config import (
 from spel.scripts.DerivedType import DerivedType
 from spel.scripts.fortran_modules import FortranModule, get_filename_from_module
 from spel.scripts.fortran_parser.boolen_expression import ConditionExpectation
+from spel.scripts.functional_unit_test import FunctionalUnitTest
 from spel.scripts.helper_functions import construct_call_tree
 from spel.scripts.logging_configs import get_logger
 from spel.scripts.nml.analyze_ifs import get_if_blocks
@@ -27,14 +28,13 @@ from spel.scripts.nml.analyze_namelist import (
     find_all_namelist,
     find_nml_ifs,
 )
-from spel.scripts.types import FunctionalUnitTest, ReadWrite, UnitTestMode
+from spel.scripts.types import ReadWrite, UnitTestMode
 from spel.scripts.utilityFunctions import Variable
 from spel.scripts.variable_analysis import determine_global_variable_status
 
 ModDict = dict[str, FortranModule]
 SubDict = dict[str, Subroutine]
 TypeDict = dict[str, DerivedType]
-
 
 
 def create_unit_test(
@@ -50,7 +50,6 @@ def create_unit_test(
     import os
     import sys
 
-    import spel.scripts.write_routines as wr
     from spel.scripts.edit_files import process_for_unit_test
     from spel.scripts.export_objects import pickle_unit_test
     from spel.scripts.fortran_modules import insert_header_for_unittest
@@ -72,7 +71,6 @@ def create_unit_test(
     cfg.options.db_mode = db_mode
 
     unit_test = FunctionalUnitTest(
-        casename=casename,
         casedir=case_dir,
         cfg=cfg.options,
         logger=logger,
@@ -166,22 +164,18 @@ def create_unit_test(
     bounds_inst = Variable(type="bounds_type", name="bounds", dim=0, subgrid="?", ln=-1)
     type_dict["bounds_type"].instances["bounds"] = bounds_inst.copy()
 
-    instance_to_user_type: dict[str, str] = {}
-    for type_name, dtype in type_dict.items():
-        if "bounds" in type_name:
-            continue
-        # All instances should have been found so throw a warning
-        if not dtype.instances:
-            logger.warning(f"Warning: no instances found for {type_name}")
-        for instance in dtype.instances.values():
-            instance_to_user_type[instance.name] = type_name
-
     main_sub_dict["filtermod::setfilters"].unit_test_function = True
     unit_test.subroutine_dict = main_sub_dict
     unit_test.module_dict = mod_dict
     unit_test.type_dict = type_dict
+    instance_to_user_type = unit_test.instance_to_type_map()
 
     process_subroutines_for_unit_test(unit_test)
+
+    instance_dict: dict[str, DerivedType] = {}
+    for type_name, dtype in unit_test.type_dict.items():
+        for instance in dtype.instances.values():
+            instance_dict[instance.name] = dtype
 
     if not db_mode:
         fut_subs: set[str] = {
@@ -191,7 +185,7 @@ def create_unit_test(
         }
         for sub_id in fut_subs:
             parent_sub = unit_test.subroutine_dict[sub_id]
-            merge_elmtype_from_children(parent_sub, unit_test)
+            merge_elmtype_from_children(parent_sub, unit_test, instance_dict)
         for sub in unit_test.subroutine_dict.values():
             sub.match_arg_to_inst(type_dict)
             sub.summarize_readwrite(verbose=True)
@@ -203,11 +197,6 @@ def create_unit_test(
     )
     for sub in subroutines.values():
         sub.sort_inputs_outputs()
-
-    instance_dict: dict[str, DerivedType] = {}
-    for type_name, dtype in unit_test.type_dict.items():
-        for instance in dtype.instances.values():
-            instance_dict[instance.name] = dtype
 
     active_set: set[str] = set()
     for inst_name, dtype in instance_dict.items():
@@ -226,7 +215,7 @@ def create_unit_test(
 
     # Create a makefile for the unit test
     file_list = [get_filename_from_module(m) for m in ordered_mods]
-    wr.generate_cmake(files=file_list, case_dir=case_dir)
+    unit_test.generate_cmake(files=file_list)
 
     # for sub in subroutines.values():
     #     if sub.abstract_call_tree:
@@ -237,30 +226,24 @@ def create_unit_test(
         for inst in dtype.instances.values():
             elmvars_dict[inst.name] = inst
 
-    unittest_global_vars: dict[str, Variable] = {}
-
-    unittest_subs = {sub for sub in unit_test.subroutine_dict.values() if sub.unit_test_function}
+    unittest_subs = {
+        sub for sub in unit_test.subroutine_dict.values() if sub.unit_test_function
+    }
     for sub in unittest_subs:
         if not sub.abstract_call_tree:
             continue
         for subnode in sub.abstract_call_tree.traverse_preorder():
             childsub = unit_test.subroutine_dict[subnode.node.subname]
-            unittest_global_vars.update(childsub.active_global_vars)
+            unit_test.active_global_vars.update(childsub.active_global_vars)
 
     if not db_mode:
-        # # Generate/modify FORTRAN files needed to initialize and run Unit Test
-        wr.prepare_unit_test_files(
-            type_dict=type_dict,
-            case_dir=case_dir,
-            global_vars=unittest_global_vars,
-            subroutines=subroutines,
-            instance_to_type=instance_to_user_type,
-        )
+        # Generate/modify FORTRAN files needed to initialize and run Unit Test
+        unit_test.prepare_unit_test_files()
         # elm_instMod.F90
-        wr.write_elminstMod(type_dict, case_dir)
+        unit_test.write_elminst_mod()
         # duplicateMod.F90
-        wr.duplicate_clumps(type_dict)
-        wr.create_fortls(case_dir)
+        unit_test.duplicate_clumps()
+        unit_test.create_fortls()
 
         # Go through all needed files and include a header that defines some constants
         insert_header_for_unittest(
@@ -290,9 +273,7 @@ def create_unit_test(
     return None
 
 
-def process_subroutines_for_unit_test(
-    unit_test: FunctionalUnitTest
-):
+def process_subroutines_for_unit_test(unit_test: FunctionalUnitTest):
     """
     Function that processes the subroutines found in each FortranModule
         1) identify any non derived-type global vars used by Subroutine
@@ -369,6 +350,7 @@ def process_subroutines_for_unit_test(
 def merge_elmtype_from_children(
     parent_sub: Subroutine,
     unit_test: FunctionalUnitTest,
+    instance_dict: dict[str, DerivedType],
 ):
     """ """
     if not parent_sub.abstract_call_tree:
@@ -392,7 +374,10 @@ def merge_elmtype_from_children(
     ]
     for sub_obj in fut_subs:
         if "filter" not in sub_obj.name:
-            unit_test.guarded_usage_dict = check_sub_for_nml_guarded_vars(root_sub=sub_obj)
+            unit_test.guarded_usage_dict = check_sub_for_nml_guarded_vars(
+                root_sub=sub_obj,
+                instance_dict=instance_dict,
+            )
 
     parent_sub.summarize_readwrite()
     return

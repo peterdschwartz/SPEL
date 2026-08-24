@@ -6,11 +6,11 @@ import subprocess as sp
 import sys
 import textwrap
 from collections import namedtuple
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable
 
 import spel.scripts.config as cfg
-from spel.scripts.fortran_parser.boolen_expression import ConditionExpectation
 import spel.scripts.io.helper as hio
 from spel.scripts.analyze_subroutines import Subroutine
 from spel.scripts.config import (
@@ -23,6 +23,7 @@ from spel.scripts.config import (
 )
 from spel.scripts.edit_files import macros
 from spel.scripts.fortran_modules import FortranModule, get_module_name_from_file
+from spel.scripts.fortran_parser.boolen_expression import AnyOf, ConditionExpectation
 from spel.scripts.io.netcdf_io import (
     generate_constants_io_netcdf,
     generate_elmtypes_io_netcdf,
@@ -40,14 +41,27 @@ from spel.scripts.utilityFunctions import (
 
 if TYPE_CHECKING:
     from spel.scripts.DerivedType import DerivedType
+
     TypeDict = dict[str, DerivedType]
     ModDict = dict[str, FortranModule]
 
 InstToDTypeMap = dict[str, str]
 SubDict = dict[str, Subroutine]
+TAB_WIDTH = 2
+
+
+@dataclass(frozen=True)
+class MainAdditions:
+    """Fortran statements needed to call selected FUT subroutines from main.F90."""
+
+    calls: list[str]
+    modules: list[str]
+    variables: list[str]
 
 
 class FunctionalUnitTest:
+    """State and code-generation operations for one functional unit test case."""
+
     def __init__(
         self,
         casedir: Path,
@@ -59,27 +73,516 @@ class FunctionalUnitTest:
         self.type_dict: TypeDict = {}
         self.guarded_usage_dict: dict[ConditionExpectation, list[Variable]] = {}
         self.primary_subroutines: dict[str, Subroutine] = {}
-        self.unittest_global_vars: dict[str, Variable] = {}
+        self.active_global_vars: dict[str, Variable] = {}
         self.case_dir = casedir
         self.config = cfg
         self.logger: logging.Logger = logger
-
         self.case_name = self.case_dir.parent.name
 
-    def instance_to_type_map(self) -> dict[str, str]:
-        """
-        Generates a mapping between a derivedtype instance and its type
-        """
-        instance_to_user_type: dict[str, str] = {}
+    # ------------------------------------------------------------------
+    # Queries derived from unit-test state
+    # ------------------------------------------------------------------
+    def instance_to_type_map(self) -> InstToDTypeMap:
+        """Return a mapping from derived-type instance name to type name."""
+        instance_to_user_type: InstToDTypeMap = {}
         for type_name, dtype in self.type_dict.items():
             if "bounds" in type_name:
                 continue
-            # All instances should have been found so throw a warning
             if not dtype.instances:
-                self.logger.warning(f"Warning: no instances found for {type_name}")
+                self.logger.warning("No instances found for %s", type_name)
             for instance in dtype.instances.values():
                 instance_to_user_type[instance.name] = type_name
         return instance_to_user_type
+
+    @property
+    def non_parameter_global_vars(self) -> dict[str, Variable]:
+        """Global unit-test variables that must be read/written at runtime."""
+        return {
+            variable.name: variable
+            for variable in self.active_global_vars.values()
+            if not variable.parameter
+        }
+
+    def guards_for_variable(
+        self,
+        variable: Variable,
+    ) -> tuple[ConditionExpectation, ...]:
+        return tuple(
+            condition
+            for condition, variables in self.guarded_usage_dict.items()
+            if variable in variables
+        )
+
+    def guard_for_variable(
+        self,
+        variable: Variable,
+    ) -> ConditionExpectation | None:
+        guards = self.guards_for_variable(variable)
+
+        if not guards:
+            return None
+
+        if len(guards) == 1:
+            return guards[0]
+
+        return AnyOf(guards)
+
+    def condition_variables(
+        self,
+        condition: ConditionExpectation,
+    ) -> list[Variable]:
+
+        variables = []
+        for name in condition.variable_names():
+            try:
+                variables.append(self.active_global_vars[name])
+            except KeyError:
+                raise KeyError(
+                    f"Condition references '{name}', but it was not found "
+                    "in unittest_global_vars"
+                )
+
+        return variables
+
+    def guard_variables(self) -> dict[str, Variable]:
+        result: dict[str, Variable] = {}
+
+        for condition in self.guarded_usage_dict:
+            for name in condition.variable_names():
+                variable = self.active_global_vars.get(name)
+
+                if variable is None:
+                    raise RuntimeError(
+                        f"Guard condition references unknown variable '{name}'"
+                    )
+
+                result[name] = variable
+
+        return result
+
+    def guard_use_statements(self) -> set[str]:
+        return {
+            f"use {variable.declaration}, only : {variable.name}"
+            for variable in self.guard_variables().values()
+        }
+
+    def guard_use_statements_for(
+        self,
+        variables: Iterable[Variable],
+    ) -> set[str]:
+        conditions = {
+            condition
+            for variable in variables
+            for condition in self.guards_for_variable(variable)
+        }
+
+        names = {
+            name for condition in conditions for name in condition.variable_names()
+        }
+        variables = [self.active_global_vars[name] for name in names]
+        return {
+            f"use {variable.declaration}, only : {variable.name}"
+            for variable in variables
+        }
+
+    def variables_to_verify(self) -> set[str]:
+        """Return derived-type fields written by any selected subroutine."""
+        return {
+            name
+            for subroutine in self.subroutine_dict.values()
+            for name, access in subroutine.elmtype_access_summary.items()
+            if access in {"w", "rw"}
+        }
+
+    # ------------------------------------------------------------------
+    # Top-level orchestration
+    # ------------------------------------------------------------------
+    def prepare_unit_test_files(
+        self,
+        instance_to_type: InstToDTypeMap | None = None,
+    ) -> None:
+        """Generate and modify the source files needed by this unit test."""
+        if instance_to_type is None:
+            instance_to_type = self.instance_to_type_map()
+
+        self.prepare_main(instance_to_type)
+        self.add_pointer_inits()
+
+        generate_elmtypes_io_netcdf(
+            self.type_dict,
+            instance_to_type,
+            self.case_dir,
+        )
+        generate_constants_io_netcdf(
+            vars=self.non_parameter_global_vars,
+            casedir=self.case_dir,
+        )
+
+        self.create_update_mod()
+        self.prep_elm_init()
+        self.generate_verification()
+
+    def prepare_files(
+        self,
+        instance_to_type: InstToDTypeMap | None = None,
+    ) -> None:
+        """Alias for :meth:`prepare_unit_test_files`."""
+        self.prepare_unit_test_files(instance_to_type)
+
+    # ------------------------------------------------------------------
+    # main.F90 preparation
+    # ------------------------------------------------------------------
+
+    def _find_parent_subroutine_call(
+        self,
+        instance_to_type: InstToDTypeMap,
+    ) -> MainAdditions:
+        """Find representative parent calls for the selected FUT subroutines."""
+        mods_to_add: list[str] = []
+        var_decl_to_add: list[str] = []
+        calls: list[str] = []
+
+        for sub in self.subroutine_dict.values():
+            name = sub.name
+            cmd = (
+                f'grep -rin -E "^[[:space:]]*(call[[:space:]]* {name})\\b" '
+                f"{ELM_SRC} | head -1"
+            )
+            output = sp.getoutput(cmd).split(":")
+            filename = output[0]
+            call_ln = int(output[1]) - 1
+
+            with open(filename, "r") as ifile:
+                raw_lines = ifile.readlines()
+            mod_lines = unwrap_section(raw_lines, startln=0)
+
+            _, mod_name = get_module_name_from_file(filename)
+
+            idx, call_string = next(
+                ((i, el) for i, el in enumerate(mod_lines) if el.ln == call_ln),
+                (None, None),
+            )
+            if idx is None or call_string is None or call_ln != mod_lines[idx].ln:
+                self.logger.error(
+                    f"Couldn't match call_string for {name}. Expected call_ln {call_ln}",
+                )
+                raise RuntimeError(f"Could not find parent call for {name}")
+
+            calls.append(call_string.line)
+            args = getArguments(call_string.line)
+
+            subname = None
+            for ln in range(idx, -1, -1):
+                line = mod_lines[ln].line
+                match_sub = re.search(r"^\s*(subroutine)\s+", line)
+                if match_sub:
+                    split_str = match_sub.group().strip()
+                    subname = line.split(split_str)[1].split("(")[0].strip()
+                    self.logger.info("Found Subroutine: %s", subname)
+                    break
+
+            if not subname:
+                self.logger.error(
+                    "Couldn't find calling subroutine for %s",
+                    sub.name,
+                )
+                raise RuntimeError(f"Could not find calling subroutine for {sub.name}")
+
+            fn, startl, endl = find_file_for_subroutine(name=subname, fn=filename)
+            sub_init = SubInit(
+                name=subname,
+                mod_name=mod_name,
+                fort_mod=FortranModule(fname=fn, name=mod_name, ln=0),
+                file=Path(fn),
+                start=startl,
+                end=endl,
+                mod_lines=mod_lines,
+                function=None,
+                cpp_start=None,
+                cpp_end=None,
+                cpp_fn="",
+                parent="",
+            )
+            parent_sub = Subroutine(init_obj=sub_init)
+
+            args_as_vars: dict[str, Variable] = {}
+            args_as_instances: dict[str, Variable] = {}
+            for arg in args:
+                argname = arg.split("%")[0]
+                if argname in instance_to_type:
+                    type_name = instance_to_type[argname]
+                    dtype = self.type_dict[type_name]
+                    inst_var = dtype.instances[argname]
+                    args_as_instances[inst_var.name] = inst_var
+                    if not inst_var.active:
+                        self.type_dict[type_name].instances[argname].active = True
+
+            args_to_search = [
+                arg for arg in args if arg.split("%")[0] not in args_as_instances
+            ]
+
+            for arg in args_to_search:
+                if arg in parent_sub.arguments:
+                    argvar = parent_sub.arguments[arg]
+                    if argvar.type in self.type_dict:
+                        dtype = self.type_dict[argvar.type]
+                        inst_var = list(dtype.instances.values())[0]
+                        args_as_instances[inst_var.name] = inst_var
+                    else:
+                        args_as_vars[arg] = argvar
+                elif arg in parent_sub.local_variables:
+                    args_as_vars[arg] = parent_sub.local_variables[arg]
+                else:
+                    self.logger.info(
+                        _bc.WARNING
+                        + f"Can't find {arg} (non-udt global var?)"
+                        + _bc.ENDC
+                    )
+                    args_as_vars[arg] = Variable(
+                        type="integer",
+                        name=arg,
+                        dim=0,
+                        subgrid="?",
+                        bounds="",
+                        ln=-1,
+                    )
+
+            for argvar in args_as_vars.values():
+                type_string = argvar.type
+                if type_string not in {"real", "integer", "character", "logical"}:
+                    type_string = f"type({type_string})"
+                elif type_string == "real":
+                    type_string = "real(r8)"
+
+                declaration = f"{type_string} :: {argvar.name}{argvar.bounds}\n"
+                if declaration not in var_decl_to_add:
+                    var_decl_to_add.append(declaration)
+
+            for inst in args_as_instances.values():
+                use_statement = f"use {inst.declaration}, only : {inst.name}\n"
+                if use_statement not in mods_to_add:
+                    mods_to_add.append(use_statement)
+
+        return MainAdditions(
+            calls=calls,
+            modules=mods_to_add,
+            variables=var_decl_to_add,
+        )
+
+    def prepare_main(
+        self,
+        instance_to_type: InstToDTypeMap | None = None,
+    ) -> None:
+        """Prepare main.F90 to invoke the selected functional-unit-test routines."""
+        if instance_to_type is None:
+            instance_to_type = self.instance_to_type_map()
+
+        with open(Path(spel_mods_dir) / "main.F90", "r") as iofile:
+            lines = iofile.readlines()
+
+        modules_to_add = [
+            f"use {subroutine.module}, only : {subroutine.name}\n"
+            for subroutine in self.subroutine_dict.values()
+        ]
+
+        additions = self._find_parent_subroutine_call(instance_to_type)
+        num_filters = get_filter_members(self.type_dict["clumpfilter"])
+        adjusted_vars, adjusted_calls = adjust_call_sig(
+            additions.variables,
+            additions.calls,
+            num_filters,
+        )
+        modules_to_add.extend(additions.modules)
+
+        lines = insert_at_token(lines, "!#USE_START", modules_to_add)
+        lines = insert_at_token(lines, "!#VAR_DECL", adjusted_vars)
+        lines = insert_at_token(lines, "!#CALL_SUB", reversed(adjusted_calls))
+
+        active_instances, _, elm_inst_vars = hio.get_var_usage_and_elm_inst_vars(
+            self.type_dict
+        )
+
+        arg_str = "io_inputs, bounds_clump"
+        for _, elmvar in elm_inst_vars:
+            arg_str = f"{arg_str}, {elmvar.name}={elmvar.name}"
+
+        tabs = hio.indent(hio.Tab.shift, 2)
+        lines = insert_at_token(
+            lines,
+            "!#IO_READ",
+            [f"{tabs}call read_elmtypes({arg_str})\n"],
+        )
+        lines = insert_at_token(
+            lines,
+            "!#IO_WRITE",
+            [f"{tabs}call write_elmtypes({arg_str})\n"],
+        )
+
+        copyin_lines = ["!$acc enter data copyin(& \n"]
+        copyin_lines.extend(f"!$acc& {name},&\n" for name in sorted(active_instances))
+        copyin_lines.append("!$acc& )\n")
+        lines = insert_at_token(lines, "!#ACC_COPYIN", copyin_lines)
+
+        with open(self.case_dir / "main.F90", "w") as ofile:
+            ofile.writelines(lines)
+
+    def add_pointer_inits(self) -> None:
+        """Insert active derived-type pointer initialization calls into main.F90."""
+        main_path = self.case_dir / "main.F90"
+        with open(main_path, "r") as ifile:
+            lines = ifile.readlines()
+
+        def has_pointers(components: dict[str, Variable]) -> bool:
+            return any(field.pointer for field in components.values())
+
+        pointer_types = [
+            dtype for dtype in self.type_dict.values() if has_pointers(dtype.components)
+        ]
+
+        use_lines: list[str] = []
+        init_lines: list[str] = []
+        for dtype in pointer_types:
+            if dtype.init_sub_ptr is None:
+                self.logger.warning(
+                    "Type %s has pointer fields but no initialization subroutine",
+                    dtype.type_name,
+                )
+                continue
+            sub_mod = dtype.init_sub_ptr.module
+            name = dtype.init_sub_ptr.name
+            use_lines.append(f"use {sub_mod}, only : {name}\n")
+            init_lines.append(f"call {name}()\n")
+
+        lines = insert_at_token(lines, "!#USE_START", use_lines)
+        lines = insert_at_token(lines, "!#INIT", init_lines)
+
+        with open(main_path, "w") as ofile:
+            ofile.writelines(lines)
+
+    # ------------------------------------------------------------------
+    # Generated support modules
+    # ------------------------------------------------------------------
+
+    def prep_elm_init(self) -> None:
+        """Prepare elm_initializeMod.F90 for this unit test."""
+        source_path = Path(spel_mods_dir) / "elm_initializeMod.F90"
+        with open(source_path, "r") as ifile:
+            lines = ifile.readlines()
+
+        active_instances, _, elm_inst_vars = hio.get_var_usage_and_elm_inst_vars(
+            self.type_dict
+        )
+
+        tabs = hio.indent(hio.Tab.reset)
+        use_statements = {
+            f"{tabs}use {inst_var.declaration}, only: {inst_var.name}\n"
+            for inst_var in active_instances.values()
+            if inst_var.type != "bounds_type"
+        }
+        lines = insert_at_token(lines, "!#USE_START", sorted(use_statements))
+
+        arg_str = "io_inputs, bounds"
+        for _, elmvar in elm_inst_vars:
+            arg_str = f"{arg_str}, {elmvar.name}={elmvar.name}"
+
+        tabs = hio.indent(hio.Tab.shift, 2)
+        lines = insert_at_token(
+            lines,
+            "!#SPEL_IO",
+            [f"{tabs}call read_elmtypes({arg_str})\n"],
+        )
+
+        with open(self.case_dir / "elm_initializeMod.F90", "w") as ofile:
+            ofile.writelines(lines)
+
+    def create_update_mod(self) -> None:
+        """Create UpdateParamsAccMod.F90 for non-parameter global variables."""
+        variables = self.non_parameter_global_vars
+        tabs = hio.indent(hio.Tab.reset)
+        mod_name = "UpdateParamsAccMod"
+        sub_name = "update_params_acc"
+
+        lines: list[str] = [f"module {mod_name}\n"]
+        lines.extend(
+            f"{tabs}use {var.declaration}, only : {var.name}\n"
+            for var in variables.values()
+        )
+        lines.extend(
+            [
+                f"{tabs}implicit none\n",
+                f"{tabs}public :: {sub_name}\n",
+                "contains\n\n",
+                f"{tabs}subroutine {sub_name}()\n",
+            ]
+        )
+
+        body_tabs = hio.indent(hio.Tab.shift)
+        lines.append(f"{body_tabs}!$acc update device(&\n")
+        for var in variables.values():
+            dim_str = ",".join(":" for _ in range(var.dim))
+            dim_str = f"({dim_str})" if dim_str else ""
+            lines.append(f"{body_tabs}!$acc&   {var.name}{dim_str},&\n")
+        lines.append(f"{body_tabs}!$acc&  )\n\n")
+        lines.append(f"{tabs}end subroutine {sub_name}\n")
+        lines.append(f"end module {mod_name}\n")
+
+        with open(self.case_dir / f"{mod_name}.F90", "w") as ofile:
+            ofile.writelines(lines)
+
+    def generate_verification(self) -> None:
+        """Generate verification code for fields written by the selected routines."""
+        generate_verify(self.variables_to_verify(), self.type_dict)
+
+    def write_elminst_mod(self) -> None:
+        """Write the reduced elm_instMod.F90 needed by this unit test."""
+        write_elminstMod(self.type_dict, self.case_dir)
+
+    # ------------------------------------------------------------------
+    # Remaining unit-test generators
+    #
+    # These methods expose the existing generators through the object that
+    # owns their state. The legacy module-level functions remain below for
+    # compatibility with existing callers while they migrate to this API.
+    # ------------------------------------------------------------------
+
+    def generate_cmake(self, files: list[str]) -> None:
+        generate_cmake(files, self.case_dir)
+
+    def generate_makefile(self, files: list[str]) -> None:
+        generate_makefile(files, self.case_dir)
+
+    def duplicate_clumps(self) -> None:
+        duplicate_clumps(self.type_dict)
+
+    def create_init_params(self) -> None:
+        create_init_params(self.active_global_vars, self.case_dir)
+
+    def create_constants_io(self, mode: str) -> None:
+        create_constants_io(mode, self.active_global_vars, self.case_dir)
+
+    def create_write_vars(self, subname: str, use_isotopes: bool = False) -> None:
+        create_write_vars(self.type_dict, subname, use_isotopes=use_isotopes)
+
+    def create_read_vars(self) -> None:
+        create_read_vars(self.type_dict)
+
+    def create_type_allocators(self) -> set[str]:
+        return create_type_allocators(self.type_dict, str(self.case_dir))
+
+    def create_deepcopy_module(
+        self,
+        modname: str = "DeepCopyMod",
+        all_active: bool = False,
+    ) -> None:
+        create_deepcopy_module(
+            self.type_dict,
+            str(self.case_dir),
+            modname,
+            all_active=all_active,
+        )
+
+    def create_fortls(self) -> None:
+        create_fortls(self.case_dir)
 
 
 def adjust_bounds(bounds: str) -> str:
@@ -654,42 +1157,10 @@ def add_pointer_inits(type_dict: TypeDict, case_dir):
 
 def prepare_unit_test_files(
     unit_test: FunctionalUnitTest,
-    instance_to_type: InstToDTypeMap,
-):
-    """
-    This function will prepare the use headers of main, initializeParameters,
-    and readConstants.  It will also clean the variable initializations and
-    declarations in main and elm_instMod
-    """
-    type_dict = unit_test.type_dict
-    case_dir = unit_test.case_dir
-    global_vars = unit_test.unittest_global_vars
-    subroutines = unit_test.subroutine_dict
-    case_dir = unit_test.case_dir
-
-    non_param_vars = {v.name: v for v in global_vars.values() if not v.parameter}
-    prepare_main(subroutines, type_dict, instance_to_type, case_dir)
-    add_pointer_inits(type_dict, case_dir)
-
-    # Write DeepCopyMod for UnitTest
-    # create_deepcopy_module(type_dict, case_dir, "DeepCopyMod")
-    generate_elmtypes_io_netcdf(type_dict, instance_to_type, case_dir)
-    generate_constants_io_netcdf(vars=non_param_vars, casedir=case_dir)
-
-    create_update_mod(non_param_vars, case_dir)
-
-    prep_elm_init(type_dict, case_dir)
-
-    # create list of variables that should be used for verification.
-    verify_set: set[str] = {
-        key
-        for sub in subroutines.values()
-        for key, val in sub.elmtype_access_summary.items()
-        if val in ["w", "rw"]
-    }
-    generate_verify(verify_set, type_dict)
-
-    return
+    instance_to_type: InstToDTypeMap | None = None,
+) -> None:
+    """Compatibility wrapper for ``FunctionalUnitTest.prepare_unit_test_files``."""
+    unit_test.prepare_unit_test_files(instance_to_type)
 
 
 def prep_elm_init(type_dict: TypeDict, case_dir: Path):

@@ -1,3 +1,4 @@
+from pathlib import Path
 import re
 import sys
 import textwrap
@@ -53,7 +54,7 @@ def create_nc_define_vars(
 def generate_elmtypes_io_netcdf(
     type_dict: dict[str, DerivedType],
     inst_to_dtype_map: dict[str, str],
-    casedir: str,
+    casedir: Path,
 ):
     tabs = hio.indent(hio.Tab.reset)
     filename = "ReadWriteMod.F90"
@@ -119,13 +120,13 @@ def generate_elmtypes_io_netcdf(
     lines.append(f"end module {mod_name}\n")
 
     logger.info(f"Writing {filename}")
-    with open(f"{casedir}/{filename}", "w") as ofile:
+    with open(casedir / filename, "w") as ofile:
         ofile.writelines(lines)
 
     return
 
 
-def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: str):
+def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: Path):
     """
     Function generates fortran module for constants needed in unit-test
     """

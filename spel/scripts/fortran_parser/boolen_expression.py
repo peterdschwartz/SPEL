@@ -1,8 +1,8 @@
 from __future__ import annotations
-from collections.abc import Iterable
-from itertools import combinations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import combinations
 from typing import TypeAlias
 
 from spel.scripts.fortran_parser.spel_ast import (
@@ -19,50 +19,66 @@ class Expectation:
     variable: str
     constraint: str
 
-    def to_fortran(self)->str:
-        if self.constraint == 'False':
+    def variable_names(self) -> set[str]:
+        return {self.variable}
+
+    def to_fortran(self) -> str:
+        if self.constraint == "False":
             return f".not. {self.variable}"
-        elif self.constraint == 'True':
+        elif self.constraint == "True":
             return self.variable
         else:
             return f"{self.variable} {self.constraint}"
+
 
 @dataclass(frozen=True)
 class AllOf:
     items: tuple["ConditionExpectation", ...]
 
-    def to_fortran(self)->str:
-        return ' .and. '.join([item.to_fortran() for item in self.items])
+    def variable_names(self) -> set[str]:
+        return {name for item in self.items for name in item.variable_names()}
 
-    def __eq__(self,other)->bool:
-        if not isinstance(other,AllOf):
+    def to_fortran(self) -> str:
+        return (
+            "(" + " .and. ".join([f"{item.to_fortran()}" for item in self.items]) + ")"
+        )
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, AllOf):
             return False
         my_set = frozenset(self.items)
         other_set = frozenset(other.items)
         return my_set == other_set
 
-    def __hash__(self)->int:
-        return hash((AllOf,frozenset(self.items)))
+    def __hash__(self) -> int:
+        return hash((AllOf, frozenset(self.items)))
 
 
 @dataclass(frozen=True)
 class AnyOf:
     items: tuple["ConditionExpectation", ...]
 
-    def to_fortran(self)->str:
-        return ' .or. '.join([item.to_fortran() for item in self.items])
+    def variable_names(self) -> set[str]:
+        return {name for item in self.items for name in item.variable_names()}
 
-    def __eq__(self,other)->bool:
-        if not isinstance(other,AnyOf):
+    def to_fortran(self) -> str:
+        return (
+            "(" + " .or. ".join([f"({item.to_fortran()})" for item in self.items]) + ")"
+        )
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, AnyOf):
             return False
         my_set = frozenset(self.items)
         other_set = frozenset(other.items)
         return my_set == other_set
-    
-    def __hash__(self)->int:
-        return hash((AnyOf,frozenset(self.items)))
+
+    def __hash__(self) -> int:
+        return hash((AnyOf, frozenset(self.items)))
 
 
+def to_fortran_if(condition: ConditionExpectation) -> list[str]:
+    return [f"if ({condition.to_fortran()}) then\n", "end if\n"]
 
 
 ConditionExpectation: TypeAlias = Expectation | AllOf | AnyOf
@@ -79,7 +95,7 @@ def expected_constraints(
     match condition:
         case Expectation(var, constraint):
             if var == variable:
-                return {Expectation(variable=var,constraint=constraint)}
+                return {Expectation(variable=var, constraint=constraint)}
             return set()
 
         case AllOf(items):
@@ -136,21 +152,20 @@ _REVERSED_COMPARISON = {
 NO_EXPECTATION = AllOf(())
 
 
-
-def simplify_expectations(items: set[Expectation])->ConditionExpectation:
-    """
-    """
+def simplify_expectations(items: set[Expectation]) -> ConditionExpectation:
+    """ """
     res: set[Expectation] = items.copy()
     to_remove: set[Expectation] = set()
-    for left, right in combinations(items,2):
-        if _are_complete(left,right):
+    for left, right in combinations(items, 2):
+        if _are_complete(left, right):
             to_remove.add(left)
             to_remove.add(right)
 
     res.difference_update(to_remove)
     return _any_of(*res)
 
-def _are_complete(left: Expectation, right: Expectation)->bool:
+
+def _are_complete(left: Expectation, right: Expectation) -> bool:
     """
     Checks if two Expectations for the same variable form the complete
     range of possible values for the variable
@@ -159,7 +174,7 @@ def _are_complete(left: Expectation, right: Expectation)->bool:
     if left.variable != right.variable:
         return False
 
-    if left.constraint in ['True', 'False']:
+    if left.constraint in ["True", "False"]:
         lvalue = left.constraint
         rvalue = right.constraint
         return not (rvalue == lvalue)
@@ -179,8 +194,7 @@ def _is_no_expectation(expectation: ConditionExpectation) -> bool:
 
 
 def _all_of(*items: ConditionExpectation) -> ConditionExpectation:
-    """
-    """
+    """ """
     flattened: list[ConditionExpectation] = []
 
     for item in items:

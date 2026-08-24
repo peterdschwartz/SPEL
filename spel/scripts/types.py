@@ -38,24 +38,6 @@ class UnitTestMode(Enum):
     STANDALONE = auto()
 
 
-class FunctionalUnitTest:
-    def __init__(
-        self,
-        casename: str,
-        casedir: Path,
-        cfg: cfg.Options,
-        logger: logging.Logger,
-    ):
-        self.subroutine_dict: SubDict = {}
-        self.module_dict: ModDict = {}
-        self.type_dict: TypeDict = {}
-        self.guarded_usage_dict: dict[ConditionExpectation, list[Variable]] = {}
-        self.primary_subroutines: dict[str, Subroutine] = {}
-        self.case_name = casename
-        self.config = cfg
-        self.logger: logging.Logger = logger
-
-
 class SubStart(NamedTuple):
     subname: str
     start_ln: int
