@@ -97,11 +97,12 @@ def repl(args):
 
 
 def upload(args):
+    from spel.scripts.config import scripts_dir
     SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     mach = args.machine
     dest = args.dest
     subprocess.run(
-        [f"{SPEL_ROOT}/scripts/upload.sh", mach, dest],
+        [f"{scripts_dir}/upload.sh", mach, dest],
         check=True,
         cwd=".",
     )

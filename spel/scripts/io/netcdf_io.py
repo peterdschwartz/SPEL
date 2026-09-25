@@ -1,147 +1,244 @@
-from pathlib import Path
+from __future__ import annotations
+
 import re
 import sys
 import textwrap
 from collections.abc import Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Mapping
 
 import spel.scripts.io.helper as hio
 from spel.scripts import logging_configs
 from spel.scripts.config import spel_mods_dir
 from spel.scripts.DerivedType import DerivedType
+from spel.scripts.fortran_parser.boolen_expression import ConditionExpectation
 from spel.scripts.utilityFunctions import Variable
 
+if TYPE_CHECKING:
+    from spel.scripts.functional_unit_test import FunctionalUnitTest
+
+
 Tab = hio.Tab
+type GuardMap = Mapping[str, ConditionExpectation]
+
+
+def guard_fortran_lines(
+    lines: list[str],
+    condition: ConditionExpectation | None,
+    indent: str,
+) -> list[str]:
+    if condition is None:
+        return lines
+
+    inner = indent + "  "
+
+    return [
+        f"{indent}if ({condition.to_fortran()}) then\n",
+        *[f"{inner}{line.lstrip()}" if line.strip() else line for line in lines],
+        f"{indent}end if\n",
+    ]
 
 
 def create_nc_define_vars(
     vars: dict[str, Variable],
     time: bool,
-    elminst_vars: list[tuple[str,Variable]]=[],
+    elminst_vars: list[tuple[str, Variable]] | None = None,
     bounds: bool = False,
+    guards: GuardMap | None = None,
 ) -> list[str]:
     """
-    Create Subroutine for defining netcdf variables
+    Create the subroutine used to define NetCDF variables.
     """
+    if elminst_vars is None:
+        elminst_vars = []
+
+    if guards is None:
+        guards = {}
+
     tabs = hio.indent()
-    arg_str = ",bounds" if bounds else ""
+    arg_str = ", bounds" if bounds else ""
 
     decls: list[str] = []
-    for type_mod, inst in elminst_vars:
-        arg_str = f"{arg_str}, {inst.name}"
-        var_type = inst.type
-        decls.append(f"{tabs}{tabs}type({var_type}), intent(in) :: {inst.name}")
+
+    for _, inst in elminst_vars:
+        arg_str += f", {inst.name}"
+        decls.append(f"{tabs}{tabs}type({inst.type}), intent(in) :: {inst.name}")
+
     lines: list[str] = [f"{tabs}subroutine define_vars(ncid{arg_str})\n"]
+
     tabs = hio.indent(hio.Tab.shift)
+
     lines.append(f"{tabs}integer, intent(in) :: ncid\n")
+
     if bounds:
         lines.append(f"{tabs}type(bounds_type), intent(in) :: bounds\n")
-    lines.extend([f"{decl}\n" for decl in decls])
+
+    lines.extend(f"{decl}\n" for decl in decls)
 
     lines.append(f"{tabs}integer :: varid, time_id\n")
     lines.append(f"{tabs}character(len=32), dimension(5) :: dim_names\n")
+
     if time:
         lines.append(
-            f"{tabs}call check(nf90_def_dim(ncid, 'time', NF90_UNLIMITED, time_id))\n"
+            f"{tabs}call check("
+            "nf90_def_dim(ncid, 'time', NF90_UNLIMITED, time_id)"
+            ")\n"
         )
-    nc_defns = create_nc_def(vars, time)
-    lines.extend(nc_defns)
+
+    lines.extend(
+        create_nc_def(
+            vars,
+            time=time,
+            guards=guards,
+        )
+    )
+
     tabs = hio.indent(hio.Tab.unshift)
     lines.append(f"{tabs}end subroutine define_vars\n")
 
     return lines
 
 
-def generate_elmtypes_io_netcdf(
-    type_dict: dict[str, DerivedType],
-    inst_to_dtype_map: dict[str, str],
-    casedir: Path,
-):
+def generate_elmtypes_io_netcdf(unit_test: FunctionalUnitTest) -> None:
     tabs = hio.indent(hio.Tab.reset)
+
     filename = "ReadWriteMod.F90"
-    mod_name = filename.replace(".F90", "")
+    mod_name = filename.removesuffix(".F90")
 
-    logger = logging_configs.get_logger("genNetCDF")
+    logger = unit_test.logger
 
-    lines: list[str] = []
-    lines.extend(
-        [
-            f"module {mod_name}\n",
-            f"{tabs}!!! Auto-generated Fortran code for netcdf-fortran I/O\n",
-            f"{tabs}use netcdf\n",
-            f"{tabs}use nc_io\n",
-            f"{tabs}use nc_allocMod\n",
-        ]
+    type_dict = unit_test.type_dict
+    case_dir = unit_test.case_dir
+    instance_to_type = unit_test.instance_to_type_map()
+
+    active_instances, use_statements, elminst_vars = (
+        hio.get_var_usage_and_elm_inst_vars(type_dict)
     )
 
-    active_instances, use_statements, elminst_vars = hio.get_var_usage_and_elm_inst_vars(type_dict)
+    dtype_vars: dict[str, Variable] = {}
+    guards: dict[str, ConditionExpectation] = {}
 
-    lines.extend(list(use_statements))
+    for inst_var in active_instances.values():
+        type_name = instance_to_type[inst_var.name]
+        dtype = type_dict[type_name]
+
+        for field_var in dtype.components.values():
+            if not field_var.active or field_var.pointer:
+                continue
+
+            new_var = field_var.copy()
+            new_var.name = f"{inst_var.name}%" f"{field_var.name.split('%')[-1]}"
+
+            dtype_vars[new_var.name] = new_var
+
+            condition = unit_test.guard_for_variable(field_var)
+            if inst_var.name == "params_inst":
+                unit_test.logger.info(f"{ condition }")
+            if condition is not None:
+                guards[new_var.name] = condition
+
+    lines: list[str] = [
+        f"module {mod_name}\n",
+        f"{tabs}!!! Auto-generated Fortran code for netcdf-fortran I/O\n",
+        f"{tabs}use netcdf\n",
+        f"{tabs}use nc_io\n",
+        f"{tabs}use nc_allocMod\n",
+    ]
+
+    lines.extend(sorted(use_statements))
+
+    # Import namelist variables required by guards.
+    lines.extend(
+        f"{tabs}{stmt}\n"
+        for stmt in sorted(
+            unit_test.guard_use_statements_for(
+                [
+                    field_var
+                    for dtype in type_dict.values()
+                    for field_var in dtype.components.values()
+                    if field_var.active
+                ]
+            )
+        )
+    )
+
     lines.extend(
         [
             f"{tabs}implicit none\n",
             f"{tabs}public :: read_elmtypes, write_elmtypes, define_vars\n",
-            f"{tabs}logical, parameter :: verbose = .False.\n"
+            f"{tabs}logical, parameter :: verbose = .false.\n",
             "contains\n",
         ]
     )
 
-    dtype_vars: dict[str, Variable] = {}
-
-    for inst_var in active_instances.values():
-        type_name = inst_to_dtype_map[inst_var.name]
-        dtype = type_dict[type_name]
-        for field_var in dtype.components.values():
-            if field_var.active and not field_var.pointer:
-                new_var = field_var.copy()
-                new_var.name = f"{inst_var.name}%{field_var.name.split('%')[-1]}"
-                dtype_vars[new_var.name] = new_var
-
-    sub_lines = create_nc_define_vars(dtype_vars, elminst_vars=elminst_vars,time=True, bounds=True)
-    lines.extend(sub_lines)
-    sub_lines = create_netcdf_io_routine(
-        mode=hio.IOMode.read,
-        sub_name="read_elmtypes",
-        vars=dtype_vars,
-        time=True,
-        bounds=True,
-        elminst_vars=elminst_vars,
+    lines.extend(
+        create_nc_define_vars(
+            dtype_vars,
+            time=True,
+            elminst_vars=elminst_vars,
+            guards=guards,
+            bounds=True,
+        )
     )
-    lines.extend(sub_lines)
-    sub_lines = create_netcdf_io_routine(
-        mode=hio.IOMode.write,
-        sub_name="write_elmtypes",
-        vars=dtype_vars,
-        time=True,
-        bounds=True,
-        elminst_vars=elminst_vars,
+
+    lines.extend(
+        create_netcdf_io_routine(
+            mode=hio.IOMode.read,
+            sub_name="read_elmtypes",
+            vars=dtype_vars,
+            time=True,
+            elminst_vars=elminst_vars,
+            guards=guards,
+        )
     )
-    lines.extend(sub_lines)
+
+    lines.extend(
+        create_netcdf_io_routine(
+            mode=hio.IOMode.write,
+            sub_name="write_elmtypes",
+            vars=dtype_vars,
+            time=True,
+            elminst_vars=elminst_vars,
+            guards=guards,
+        )
+    )
 
     lines.append(f"end module {mod_name}\n")
 
     logger.info(f"Writing {filename}")
-    with open(casedir / filename, "w") as ofile:
+
+    with open(case_dir / filename, "w") as ofile:
         ofile.writelines(lines)
 
-    return
 
-
-def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: Path):
-    """
-    Function generates fortran module for constants needed in unit-test
-    """
-
+def generate_constants_io_netcdf(
+    unit_test: FunctionalUnitTest,
+) -> None:
     tabs = hio.indent(hio.Tab.reset)
 
     filename = "FUTConstantsMod.F90"
-    mod_name = filename.replace(".F90", "")
+    mod_name = filename.removesuffix(".F90")
 
-    lines: list[str] = []
-    lines.append(f"module {mod_name}\n")
-    lines.append(f"{tabs}!!! Auto-generated Fortran code for netcdf-fortran I/O\n")
-    lines.append(f"{tabs}use netcdf\n")
-    lines.append(f"{tabs}use nc_io\n")
-    lines.append(f"{tabs}use nc_allocMod\n")
+    vars = unit_test.non_parameter_global_vars
+    case_dir = unit_test.case_dir
+
+    guard_vars = unit_test.guard_variables()
+    regular_vars = {name: var for name, var in vars.items() if name not in guard_vars}
+
+    guards: GuardMap = {
+        var.name: condition
+        for var in regular_vars.values()
+        if (condition := unit_test.guard_for_variable(var)) is not None
+    }
+
+    lines: list[str] = [
+        f"module {mod_name}\n",
+        f"{tabs}!!! Auto-generated Fortran code for netcdf-fortran I/O\n",
+        f"{tabs}use netcdf\n",
+        f"{tabs}use nc_io\n",
+        f"{tabs}use nc_allocMod\n",
+    ]
+
     use_stmts, _ = hio.var_use_statements(vars)
     lines.extend(use_stmts)
 
@@ -149,39 +246,115 @@ def generate_constants_io_netcdf(vars: dict[str, Variable], casedir: Path):
         [
             f"{tabs}implicit none\n",
             f"{tabs}public :: read_constants, write_constants, define_vars\n",
-            f"{tabs}logical, parameter :: verbose=.False.\n"
+            f"{tabs}logical, parameter :: verbose = .false.\n",
             "contains\n",
         ]
     )
-    sub_lines = create_nc_define_vars(vars, time=False)
-    lines.extend(sub_lines)
 
-    sub_lines = create_netcdf_io_routine(
-        hio.IOMode.read,
-        "read_constants",
-        vars,
-        time=False,
-        elminst_vars=[],
+    # All variables still need to be defined in the NetCDF file.
+    lines.extend(
+        create_nc_define_vars(
+            vars,
+            time=False,
+            guards=guards,
+        )
     )
 
-    lines.extend(sub_lines)
-
-    sub_lines = create_netcdf_io_routine(
-        hio.IOMode.write,
-        "write_constants",
-        vars,
-        time=False,
-        elminst_vars=[],
+    lines.extend(
+        create_constants_io_routine(
+            mode=hio.IOMode.read,
+            sub_name="read_constants",
+            guard_vars=guard_vars,
+            vars=regular_vars,
+            guards=guards,
+        )
     )
-    lines.extend(sub_lines)
 
-    tabs = hio.indent(hio.Tab.unshift)
-    lines.extend(f"{tabs}end module {mod_name}\n")
+    lines.extend(
+        create_constants_io_routine(
+            mode=hio.IOMode.write,
+            sub_name="write_constants",
+            guard_vars=guard_vars,
+            vars=regular_vars,
+            guards=guards,
+        )
+    )
 
-    with open(f"{casedir}/{filename}", "w") as ofile:
+    lines.append(f"end module {mod_name}\n")
+
+    with open(case_dir / filename, "w") as ofile:
         ofile.writelines(lines)
 
-    return
+
+def create_constants_io_routine(
+    mode: hio.IOMode,
+    sub_name: str,
+    guard_vars: dict[str, Variable],
+    vars: dict[str, Variable],
+    guards: GuardMap,
+) -> list[str]:
+    tabs = hio.indent()
+
+    lines = [
+        f"{tabs}subroutine {sub_name}(io_inst)\n",
+    ]
+    tabs = hio.indent(hio.Tab.shift)
+
+    lines.extend(
+        [
+            f"{tabs}type(spel_io_type), intent(inout) :: io_inst\n",
+            f"{tabs}integer :: ncid, timestep\n",
+            f"{tabs}character(len=256) :: new_fn\n",
+            f"{tabs}new_fn = trim(io_inst%get_fn())\n",
+        ]
+    )
+
+    if mode == hio.IOMode.read:
+        lines.append(f"{tabs}ncid = nc_create_or_open_file(trim(new_fn), read_file)\n")
+
+        lines.extend(
+            create_nc_read(
+                guard_vars,
+                time=False,
+            )
+        )
+        lines.extend(
+            create_nc_read(
+                vars,
+                time=False,
+                guards=guards,
+            )
+        )
+
+    else:
+        lines.extend(
+            [
+                f"{tabs}print *, 'creating file: ', trim(new_fn)\n",
+                f"{tabs}ncid = nc_create_or_open_file(trim(new_fn), create_file)\n",
+                f"{tabs}call define_vars(ncid)\n",
+                f"{tabs}call check(nf90_enddef(ncid))\n",
+            ]
+        )
+        lines.extend(
+            create_nc_write(
+                guard_vars,
+                time=False,
+            )
+        )
+        lines.extend(
+            create_nc_write(
+                vars,
+                time=False,
+                guards=guards,
+            )
+        )
+
+    lines.append(f"{tabs}call check(nf90_close(ncid))\n")
+
+    tabs = hio.indent(hio.Tab.unshift)
+    lines.append(f"{tabs}end subroutine {sub_name}\n")
+
+    return lines
 
 
 def create_netcdf_io_routine(
@@ -189,16 +362,14 @@ def create_netcdf_io_routine(
     sub_name: str,
     vars: dict[str, Variable],
     time: bool,
-    elminst_vars: list[tuple[str,Variable]],
-    bounds: bool = False,
+    elminst_vars: list[tuple[str, Variable]],
+    guards: GuardMap,
 ) -> list[str]:
     tabs = hio.indent()
-    if bounds:
-        arg_str: str = "io_inst, bounds"
-        define_args: str = "ncid, bounds"
-    else:
-        arg_str: str = "io_inst"
-        define_args: str = "ncid"
+
+    bounds = True
+    arg_str: str = "io_inst, bounds"
+    define_args: str = "ncid, bounds"
 
     intent = "inout" if mode == hio.IOMode.read else "in"
     decls: list[str] = []
@@ -212,7 +383,7 @@ def create_netcdf_io_routine(
     tabs = hio.indent(hio.Tab.shift)
 
     mode_str = "create_file" if mode == hio.IOMode.write else "read_file"
-    stmt = f"{tabs}type(bounds_type), intent({intent}) :: bounds\n" if bounds else ""
+    stmt = f"{tabs}type(bounds_type), intent({intent}) :: bounds\n"
     lines.extend([f"{decl}\n" for decl in decls])
 
     # Arguments + Locals:
@@ -226,42 +397,31 @@ def create_netcdf_io_routine(
     lines.append(f"{tabs}new_fn = trim(io_inst%get_fn())\n")
 
     if mode == hio.IOMode.write:
-        if bounds:
-            lines.extend(
-                [
-                    f"{tabs}if( io_inst%new_file) then\n",
-                    f"{tabs}{tabs}print *, 'creating file: ', trim(new_fn)\n"
-                    f"{tabs}{tabs}ncid = nc_create_or_open_file(trim(new_fn), create_file)\n",
-                    f"{tabs}{tabs}io_inst%new_file = .false.\n",
-                    f"{tabs}{tabs}call define_vars({define_args})\n",
-                    f"{tabs}{tabs}call check(nf90_enddef(ncid))\n",
-                    f"{tabs}else\n",
-                    f"{tabs}{tabs}ncid = nc_create_or_open_file(trim(new_fn), append_file)\n",
-                    f"{tabs}end if\n",
-                    f"{tabs}timestep = io_inst%timestep\n",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    f"{tabs}print *, 'creating file: ', trim(new_fn)\n"
-                    f"{tabs}ncid = nc_create_or_open_file(trim(new_fn), create_file)\n",
-                    f"{tabs}call define_vars({define_args})\n",
-                    f"{tabs}call check(nf90_enddef(ncid))\n",
-                ]
-            )
+        lines.extend(
+            [
+                f"{tabs}if( io_inst%new_file) then\n",
+                f"{tabs}{tabs}print *, 'creating file: ', trim(new_fn)\n"
+                f"{tabs}{tabs}ncid = nc_create_or_open_file(trim(new_fn), create_file)\n",
+                f"{tabs}{tabs}io_inst%new_file = .false.\n",
+                f"{tabs}{tabs}call define_vars({define_args})\n",
+                f"{tabs}{tabs}call check(nf90_enddef(ncid))\n",
+                f"{tabs}else\n",
+                f"{tabs}{tabs}ncid = nc_create_or_open_file(trim(new_fn), append_file)\n",
+                f"{tabs}end if\n",
+                f"{tabs}timestep = io_inst%timestep\n",
+            ]
+        )
 
     if mode == hio.IOMode.read:
         lines.append(f"{tabs}if(io_inst%end_run) return\n")
-        if bounds:
-            lines.append(
-                f"{tabs}if(io_inst%dt_in_file == 99999) io_inst%dt_in_file = nc_read_timeslices(new_fn)\n"
-            )
+        lines.append(
+            f"{tabs}if(io_inst%dt_in_file == 99999) io_inst%dt_in_file = nc_read_timeslices(new_fn)\n"
+        )
         lines.append(f"{tabs}timestep = io_inst%timestep\n")
         lines.append(f"{tabs}ncid = nc_create_or_open_file(trim(new_fn), {mode_str})\n")
-        sub_lines = create_nc_read(vars, time)
+        sub_lines = create_nc_read(vars, time, guards=guards)
     else:
-        sub_lines = create_nc_write(vars, time=time)
+        sub_lines = create_nc_write(vars, time=time, guards=guards)
     lines.extend(sub_lines)
     lines.append(f"{tabs}call check(nf90_close(ncid))\n")
     tabs = hio.indent(hio.Tab.unshift)
@@ -270,33 +430,217 @@ def create_netcdf_io_routine(
     return lines
 
 
+def create_nc_def(
+    vars: dict[str, Variable],
+    time: bool,
+    guards: GuardMap | None = None,
+) -> list[str]:
+    """
+    Generate nc_define_var calls for variables prior to writing.
+    """
+    if guards is None:
+        guards = {}
 
-def create_nc_def(vars: dict[str, Variable], time: bool) -> list[str]:
-    """
-    Function generates calls to 'nc_define_vars' calls for defining variables prior to writing
-    """
     lines: list[str] = []
     tabs = hio.indent()
 
     for var in vars.values():
+        var_lines: list[str] = []
+
         dim_names_str = get_dim_names(var, time)
         varname = var.name.replace("%", "__")
         nc_type = match_nc_type(var.type)
+
         time_str = ".true." if time and var.dim > 0 else ".false."
+
         if nc_type == "nf90_char":
             dim_str = f"[len({var.name})]"
-            stmt = f"call nc_define_var(ncid, 1, {dim_str}, dim_names, '{varname}', {nc_type}, varid, {time_str})\n"
+            stmt = (
+                f"call nc_define_var("
+                f"ncid, 1, {dim_str}, dim_names, "
+                f"'{varname}', {nc_type}, varid, {time_str})\n"
+            )
         else:
             dim_str = f"shape({var.name})" if var.dim > 0 else "[0]"
-            stmt = f"call nc_define_var(ncid, {var.dim}, {dim_str}, dim_names, '{varname}', {nc_type}, varid, {time_str})\n"
+
+            stmt = (
+                f"call nc_define_var("
+                f"ncid, {var.dim}, {dim_str}, dim_names, "
+                f"'{varname}', {nc_type}, varid, {time_str})\n"
+            )
 
         if var.dim > 0 or nc_type == "nf90_char":
-            lines.append(f"{tabs}dim_names(1:{var.dim}) = {dim_names_str}\n")
-        lines.append(f"{tabs}{stmt}")
-        # if array store lbounds and ubounds:
+            var_lines.append(f"{tabs}dim_names(1:{var.dim}) = " f"{dim_names_str}\n")
+
+        var_lines.append(f"{tabs}{stmt}")
+
         if var.dim > 0:
-            stmt = f"call check(nf90_put_att(ncid, varid, 'lbounds', lbound({var.name}))); call check(nf90_put_att(ncid, varid, 'ubounds', ubound({var.name})));"
-            lines.append(f"{tabs}{stmt}\n")
+            var_lines.append(
+                f"{tabs}call check("
+                f"nf90_put_att(ncid, varid, 'lbounds', "
+                f"lbound({var.name}))); "
+                f"call check("
+                f"nf90_put_att(ncid, varid, 'ubounds', "
+                f"ubound({var.name})))\n"
+            )
+
+        condition = guards.get(var.name)
+
+        lines.extend(
+            guard_fortran_lines(
+                var_lines,
+                condition,
+                tabs,
+            )
+        )
+
+    return lines
+
+
+def create_nc_write(
+    vars: dict[str, Variable],
+    time: bool,
+    guards: GuardMap | None = None,
+) -> list[str]:
+    """
+    Generate NetCDF write calls.
+
+    Variables with a corresponding ConditionExpectation are emitted inside
+    a Fortran IF block.
+    """
+    if guards is None:
+        guards = {}
+
+    lines: list[str] = []
+    tabs = hio.indent()
+
+    scalars = [var for var in vars.values() if var.dim == 0]
+    arrays = [var for var in vars.values() if var.dim > 0]
+
+    timestep = ", timestep" if time else ", -1"
+
+    for var in scalars:
+        varname = var.name.replace("%", "__")
+
+        if var.type == "character":
+            stmt = f"call nc_write_var_array(" f"ncid, {var.name}, '{varname}')\n"
+        else:
+            stmt = f"call nc_write_var_scalar(" f"ncid, {var.name}, '{varname}')\n"
+
+        var_lines = [
+            f"{tabs}if(verbose) print *, '{varname}'\n",
+            f"{tabs}{stmt}",
+        ]
+
+        lines.extend(
+            guard_fortran_lines(
+                var_lines,
+                guards.get(var.name),
+                tabs,
+            )
+        )
+
+    for var in arrays:
+        dim_names_str = get_dim_names(var, time)
+        reshape_str = f"reshape({var.name}, " f"[product(shape({var.name}))])"
+        varname = var.name.replace("%", "__")
+
+        stmt = (
+            f"call nc_write_var_array("
+            f"ncid, {var.dim}, shape({var.name}), "
+            f"{dim_names_str}, {reshape_str}, "
+            f"'{varname}'{timestep})\n"
+        )
+
+        var_lines = [
+            f"{tabs}if(verbose) print *, '{varname}'\n",
+            f"{tabs}{stmt}",
+        ]
+
+        lines.extend(
+            guard_fortran_lines(
+                var_lines,
+                guards.get(var.name),
+                tabs,
+            )
+        )
+
+    return lines
+
+
+def create_nc_read(
+    vars: dict[str, Variable],
+    time: bool,
+    guards: GuardMap | None = None,
+) -> list[str]:
+    """
+    Generate NetCDF read calls.
+
+    Variables with a corresponding ConditionExpectation are emitted inside
+    a Fortran IF block.
+    """
+    if guards is None:
+        guards = {}
+
+    lines: list[str] = []
+    tabs = hio.indent()
+    scalars = [var for var in vars.values() if var.dim == 0]
+    arrays = [var for var in vars.values() if var.dim > 0]
+
+    time_str = ", timestep" if time else ", -1"
+
+    for var in scalars:
+        varname = var.name.replace("%", "__")
+
+        var_lines: list[str] = []
+
+        if var.ptrscalar:
+            var_lines.append(f"{tabs}allocate({var.name})\n")
+
+        if var.type == "character":
+            stmt = (
+                f"call nc_read_var("
+                f"ncid, '{varname}', "
+                f"'{var.name}_str', {var.name})\n"
+            )
+        else:
+            stmt = (
+                f"call nc_read_var(" f"ncid, '{varname}', " f"{var.name}{time_str})\n"
+            )
+
+        var_lines.append(f"{tabs}{stmt}")
+
+        lines.extend(
+            guard_fortran_lines(
+                var_lines,
+                guards.get(var.name),
+                tabs,
+            )
+        )
+
+    for var in arrays:
+        assert var.type != "character", (
+            "Need to implement array-of-character NetCDF read for " f"{var.name}"
+        )
+
+        varname = var.name.replace("%", "__")
+
+        var_lines = [
+            (f"{tabs}call nc_alloc(" f'ncid, "{varname}", {var.dim}, {var.name})\n'),
+            (
+                f"{tabs}call nc_read_var("
+                f"ncid, '{varname}', {var.dim}, "
+                f"{var.name}{time_str})\n"
+            ),
+        ]
+
+        lines.extend(
+            guard_fortran_lines(
+                var_lines,
+                guards.get(var.name),
+                tabs,
+            )
+        )
 
     return lines
 
@@ -315,11 +659,12 @@ def get_dim_names(var: Variable, time: bool) -> str:
     # if time:
     #     dim_names.append("'time'")
 
-    def adjust_dim_label(label: str, i:int)-> str:
+    def adjust_dim_label(label: str, i: int) -> str:
         if label != "'_'":
             return label
         return f"'unk_{i}_{var.name}'"
-    dim_names = [ adjust_dim_label(i=i,label=name) for i, name in enumerate(dim_names)]
+
+    dim_names = [adjust_dim_label(i=i, label=name) for i, name in enumerate(dim_names)]
     dim_str = ",".join(dim_names)
     return f"[character(len=32) :: {dim_str}]"
 
@@ -338,78 +683,6 @@ def match_nc_type(var_type: str) -> str:
             print(f"(match_nc_type) {var_type} Not Implemented")
 
 
-def create_nc_write(vars: dict[str, Variable], time: bool) -> list[str]:
-    """
-    Function to create the
-        call nc_write_var(ncid, dim, shape, dim_names, var, varname)
-    or for characters:
-        call nc_write_var(ncid, var, varname)
-    """
-    lines: list[str] = []
-    tabs = hio.indent()
-
-    scalars = [var for var in vars.values() if var.dim == 0]
-    arrays = [var for var in vars.values() if var.dim > 0]
-
-    timestep = ", timestep" if time else ", -1"
-
-    for var in scalars:
-        varname = var.name.replace("%", "__")
-        if var.type == "character":
-            stmt = f"call nc_write_var_array(ncid, {var.name}, '{varname}')\n"
-        else:
-            stmt = f"call nc_write_var_scalar(ncid, {var.name}, '{varname}')\n"
-        lines.append(f"{tabs} if(verbose) print *, '{varname}'\n{tabs}{stmt}")
-
-    for var in arrays:
-        dim_names_str = get_dim_names(var, time)
-        reshape_str = f"reshape({var.name}, [product(shape({var.name}))])"
-        varname = var.name.replace("%", "__")
-        stmt = f"call nc_write_var_array(ncid,{var.dim}, shape({var.name}), {dim_names_str}, {reshape_str}, '{varname}'{timestep})\n"
-        lines.append(f"{tabs} if(verbose) print *, '{varname}'\n{tabs}{stmt}")
-
-    return lines
-
-
-def create_nc_read(vars: dict[str, Variable], time: bool) -> list[str]:
-    """
-    Function to create the
-        call nc_read_var(ncid, dim, shape, dim_names, var, varname)
-    or for characters:
-        call nc_read_var(ncid, var, varname)
-    """
-    lines: list[str] = []
-    tabs = hio.indent()
-    scalars = [var for var in vars.values() if var.dim == 0]
-    arrays = [var for var in vars.values() if var.dim > 0]
-
-    time_str = ", timestep" if time else ", -1"
-
-    for var in scalars:
-        varname = var.name.replace("%", "__")
-        if var.ptrscalar:
-            lines.append(f"{tabs}allocate({var.name})\n")
-        if var.type == "character":
-            stmt = (
-                f"call nc_read_var(ncid, '{varname}', '{var.name}_str', {var.name})\n"
-            )
-        else:
-            stmt = f"call nc_read_var(ncid, '{varname}', {var.name}{time_str})\n"
-        lines.append(f"{tabs}{stmt}")
-
-    for var in arrays:
-        assert (
-            var.type != "character"
-        ), f"Error - Need to implement array of characters nc write for {var.name}"
-
-        varname = var.name.replace("%", "__")
-        lines.append(f'{tabs}call nc_alloc(ncid, "{varname}", {var.dim}, {var.name})\n')
-        stmt = f"call nc_read_var(ncid,'{varname}', {var.dim}, {var.name}{time_str})\n"
-        lines.append(f"{tabs}{stmt}")
-
-    return lines
-
-
 def generate_verify(rw_set: set[str], type_dict: dict[str, DerivedType]):
     """
     rw_set is set of active elmtypes with status of 'w' or 'rw'
@@ -422,7 +695,7 @@ def generate_verify(rw_set: set[str], type_dict: dict[str, DerivedType]):
         for inst_var in dtype.instances.values()
         if inst_var.active
     }
-    use_statements, _ = hio.var_use_statements(active_instances,type_dict)
+    use_statements, _ = hio.var_use_statements(active_instances, type_dict)
     lines.extend(list(use_statements))
 
     return
@@ -435,8 +708,7 @@ def generate_nc_io():
     read_dims = 3
 
     tabs = hio.indent(hio.Tab.reset)
-    header: str = textwrap.dedent(
-        f"""
+    header: str = textwrap.dedent(f"""
     module nc_io
     {tabs}use netcdf
     {tabs}use iso_fortran_env
@@ -465,8 +737,7 @@ def generate_nc_io():
     {tabs}{tabs}procedure, private :: need_new_file
     {tabs}end type spel_io_type
     {tabs}type(spel_io_type), public :: io_constants, io_inputs, io_outputs
-    """
-    )
+    """)
     lines.append(header)
     lines.append(f"{tabs}interface nc_write_var_array\n")
 
@@ -541,8 +812,7 @@ def generate_nc_io():
 
 def gen_spel_type_routines() -> str:
     tabs = hio.indent(Tab.reset)
-    return textwrap.dedent(
-        f"""
+    return textwrap.dedent(f"""
     subroutine init(this,base_fn,max_tpf,read_io)
     {tabs}class(spel_io_type), intent(inout) :: this
     {tabs}character(len=*), intent(in) :: base_fn
@@ -590,8 +860,7 @@ def gen_spel_type_routines() -> str:
     {tabs}new_fn = trim(this%fn)//trim(ch_num)//'.nc'
     {tabs}if(this%read_mode) this%end_run = .not. (this%check_file_exists(new_fn))
     end function get_fn
-    """
-    )
+    """)
 
 
 def gen_nc_read_type(dim: int, t: str) -> str:
@@ -614,8 +883,7 @@ def gen_read_numeric(dim: int, t: str) -> str:
     if dim > 0:
         dim_str = make_dim_str(dim, lambda i: ":")
 
-        return textwrap.dedent(
-            f"""
+        return textwrap.dedent(f"""
     {tabs}subroutine {subname}(ncid, varname, ndim, var, timestep)
     {tabs}   integer, intent(in) :: ncid
     {tabs}   character(len=*), intent(in) :: varname
@@ -641,11 +909,9 @@ def gen_read_numeric(dim: int, t: str) -> str:
     {tabs}   call check(nf90_get_var(ncid, var_id, var,start=start, count=count))
     {tabs}end subroutine {subname}
 
-        """
-        )
+        """)
     else:  # dim == 0
-        return textwrap.dedent(
-            f"""
+        return textwrap.dedent(f"""
     {tabs}subroutine {subname}(ncid, varname, var, timestep)
     {tabs}   integer, intent(in) :: ncid
     {tabs}   character(len=*), intent(in) :: varname
@@ -664,14 +930,12 @@ def gen_read_numeric(dim: int, t: str) -> str:
     {tabs}    endif 
     {tabs}end subroutine {subname}
 
-    """
-        )
+    """)
 
 
 def gen_read_str() -> str:
     tabs = hio.indent(Tab.reset)
-    return textwrap.dedent(
-        f"""
+    return textwrap.dedent(f"""
     {tabs}subroutine nc_read_string(ncid, varname, dim_name, var)
     {tabs}   integer, intent(in) :: ncid
     {tabs}   character(len=*), intent(in) :: varname
@@ -691,8 +955,7 @@ def gen_read_str() -> str:
     {tabs}   end do
     {tabs}end subroutine
 
-        """
-    )
+        """)
 
 
 def make_dim_str(dim: int, f: Callable[[int], str]) -> str:
@@ -708,8 +971,7 @@ def gen_read_logical(dim: int) -> str:
         temp_decl = f"integer, allocatable :: temp({dim_str})"
         bounds_str = make_dim_str(dim, lambda i: f"lbs({i+1}):ubs({i+1})")
         alloc_temp = f"allocate(temp({bounds_str}))"
-        return textwrap.dedent(
-            f"""
+        return textwrap.dedent(f"""
    {tabs}subroutine {subname}(ncid, varname, ndim, var, timestep)
    {tabs}   integer, intent(in) :: ncid
    {tabs}   character(len=*), intent(in) :: varname
@@ -728,11 +990,9 @@ def gen_read_logical(dim: int) -> str:
 
    {tabs}end subroutine {subname}
 
-        """
-        )
+        """)
     else:
-        return textwrap.dedent(
-            f"""
+        return textwrap.dedent(f"""
    {tabs} subroutine {subname}(ncid, varname, var, timestep)
    {tabs}   integer, intent(in) :: ncid
    {tabs}   character(len=*), intent(in) :: varname
@@ -749,14 +1009,12 @@ def gen_read_logical(dim: int) -> str:
 
    {tabs} end subroutine {subname}
 
-        """
-        )
+        """)
 
 
 def gen_check() -> str:
     tabs = hio.indent(Tab.reset)
-    return textwrap.dedent(
-        f"""
+    return textwrap.dedent(f"""
     {tabs}subroutine check(status)
     {tabs}   integer, intent(in) :: status
     {tabs}   if (status /= nf90_noerr) then
@@ -764,14 +1022,12 @@ def gen_check() -> str:
     {tabs}      stop 2
     {tabs}   end if
     {tabs}end subroutine check
-    """
-    )
+    """)
 
 
 def gen_nc_file() -> str:
     tabs = hio.indent(Tab.reset)
-    return textwrap.dedent(
-        f"""
+    return textwrap.dedent(f"""
     {tabs}integer function nc_create_or_open_file(fn, mode) result(ncid)
     {tabs}   character(len=*), intent(in) :: fn
     {tabs}   integer, intent(in) :: mode
@@ -789,14 +1045,12 @@ def gen_nc_file() -> str:
     {tabs}   end if
     {tabs}end function nc_create_or_open_file
 
-    """
-    )
+    """)
 
 
 def gen_nc_define_var() -> str:
     tabs = hio.indent(Tab.reset)
-    return textwrap.dedent(
-        f"""
+    return textwrap.dedent(f"""
     {tabs}subroutine nc_define_var(ncid, ndim, dims, dim_list, varname, xtype, var_id, time)
     {tabs}   integer, intent(in) :: ncid, ndim
     {tabs}   integer, intent(in) :: dims(ndim)
@@ -843,8 +1097,7 @@ def gen_nc_define_var() -> str:
 
     {tabs}   deallocate (dim_ids)
     {tabs}end subroutine
-    """
-    )
+    """)
 
 
 def gen_nc_write_numeric_scalar() -> list[str]:
@@ -855,9 +1108,7 @@ def gen_nc_write_numeric_scalar() -> list[str]:
 
     for t in n_types:
         ftype = map_ftype[t]
-        lines.append(
-            textwrap.dedent(
-                f"""
+        lines.append(textwrap.dedent(f"""
        {tabs}subroutine nc_write_{t}_scalar(ncid, var, varname)
        {tabs}   integer, intent(in) :: ncid
        {tabs}   {ftype}, intent(in) :: var
@@ -869,9 +1120,7 @@ def gen_nc_write_numeric_scalar() -> list[str]:
        {tabs}   call check(nf90_put_var(ncid, var_id, var))
 
        {tabs}end subroutine nc_write_{t}_scalar
-        """
-            )
-        )
+        """))
     return lines
 
 
@@ -883,8 +1132,7 @@ def gen_nc_write_numeric_array() -> list[str]:
 
     for t in n_types:
         ftype = map_ftype[t]
-        sub_lines = textwrap.dedent(
-            f"""
+        sub_lines = textwrap.dedent(f"""
     {tabs}subroutine nc_write_{t}(ncid, ndim, dims, dim_names, var, varname, timestep)
     {tabs}   integer, intent(in) :: ncid
     {tabs}   integer, intent(in) :: ndim
@@ -936,16 +1184,14 @@ def gen_nc_write_numeric_array() -> list[str]:
     {tabs}   end select
     {tabs}end subroutine nc_write_{t}
 
-        """
-        )
+        """)
         lines.append(sub_lines)
     return lines
 
 
 def gen_nc_write_string() -> str:
     tabs = hio.indent(Tab.reset)
-    return textwrap.dedent(
-        f"""
+    return textwrap.dedent(f"""
     {tabs}subroutine nc_write_string(ncid, var, varname)
     {tabs}  integer, intent(in) :: ncid
     {tabs}   character(len=*), intent(in) :: varname
@@ -954,14 +1200,12 @@ def gen_nc_write_string() -> str:
     {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
     {tabs}   call check(nf90_put_var(ncid, var_id, trim(var)))
     {tabs}end subroutine nc_write_string
-    """
-    )
+    """)
 
 
 def gen_nc_write_logical() -> str:
     tabs = hio.indent(Tab.reset)
-    return textwrap.dedent(
-        f"""
+    return textwrap.dedent(f"""
     {tabs}subroutine nc_write_logical(ncid, ndim, dims, dim_names, var, varname, timestep)
     {tabs}   integer, intent(in) :: ncid, ndim
     {tabs}   integer, intent(in) :: dims(ndim)
@@ -1022,14 +1266,12 @@ def gen_nc_write_logical() -> str:
     {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
     {tabs}   call check(nf90_put_var(ncid, var_id, buf))
     {tabs}end subroutine nc_write_logical_scalar
-    """
-    )
+    """)
 
 
 def gen_nc_read_timeslices() -> str:
     tabs = hio.indent(Tab.reset)
-    return textwrap.dedent(
-        f"""
+    return textwrap.dedent(f"""
     {tabs}integer function nc_read_timeslices(fn) result(time_len)
     {tabs}    character(len=*), intent(in) :: fn
 
@@ -1054,8 +1296,8 @@ def gen_nc_read_timeslices() -> str:
     {tabs}    call check(nf90_close(ncid))
 
     {tabs}end function nc_read_timeslices
-    """
-    )
+    """)
+
 
 if __name__ == "__main__":
     generate_nc_io()

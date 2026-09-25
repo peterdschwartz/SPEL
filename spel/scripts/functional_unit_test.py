@@ -86,8 +86,6 @@ class FunctionalUnitTest:
         """Return a mapping from derived-type instance name to type name."""
         instance_to_user_type: InstToDTypeMap = {}
         for type_name, dtype in self.type_dict.items():
-            if "bounds" in type_name:
-                continue
             if not dtype.instances:
                 self.logger.warning("No instances found for %s", type_name)
             for instance in dtype.instances.values():
@@ -189,7 +187,7 @@ class FunctionalUnitTest:
         """Return derived-type fields written by any selected subroutine."""
         return {
             name
-            for subroutine in self.subroutine_dict.values()
+            for subroutine in self.primary_subroutines.values()
             for name, access in subroutine.elmtype_access_summary.items()
             if access in {"w", "rw"}
         }
@@ -208,15 +206,8 @@ class FunctionalUnitTest:
         self.prepare_main(instance_to_type)
         self.add_pointer_inits()
 
-        generate_elmtypes_io_netcdf(
-            self.type_dict,
-            instance_to_type,
-            self.case_dir,
-        )
-        generate_constants_io_netcdf(
-            vars=self.non_parameter_global_vars,
-            casedir=self.case_dir,
-        )
+        generate_elmtypes_io_netcdf(self)
+        generate_constants_io_netcdf(self)
 
         self.create_update_mod()
         self.prep_elm_init()
@@ -242,13 +233,16 @@ class FunctionalUnitTest:
         var_decl_to_add: list[str] = []
         calls: list[str] = []
 
-        for sub in self.subroutine_dict.values():
+        for sub in self.primary_subroutines.values():
             name = sub.name
             cmd = (
                 f'grep -rin -E "^[[:space:]]*(call[[:space:]]* {name})\\b" '
                 f"{ELM_SRC} | head -1"
             )
             output = sp.getoutput(cmd).split(":")
+            assert (
+                len(output) > 1
+            ), f"Couldn't find caller for {name}:\noutput - {output}"
             filename = output[0]
             call_ln = int(output[1]) - 1
 
@@ -382,7 +376,7 @@ class FunctionalUnitTest:
 
         modules_to_add = [
             f"use {subroutine.module}, only : {subroutine.name}\n"
-            for subroutine in self.subroutine_dict.values()
+            for subroutine in self.primary_subroutines.values()
         ]
 
         additions = self._find_parent_subroutine_call(instance_to_type)
@@ -537,13 +531,6 @@ class FunctionalUnitTest:
         """Write the reduced elm_instMod.F90 needed by this unit test."""
         write_elminstMod(self.type_dict, self.case_dir)
 
-    # ------------------------------------------------------------------
-    # Remaining unit-test generators
-    #
-    # These methods expose the existing generators through the object that
-    # owns their state. The legacy module-level functions remain below for
-    # compatibility with existing callers while they migrate to this API.
-    # ------------------------------------------------------------------
 
     def generate_cmake(self, files: list[str]) -> None:
         generate_cmake(files, self.case_dir)

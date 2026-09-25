@@ -77,10 +77,6 @@ class AnyOf:
         return hash((AnyOf, frozenset(self.items)))
 
 
-def to_fortran_if(condition: ConditionExpectation) -> list[str]:
-    return [f"if ({condition.to_fortran()}) then\n", "end if\n"]
-
-
 ConditionExpectation: TypeAlias = Expectation | AllOf | AnyOf
 
 
@@ -149,20 +145,60 @@ _REVERSED_COMPARISON = {
     ".le.": ".ge.",
 }
 
-NO_EXPECTATION = AllOf(())
+NO_EXPECTATION = AllOf(())  # TRUE
+IMPOSSIBLE_EXPECTATION = AnyOf(())  # False
 
 
-def simplify_expectations(items: set[Expectation]) -> ConditionExpectation:
-    """ """
-    res: set[Expectation] = items.copy()
-    to_remove: set[Expectation] = set()
-    for left, right in combinations(items, 2):
-        if _are_complete(left, right):
-            to_remove.add(left)
-            to_remove.add(right)
+def negate(
+    condition: ConditionExpectation,
+) -> ConditionExpectation:
+    match condition:
+        case Expectation(variable, constraint):
+            if constraint == "True":
+                return Expectation(variable, "False")
 
-    res.difference_update(to_remove)
-    return _any_of(*res)
+            if constraint == "False":
+                return Expectation(variable, "True")
+
+            parts = constraint.split(maxsplit=1)
+            if len(parts) != 2:
+                raise ValueError(f"Cannot negate constraint: {constraint!r}")
+
+            op, rhs = parts
+
+            try:
+                negated_op = _NEGATED_COMPARISON[op.lower()]
+            except KeyError:
+                raise ValueError(f"Unknown comparison operator {op!r}") from None
+
+            return Expectation(
+                variable,
+                f"{negated_op} {rhs}",
+            )
+
+        case AllOf(items):
+            # !(A && B) == !A || !B
+            return AnyOf(tuple(negate(item) for item in items))
+
+        case AnyOf(items):
+            # !(A || B) == !A && !B
+            return AllOf(tuple(negate(item) for item in items))
+
+
+def simplify(
+    condition: ConditionExpectation,
+) -> ConditionExpectation:
+    match condition:
+        case Expectation():
+            return condition
+
+        case AllOf(items):
+            return _simplify_all_of(items)
+
+        case AnyOf(items):
+            return _simplify_any_of(items)
+
+    raise TypeError(f"Unknown condition type: {type(condition)}")
 
 
 def _are_complete(left: Expectation, right: Expectation) -> bool:
@@ -389,3 +425,167 @@ def log_if_condition_expectations(
             )
 
     return expectation
+
+
+def _simplify_all_of(
+    items: tuple[ConditionExpectation, ...],
+) -> ConditionExpectation:
+    simplified: set[ConditionExpectation] = set()
+
+    # Recursively simplify and flatten nested ANDs.
+    for item in items:
+        item = simplify(item)
+
+        # A && False == False
+        if item == IMPOSSIBLE_EXPECTATION:
+            return IMPOSSIBLE_EXPECTATION
+
+        # A && True == A
+        if item == NO_EXPECTATION:
+            continue
+
+        if isinstance(item, AllOf):
+            simplified.update(item.items)
+        else:
+            simplified.add(item)
+
+    if not simplified:
+        return NO_EXPECTATION
+
+    # A && !A == False
+    for item in simplified:
+        if simplify(negate(item)) in simplified:
+            return IMPOSSIBLE_EXPECTATION
+
+    # Absorption:
+    #
+    # A && (A || B) == A
+    absorbed: set[ConditionExpectation] = set()
+
+    for item in simplified:
+        if isinstance(item, AnyOf):
+            if any(subitem in simplified for subitem in item.items):
+                absorbed.add(item)
+
+    simplified -= absorbed
+
+    if len(simplified) == 1:
+        return next(iter(simplified))
+
+    return AllOf(tuple(simplified))
+
+
+def _simplify_any_of(
+    items: tuple[ConditionExpectation, ...],
+) -> ConditionExpectation:
+    simplified: set[ConditionExpectation] = set()
+
+    # Recursively simplify and flatten nested ORs.
+    for item in items:
+        item = simplify(item)
+
+        # A || True == True
+        if item == NO_EXPECTATION:
+            return NO_EXPECTATION
+
+        # A || False == A
+        if item == IMPOSSIBLE_EXPECTATION:
+            continue
+
+        if isinstance(item, AnyOf):
+            simplified.update(item.items)
+        else:
+            simplified.add(item)
+
+    if not simplified:
+        return IMPOSSIBLE_EXPECTATION
+
+    # A || !A == True
+    for item in simplified:
+        if simplify(negate(item)) in simplified:
+            return NO_EXPECTATION
+
+    # Absorption:
+    #
+    # A || (A && B) == A
+    absorbed: set[ConditionExpectation] = set()
+
+    for item in simplified:
+        if isinstance(item, AllOf):
+            if any(subitem in simplified for subitem in item.items):
+                absorbed.add(item)
+
+    simplified -= absorbed
+
+    # (A && B) || (A && !B) -> A
+    simplified = _combine_anyof_terms(simplified)
+
+    if len(simplified) == 1:
+        return next(iter(simplified))
+
+    return AnyOf(tuple(simplified))
+
+
+def _combine_anyof_terms(
+    terms: set[ConditionExpectation],
+) -> set[ConditionExpectation]:
+    changed = True
+
+    while changed:
+        changed = False
+        term_list = list(terms)
+
+        for i, lhs in enumerate(term_list):
+            for rhs in term_list[i + 1 :]:
+                combined = _combine_complementary_terms(lhs, rhs)
+
+                if combined is None:
+                    continue
+
+                terms.remove(lhs)
+                terms.remove(rhs)
+                terms.add(simplify(combined))
+
+                changed = True
+                break
+
+            if changed:
+                break
+
+    return terms
+
+
+def _combine_complementary_terms(
+    lhs: ConditionExpectation,
+    rhs: ConditionExpectation,
+) -> ConditionExpectation | None:
+    lhs_terms = set(lhs.items) if isinstance(lhs, AllOf) else {lhs}
+
+    rhs_terms = set(rhs.items) if isinstance(rhs, AllOf) else {rhs}
+
+    common = lhs_terms & rhs_terms
+
+    lhs_remaining = lhs_terms - common
+    rhs_remaining = rhs_terms - common
+
+    # They must differ by exactly one term each.
+    if len(lhs_remaining) != 1 or len(rhs_remaining) != 1:
+        return None
+
+    lhs_term = next(iter(lhs_remaining))
+    rhs_term = next(iter(rhs_remaining))
+
+    # Those differing terms must be complements.
+    if simplify(negate(lhs_term)) != rhs_term:
+        return None
+
+    # X || !X -> True
+    if not common:
+        return NO_EXPECTATION
+
+    # (A && X) || (A && !X) -> A
+    if len(common) == 1:
+        return next(iter(common))
+
+    # (A && B && X) || (A && B && !X) -> A && B
+    return AllOf(tuple(common))

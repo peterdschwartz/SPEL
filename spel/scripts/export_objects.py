@@ -12,8 +12,9 @@ from spel.scripts.analyze_subroutines import Subroutine
 from spel.scripts.config import E3SM_SRCROOT, database_csv, scripts_dir
 from spel.scripts.DerivedType import DerivedType
 from spel.scripts.fortran_modules import FortranModule
-from spel.scripts.types import CallBinding, FunctionalUnitTest, ReadWrite, Scope
+from spel.scripts.types import CallBinding, ReadWrite, Scope
 from spel.scripts.utilityFunctions import Variable
+from spel.scripts.functional_unit_test import FunctionalUnitTest
 
 TypeDict = dict[str, DerivedType]
 SubDict = dict[str, Subroutine]

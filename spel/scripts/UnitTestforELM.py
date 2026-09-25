@@ -195,8 +195,8 @@ def create_unit_test(
         type_dict=unit_test.type_dict,
         inst_to_dtype_map=instance_to_user_type,
     )
-    for sub in subroutines.values():
-        sub.sort_inputs_outputs()
+    # for sub in subroutines.values():
+    #     sub.sort_inputs_outputs()
 
     active_set: set[str] = set()
     for inst_name, dtype in instance_dict.items():
@@ -216,10 +216,6 @@ def create_unit_test(
     # Create a makefile for the unit test
     file_list = [get_filename_from_module(m) for m in ordered_mods]
     unit_test.generate_cmake(files=file_list)
-
-    # for sub in subroutines.values():
-    #     if sub.abstract_call_tree:
-    #         sub.abstract_call_tree.print_tree()
 
     elmvars_dict = {}
     for dtype in type_dict.values():
