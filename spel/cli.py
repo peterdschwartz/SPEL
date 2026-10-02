@@ -61,10 +61,8 @@ def run(args):
     if args.case:
         unit_test = f"{SPEL_ROOT}/unit-tests/{args.case}"
     else:
-        # assme cwd
+        # assume cwd
         unit_test = "."
-    # cmake_path = f"{unit_test}/check_config.sh"
-    # test_exe = f"{unit_test}/build/elmtest"
 
     # Run config check
     subprocess.run(["./check_config.sh"], check=True, cwd=unit_test)
@@ -109,15 +107,37 @@ def upload(args):
     return
 
 
+def restore(args):
+    from spel.scripts.restore_files import restore_case
+
+    restore_case(args.case, dry_run=args.dry_run, yes=args.yes)
+
+
 def config(args):
     import textwrap
+    from pathlib import Path
 
     import spel.scripts.config as cfg
+
+    if args.set_srcroot:
+        from dotenv import set_key
+
+        new_root = Path(args.set_srcroot).expanduser().resolve()
+        cfg.LOCAL_ENV_FILE.touch(exist_ok=True)
+        set_key(str(cfg.LOCAL_ENV_FILE), "SPEL_E3SM_SRCROOT", str(new_root))
+        print(
+            f"Set SPEL_E3SM_SRCROOT={new_root} in {cfg.LOCAL_ENV_FILE}\n"
+            "(untracked -- re-run spel for this to take effect)"
+        )
+        return
 
     print(textwrap.dedent(f"""
     E3SM SRCROOT: {cfg.E3SM_SRCROOT}
     ELM SRC     : {cfg.ELM_SRC}
     SHR SRC     : {cfg.SHR_SRC}
+
+    Local override file: {cfg.LOCAL_ENV_FILE}
+    (change with: spel config --set-srcroot <path>)
     """))
 
 
@@ -251,7 +271,41 @@ def main():
     cfg_parser = subparsers.add_parser(
         "config", help="Display or adjust config for SPEL"
     )
+    cfg_parser.add_argument(
+        "--set-srcroot",
+        dest="set_srcroot",
+        default=None,
+        help="Persist E3SM_SRCROOT to the untracked local config file "
+        "(.spel.env) instead of editing config.py",
+    )
     cfg_parser.set_defaults(func=config)
+
+    # Parser for 'spel restore'
+    restore_parser = subparsers.add_parser(
+        "restore",
+        help="Remove the '!#py ' token from files changed in a unit-test "
+        "case and copy them back into E3SM_SRCROOT",
+    )
+    restore_parser.add_argument(
+        "-c",
+        required=True,
+        dest="case",
+        help="Unit-test case name (directory under unit-tests/)",
+    )
+    restore_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Only show which files would be restored, don't write anything",
+    )
+    restore_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        dest="yes",
+        help="Don't prompt for confirmation before copying files",
+    )
+    restore_parser.set_defaults(func=restore)
 
     args = parser.parse_args()
     args.func(args)

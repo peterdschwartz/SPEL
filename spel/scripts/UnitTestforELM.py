@@ -97,6 +97,10 @@ def create_unit_test(
             os.system(f"rm {spel_output_dir}/*.F90")
             preprocess = True
 
+    # Record which E3SM_SRCROOT this case is generated against so that
+    # `spel restore` can find it later even if the global config changes.
+    unit_test.write_meta_file()
+
     # Retrieve possible interfaces
     dg.populate_interface_list()
     # Initialize dictionary that will hold instance of all subroutines encountered.
@@ -104,7 +108,6 @@ def create_unit_test(
 
     # dictionary holds instances for Unit Test specific subroutines
     sub_name_list: list[str] = [s.lower() for s in sub_name_list]
-    subroutines: SubDict = {}
 
     # List to hold all the modules needed for the unit test
     needed_mods = []
@@ -128,8 +131,8 @@ def create_unit_test(
 
     for s in sub_name_list:
         if "::" in s:
-            subroutines[s] = main_sub_dict[s]
-            subroutines[s].unit_test_function = True
+            unit_test.primary_subroutines[s] = main_sub_dict[s]
+            unit_test.primary_subroutines[s].unit_test_function = True
         else:
             candidates = {
                 k for k in main_sub_dict.keys() if re.search(rf"(?<=::){s}\b", k)
@@ -139,8 +142,8 @@ def create_unit_test(
                     f"Multiple Subroutines match {s}, Adding them all: {candidates}\nRe-run with <mod_name>::<sub_name>"
                 )
             for c in candidates:
-                subroutines[c] = main_sub_dict[c]
-                subroutines[c].unit_test_function = True
+                unit_test.primary_subroutines[c] = main_sub_dict[c]
+                unit_test.primary_subroutines[c].unit_test_function = True
 
     if not mod_dict or not ordered_mods:
         logger.error(f"{func_name}Error didn't find any modules related to subroutines")
@@ -206,7 +209,7 @@ def create_unit_test(
             if field_var.active:
                 active_set.add(f"{inst_name}%{field_var.name}")
 
-    for sub in subroutines.values():
+    for sub in unit_test.primary_subroutines.values():
         for key in list(sub.elmtype_access_summary.keys()):
             c13c14 = bool("c13" in key or "c14" in key)
             if c13c14:

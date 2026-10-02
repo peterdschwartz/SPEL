@@ -2,6 +2,8 @@ import os
 import re
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # Configure path information
 scripts_dir = Path(os.path.dirname(__file__))
 spel_dir = Path(f"{scripts_dir}/../../").resolve()
@@ -13,9 +15,26 @@ spel_mods_dir = spel_dir / "SourceFiles/"
 spel_output_dir = spel_dir / "script-output/"
 input_data_dir = unittests_dir / "input-data/"
 
-# E3SM root directory.
-E3SM_SRCROOT = spel_dir / "../E3SM"
-E3SM_SRCROOT = E3SM_SRCROOT.resolve()
+# Name of the file (written into each unit-test case directory) that records
+# which E3SM_SRCROOT was used to generate that case. Read by `spel restore`.
+CASE_META_FILENAME = "spel_meta.json"
+
+# Per-developer overrides (currently just E3SM_SRCROOT) live in this file
+# instead of being hardcoded here, so that pointing SPEL at a different E3SM
+# checkout never shows up as a git diff on this tracked config.py.
+# Create/update it with `spel config --set-srcroot <path>`, or hand-edit it,
+# e.g.:
+#   SPEL_E3SM_SRCROOT=/path/to/your/E3SM
+LOCAL_ENV_FILE = spel_dir / ".spel.env"
+load_dotenv(LOCAL_ENV_FILE)
+
+# E3SM root directory. Resolution order: SPEL_E3SM_SRCROOT environment
+# variable (also settable via LOCAL_ENV_FILE above) > a sibling "dev_E3SM"
+# checkout next to the SPEL repo.
+_default_srcroot = (spel_dir / "../dev_E3SM").resolve()
+E3SM_SRCROOT = Path(
+    os.environ.get("SPEL_E3SM_SRCROOT", str(_default_srcroot))
+).expanduser().resolve()
 
 # path for modules shared by components (eg, shr_kind_mod)
 SHR_SRC = E3SM_SRCROOT / "share/util/"

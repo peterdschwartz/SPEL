@@ -487,7 +487,6 @@ class Subroutine(object):
                 start_ln = self.associate_end
             endline = self.cpp_endline
         else:
-            print("NO CPP FILE", self.name)
             fn = self.filepath
             if self.associate_end == 0 or all:
                 start_ln = self.startline

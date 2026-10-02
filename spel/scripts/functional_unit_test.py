@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess as sp
@@ -7,6 +8,7 @@ import sys
 import textwrap
 from collections import namedtuple
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable
 
@@ -14,9 +16,12 @@ import spel.scripts.config as cfg
 import spel.scripts.io.helper as hio
 from spel.scripts.analyze_subroutines import Subroutine
 from spel.scripts.config import (
+    CASE_META_FILENAME,
     ELM_SRC,
+    E3SM_SRCROOT,
     PHYSICAL_PROP_TYPE_LIST,
     _bc,
+    input_data_dir,
     spel_mods_dir,
     spel_output_dir,
     unit_test_files,
@@ -77,7 +82,35 @@ class FunctionalUnitTest:
         self.case_dir = casedir
         self.config = cfg
         self.logger: logging.Logger = logger
-        self.case_name = self.case_dir.parent.name
+        self.case_name = self.case_dir.name
+        # Record which E3SM checkout this case was generated against, so
+        # `spel restore` can find the right place to copy files back to even
+        # if the global E3SM_SRCROOT config has since changed.
+        self.e3sm_srcroot: Path = E3SM_SRCROOT
+
+    def print(self):
+        self.logger.info(
+            f"Functional Unit Test: {self.case_name}\n"
+            f"   Subroutines: {self.primary_subroutines}\n"
+            f"   directory: {self.case_dir}\n"
+        )
+
+    def write_meta_file(self) -> Path:
+        """
+        Write a small JSON file into the case directory recording the
+        E3SM_SRCROOT used to generate it. `spel restore` reads this back so
+        that files are copied back to the correct source tree even if
+        E3SM_SRCROOT has since been changed (see spel.scripts.config).
+        """
+        meta = {
+            "case_name": self.case_name,
+            "e3sm_srcroot": str(self.e3sm_srcroot),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        meta_path = self.case_dir / CASE_META_FILENAME
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n")
+        self.logger.info(f"Wrote case metadata to {meta_path}")
+        return meta_path
 
     # ------------------------------------------------------------------
     # Queries derived from unit-test state
@@ -203,6 +236,7 @@ class FunctionalUnitTest:
         if instance_to_type is None:
             instance_to_type = self.instance_to_type_map()
 
+        self.print()
         self.prepare_main(instance_to_type)
         self.add_pointer_inits()
 
@@ -391,25 +425,34 @@ class FunctionalUnitTest:
         lines = insert_at_token(lines, "!#USE_START", modules_to_add)
         lines = insert_at_token(lines, "!#VAR_DECL", adjusted_vars)
         lines = insert_at_token(lines, "!#CALL_SUB", reversed(adjusted_calls))
+        lines = insert_at_token(
+            lines,
+            "!#INPUT_PATH",
+            [
+                f"character(len=256) :: input_path = '{input_data_dir}/{self.case_name}/'\n"
+            ],
+        )
 
         active_instances, _, elm_inst_vars = hio.get_var_usage_and_elm_inst_vars(
             self.type_dict
         )
 
-        arg_str = "io_inputs, bounds_clump"
+        in_arg_str = "io_inputs, bounds_clump"
+        out_arg_str = "io_outputs, bounds_clump"
         for _, elmvar in elm_inst_vars:
-            arg_str = f"{arg_str}, {elmvar.name}={elmvar.name}"
+            in_arg_str = f"{in_arg_str}, {elmvar.name}={elmvar.name}"
+            out_arg_str = f"{out_arg_str}, {elmvar.name}={elmvar.name}"
 
         tabs = hio.indent(hio.Tab.shift, 2)
         lines = insert_at_token(
             lines,
             "!#IO_READ",
-            [f"{tabs}call read_elmtypes({arg_str})\n"],
+            [f"{tabs}call read_elmtypes({in_arg_str})\n"],
         )
         lines = insert_at_token(
             lines,
             "!#IO_WRITE",
-            [f"{tabs}call write_elmtypes({arg_str})\n"],
+            [f"{tabs}call write_elmtypes({out_arg_str})\n"],
         )
 
         copyin_lines = ["!$acc enter data copyin(& \n"]
@@ -530,7 +573,6 @@ class FunctionalUnitTest:
     def write_elminst_mod(self) -> None:
         """Write the reduced elm_instMod.F90 needed by this unit test."""
         write_elminstMod(self.type_dict, self.case_dir)
-
 
     def generate_cmake(self, files: list[str]) -> None:
         generate_cmake(files, self.case_dir)
@@ -838,6 +880,7 @@ def write_elminstMod(typedict: dict[str, DerivedType], case_dir: Path):
 
 def insert_at_token(lines: list[str], token: str, lines_to_add: Iterable[str]):
     regex_token = re.compile(rf"^\s*({token})")
+
     ln = 0
     token_line = 0
     found_token = False
@@ -855,153 +898,13 @@ def insert_at_token(lines: list[str], token: str, lines_to_add: Iterable[str]):
         print(f"Error: could find {token} in main.F90")
         sys.exit(1)
 
+    def add_line_continuations(x: str)->str:
+        return line_add.replace(',',',&\n       ')
+
     for i, line_add in enumerate(lines_to_add):
-        lines.insert(token_line + 1 + i, line_add)
+        lines.insert(token_line + 1 + i, add_line_continuations(line_add))
 
     return lines
-
-
-def find_parent_subroutine_call(
-    subroutines: Dict[str, Subroutine],
-    type_dict: dict[str, DerivedType],
-    inst_to_type: dict[str, str],
-):
-    """
-    Function that for a list of Subroutines, finds a call signature to
-    insert into main.F90
-
-    Returns only one result, so if a function is used in several places,
-    manual modification may be required
-    """
-
-    logger = get_logger("WriteRoutines", level=logging.INFO)
-    search_file = ELM_SRC
-    mods_to_add = []
-    var_decl_to_add = []
-    calls = []
-
-    for sub in subroutines.values():
-        name = sub.name
-        cmd = f'grep -rin -E "^[[:space:]]*(call[[:space:]]* {name})\\b" {search_file} | head -1'
-        output = sp.getoutput(cmd)
-        output = output.split(":")
-        filename = output[0]
-        call_ln = int(output[1]) - 1
-
-        ifile = open(filename, "r")
-        raw_lines = ifile.readlines()
-        ifile.close()
-        mod_lines = unwrap_section(raw_lines, startln=0)
-
-        _, mod_name = get_module_name_from_file(filename)
-
-        idx, call_string = next(
-            ((i, el) for i, el in enumerate(mod_lines) if el.ln == call_ln),
-            (None, None),
-        )
-        if not call_string or not idx or call_ln != mod_lines[idx].ln:
-            logger.error(
-                f"Couldn't match call_string for {name}. Expected call_ln {call_ln} -- got {mod_lines[idx].ln}"
-            )
-            sys.exit(1)
-        calls.append(call_string.line)
-        args = getArguments(call_string.line)
-
-        # Search backwards from subroutine call to get the calling subroutine :
-        subname = None
-        for ln in range(idx, -1, -1):
-            line = mod_lines[ln].line
-            match_sub = re.search(r"^\s*(subroutine)\s+", line)
-            if match_sub:
-                split_str = match_sub.group().strip()
-                subname = line.split(split_str)[1].split("(")[0].strip()
-                logger.info(f"Found Subroutine: {subname}\n")
-                break
-
-        if not subname:
-            logger.error(f"Error::Couldn't find calling subroutine for {sub.name}")
-            sys.exit(1)
-        fn, startl, endl = find_file_for_subroutine(name=subname, fn=filename)
-        sub_init = SubInit(
-            name=subname,
-            mod_name=mod_name,
-            fort_mod=FortranModule(fname=fn, name=mod_name, ln=0),
-            file=fn,
-            start=startl,
-            end=endl,
-            mod_lines=mod_lines,
-            function=None,
-            cpp_start=None,
-            cpp_end=None,
-            cpp_fn="",
-            parent="",
-        )
-        parent_sub = Subroutine(init_obj=sub_init)
-
-        args_as_vars = {}
-        args_as_instances = {}
-        for arg in args:
-            argname = arg.split("%")[0]
-            if argname in inst_to_type:
-                type_name = inst_to_type[argname]
-                dtype = type_dict[type_name]
-                inst_var = dtype.instances[argname]
-                args_as_instances[inst_var.name] = inst_var
-                if not inst_var.active:
-                    type_dict[type_name].instances[argname].active = True
-
-        args_not_found = [
-            arg for arg in args if arg.split("%")[0] not in args_as_instances
-        ]
-        args_to_search = args_not_found.copy()
-
-        for arg in args_to_search:
-            if arg in parent_sub.arguments:
-                argvar = parent_sub.arguments[arg]
-                if argvar.type in type_dict:
-                    dtype = type_dict[argvar.type]
-                    inst_var: Variable = list(dtype.instances.values())[0]
-                    args_as_instances[inst_var.name] = inst_var
-                else:
-                    args_as_vars[arg] = parent_sub.arguments[arg]
-            elif arg in parent_sub.local_variables:
-                args_as_vars[arg] = parent_sub.local_variables[arg]
-            else:
-                # Assume it's a derived type removed for fut purposes (ie, alm_fates)
-                logger.info(
-                    _bc.WARNING + f"Can't find {arg} (non-udt global var?)" + _bc.ENDC
-                )
-                args_as_vars[arg] = Variable(
-                    type="integer",
-                    name=arg,
-                    dim=0,
-                    subgrid="?",
-                    bounds="",
-                    ln=-1,
-                )
-
-        # Variables to have declarations added to main.F90
-        if args_as_vars:
-            for argvar in args_as_vars.values():
-                type_string = argvar.type
-                if type_string not in {"real", "integer", "character", "logical"}:
-                    type_string = f"type({type_string})"
-                elif type_string == "real":
-                    type_string = f"{type_string}(r8)"
-                decl = f"{type_string} :: {argvar.name}{argvar.bounds}"
-                if decl + "\n" not in var_decl_to_add:
-                    var_decl_to_add.append(decl + "\n")
-
-        # Global variables , access through module interface
-        if args_as_instances:
-            for inst in args_as_instances.values():
-                use_statement = f"use {inst.declaration}, only : {inst.name}"
-                if use_statement + "\n" not in mods_to_add:
-                    mods_to_add.append(use_statement + "\n")
-
-    Additions = namedtuple("Additions", ["calls", "mods", "vars"])
-
-    return Additions(calls=calls, mods=mods_to_add, vars=var_decl_to_add)
 
 
 def adjust_call_sig(args, calls, num_filter_members):
@@ -1041,79 +944,6 @@ def get_filter_members(filter_type: DerivedType):
             member_list.append(member_var.name)
 
     return member_list
-
-
-def prepare_main(
-    subroutines: dict[str, Subroutine],
-    type_dict: dict[str, DerivedType],
-    instance_to_type: dict[str, str],
-    casedir: Path,
-):
-    """
-    Function to insert USE dependencies into main.F90 and subroutine calls for the FUT subs
-    """
-    iofile = open(f"{spel_mods_dir}/main.F90", "r")
-    lines = iofile.readlines()
-    iofile.close()
-
-    use_token = "!#USE_START"
-    var_token = "!#VAR_DECL"
-    call_token = "!#CALL_SUB"
-    modules_to_add = []
-    for s in subroutines.values():
-        mod = s.module
-        modules_to_add.append(f"use {mod}, only : {s.name}\n")
-
-    additions = find_parent_subroutine_call(subroutines, type_dict, instance_to_type)
-
-    num_filters = get_filter_members(type_dict["clumpfilter"])
-    adj_args, adj_calls = adjust_call_sig(additions.vars, additions.calls, num_filters)
-
-    modules_to_add.extend(additions.mods)
-
-    lines = insert_at_token(lines=lines, token=use_token, lines_to_add=modules_to_add)
-    lines = insert_at_token(lines=lines, token=var_token, lines_to_add=adj_args)
-    lines = insert_at_token(
-        lines=lines,
-        token=call_token,
-        lines_to_add=reversed(adj_calls),
-    )
-
-    active_instances, _, elm_inst_vars = hio.get_var_usage_and_elm_inst_vars(type_dict)
-
-    # Insert 'read_elmtypes' call
-    arg_str = "io_inputs, bounds_clump"
-    for _, elmvar in elm_inst_vars:
-        arg_str = f"{arg_str}, {elmvar.name}={elmvar.name}"
-
-    tabs = hio.indent(hio.Tab.shift, 2)
-    io_call = [f"{tabs}call read_elmtypes({arg_str})\n"]
-    lines = insert_at_token(
-        lines=lines,
-        token="!#IO_READ",
-        lines_to_add=io_call,
-    )
-    io_call = [f"{tabs}call write_elmtypes({arg_str})\n"]
-    lines = insert_at_token(
-        lines=lines,
-        token="!#IO_WRITE",
-        lines_to_add=io_call,
-    )
-
-    copyin_lines: list[str] = ["!$acc enter data copyin(& \n"]
-    for el in sorted(list(active_instances.keys())):
-        copyin_lines.append(f"!$acc& {el},&\n")
-    copyin_lines.append("!$acc& )\n")
-    lines = insert_at_token(
-        lines=lines,
-        token="!#ACC_COPYIN",
-        lines_to_add=copyin_lines,
-    )
-
-    with open(f"{casedir}/main.F90", "w") as iofile:
-        iofile.writelines(lines)
-
-    return None
 
 
 def add_pointer_inits(type_dict: TypeDict, case_dir):
