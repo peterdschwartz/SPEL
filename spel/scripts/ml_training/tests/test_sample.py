@@ -2,10 +2,11 @@ import numpy as np
 import xarray as xr
 from pathlib import Path
 
-from scripts.ml_training.sample_spel_output import sample, build_soil_filters
+import spel.scripts.ml_training.sample_spel_output as sso
+from spel.scripts.ml_training.sample_spel_output import build_soil_filters, sample
 
 
-def _make_fake_ds(tmp_path: Path, base_fn: str) -> Path:
+def _make_fake_ds(data_dir: Path, base_fn: str) -> Path:
     """Create a small fake dataset on disk for testing."""
     time = np.arange(10)
     col = np.arange(5)
@@ -45,8 +46,7 @@ def _make_fake_ds(tmp_path: Path, base_fn: str) -> Path:
         }
     )
 
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
+    data_dir.mkdir(parents=True)
     out_path = data_dir / f"{base_fn}001.nc"
     ds.to_netcdf(out_path,engine="scipy")
     return out_path
@@ -54,25 +54,31 @@ def _make_fake_ds(tmp_path: Path, base_fn: str) -> Path:
 
 def test_sample_and_compress(tmp_path, monkeypatch):
     base_fn = "test_run"
+    case_name = "data"
 
-    # create fake input file under tmp_path/data
-    _ = _make_fake_ds(tmp_path, base_fn)
+    # sample() reads/writes under <unittests_dir>/input-data/<case_name>
+    monkeypatch.setattr(sso, "unittests_dir", tmp_path)
+    data_dir = tmp_path / "input-data" / case_name
+    _ = _make_fake_ds(data_dir, base_fn)
 
-    # run sample() in that directory
-    monkeypatch.chdir(tmp_path)
     samples_per_file = 5
-    sample(case_name="data",base_fn=base_fn, samples_per_file=samples_per_file)
+    sample(
+        case_name=case_name,
+        base_fn=base_fn,
+        samples_per_file=samples_per_file,
+        var_name_set={"col_var", "pft_var"},
+    )
 
-    out_path = tmp_path / f"{base_fn}-training_samples.nc"
+    out_path = data_dir / f"{base_fn}-training_samples.nc"
     assert out_path.exists()
 
-    combined = xr.open_dataset(out_path, engine="scipy")
+    combined = xr.open_dataset(out_path)
 
     # time dimension should be samples_per_file (one file)
     assert combined.sizes["time"] == samples_per_file
 
     # recompute soil filters from the original constructed dataset
-    orig_ds = xr.open_dataset(tmp_path / "data" / f"{base_fn}001.nc", engine="scipy")
+    orig_ds = xr.open_dataset(data_dir / f"{base_fn}001.nc", engine="scipy")
     soil_cols, soil_pfts = build_soil_filters(orig_ds)
     orig_ds.close()
 

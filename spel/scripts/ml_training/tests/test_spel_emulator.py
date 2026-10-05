@@ -17,9 +17,9 @@ def test_forward_shape():
     emulator = SpelEmulator(
         config,
         casename="dummy",
-    )
+    ).double()
 
-    x = torch.randn(10, config.in_dim)
+    x = torch.randn(10, config.in_dim, dtype=torch.float64)
 
     y = emulator(x)
 
@@ -34,9 +34,9 @@ def test_default_buffers_are_identity():
         num_layers=1,
     )
 
-    emulator = SpelEmulator(config, "dummy")
+    emulator = SpelEmulator(config, "dummy").double()
 
-    x = torch.randn(7, config.in_dim)
+    x = torch.randn(7, config.in_dim, dtype=torch.float64)
 
     with torch.inference_mode():
         expected = emulator.network(x)

@@ -437,8 +437,9 @@ def find_parent_subroutine_call(
             mod_name=mod_name,
             fort_mod=FortranModule(fname=fn, name=mod_name, ln=0),
             file=fn,
-            start=startl,
-            end=endl,
+            # find_file_for_subroutine is 1-based
+            start=startl - 1,
+            end=endl - 1,
             mod_lines=mod_lines,
             function=None,
             cpp_start=None,

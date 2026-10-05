@@ -1,15 +1,15 @@
-import os
-import sys
 import unittest
 from pprint import pprint
 
-sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
-)
+import spel.scripts.fortran_parser.lexer as lexer
+from spel.scripts.fortran_parser.spel_parser import Parser
+from spel.scripts.fortran_parser.tokens import Token, TokenTypes
+from spel.scripts.types import LineTuple, LogicalLineIterator
 
-import scripts.fortran_parser.lexer as lexer
-from scripts.fortran_parser.spel_parser import Parser
-from scripts.fortran_parser.tokens import Token, TokenTypes
+
+def make_lexer(text: str) -> lexer.Lexer:
+    lines = [LineTuple(line=line, ln=i) for i, line in enumerate(text.splitlines())]
+    return lexer.Lexer(line_it=LogicalLineIterator(lines))
 
 
 class LexTests(unittest.TestCase):
@@ -36,7 +36,7 @@ class LexTests(unittest.TestCase):
             Token(token=TokenTypes.NEWLINE, literal="\n"),
         ]
 
-        lex = lexer.Lexer(input)
+        lex = make_lexer(input)
 
         for expected_tok in expected_tokens:
             tok = lex.next_token()
@@ -50,7 +50,7 @@ class LexTests(unittest.TestCase):
         (x-y)/(2*y+1)
         add(1,min(2*x,arg=4.0))
         """
-        lex = lexer.Lexer(input)
+        lex = make_lexer(input)
         parser = Parser(lex=lex)
         program = parser.parse_program()
 
@@ -58,7 +58,7 @@ class LexTests(unittest.TestCase):
             "(1+(2*x_1))",
             "(((-2)*_x%y)-(1/2))",
             "((x-y)/((2*y)+1))",
-            "[add(1,[min((2*x),(arg=4.0))])]",
+            "add(1,min((2*x),(arg=4.0)))",
         ]
 
         if parser.errors:
@@ -72,7 +72,7 @@ class LexTests(unittest.TestCase):
 
         new_input = """call dynamic_plant_alloc(min(1.0_r8-N_lim_factor(p),1.0_r8-P_lim_factor(p)),W_lim_factor(p),laisun(p)+laisha(p), allocation_leaf(p), allocation_stem(p), allocation_froot(p), woody(ivt(p)))"""
 
-        newlex = lexer.Lexer(new_input)
+        newlex = make_lexer(new_input)
         parser.lexer = newlex
         parser.next_token()
         parser.next_token()
@@ -81,6 +81,43 @@ class LexTests(unittest.TestCase):
 
         for stmt in program1.statements:
             pprint(stmt.to_dict(), sort_dicts=False)
+
+    def test_number_before_dot_operator(self):
+        """`0.and.` is INT 0 then .and.; the '.' only belongs to real literals"""
+        cases = {
+            "pio_stride>0.and.n<0": ["pio_stride", ">", "0", ".and.", "n", "<", "0"],
+            "x.eq.1.or.y": ["x", ".eq.", "1", ".or.", "y"],
+            "a=1.eq.b": ["a", "=", "1", ".eq.", "b"],
+            "a=2..not.b": ["a", "=", "2.", ".not.", "b"],
+            "a=1.e5+1.d-3*1._r8-1.5": ["a", "=", "1.e5", "+", "1.d-3", "*", "1._r8", "-", "1.5"],
+            "a=3.": ["a", "=", "3."],
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                lex = make_lexer(text)
+                lits = []
+                tok = lex.next_token()
+                while tok.token not in (TokenTypes.NEWLINE, TokenTypes.EOF):
+                    lits.append(tok.literal)
+                    tok = lex.next_token()
+                self.assertEqual(lits, expected)
+        lex = make_lexer("0.and.")
+        self.assertEqual(lex.next_token(), Token(TokenTypes.INT, "0"))
+
+    def test_unterminated_delimiter_raises(self):
+        for text in ["x = 'abc", 'x = "abc', "x = a .and b"]:
+            with self.subTest(text=text):
+                lex = make_lexer(text)
+                with self.assertRaisesRegex(lexer.LexError, "Unterminated"):
+                    for _ in range(10):
+                        lex.next_token()
+
+    def test_unterminated_delimiter_is_a_parse_error(self):
+        lines = [LineTuple(line="x = 'abc", ln=0)]
+        parser = Parser(lines=lines)
+        with self.assertRaises(SystemExit):
+            parser.parse_program()
+        self.assertTrue(any("Unterminated" in e for e in parser.errors))
 
 
 if __name__ == "__main__":

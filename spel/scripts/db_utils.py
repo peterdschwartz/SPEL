@@ -6,9 +6,13 @@ from django.apps import apps
 from spel.scripts.config import database_app
 
 def setup_django():
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "spel.db.spel.settings")
+    # The Django project is importable as the top-level package `db`
+    # (matching manage.py), so its parent directory must be on sys.path.
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "db.spel.settings")
 
-    sys.path.insert(0, str(database_app.resolve()))
+    db_parent = str(database_app.resolve().parent)
+    if db_parent not in sys.path:
+        sys.path.insert(0, db_parent)
 
     if not apps.ready:
         django.setup()

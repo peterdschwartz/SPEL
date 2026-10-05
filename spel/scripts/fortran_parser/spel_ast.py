@@ -1,10 +1,12 @@
 import json
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
-from spel.scripts.fortran_parser.environment import Environment
 from spel.scripts.fortran_parser.tokens import Token, TokenTypes
+
+if TYPE_CHECKING:
+    from spel.scripts.fortran_parser.symbols import Scope
 
 
 # helpers
@@ -33,12 +35,19 @@ class Node(ABC):
     def __str__(self) -> str:
         pass
 
-    def classify(self, env: Environment):
+    def classify(self, scope: "Scope") -> "Node":
+        """
+        Refine a syntactically ambiguous node using the symbol table.
+        Shallow: only this node is refined; children are left as parsed.
+        """
         return self
 
 
 # Derived interface: Statement
 class Statement(Node):
+    # numeric statement label (e.g. `30 continue`); set by the parser
+    label: Optional[int] = None
+
     def __init__(self, lineno: int = -1):
         self.lineno: int = lineno
 
@@ -133,6 +142,17 @@ class ExpressionStatement(Statement):
     def copy(self):
         return deepcopy(self)
 
+    def classify(self, scope: "Scope") -> Statement:
+        expr = self.expression
+        if isinstance(expr, InfixExpression) and expr.operator in ("=", "=>"):
+            if expr.operator == "=":
+                stmt = AssignmentStatement(self.token, expr.left_expr, expr.right_expr)
+            else:
+                stmt = PointerAssignment(self.token, expr.left_expr, expr.right_expr)
+            stmt.lineno = self.lineno
+            return stmt
+        raise SemanticError(f"Expression is not a statement @{self.lineno}: {expr}")
+
 
 class SubCallStatement(Statement):
     def __init__(self, tok):
@@ -159,6 +179,16 @@ class SubCallStatement(Statement):
 
     def copy(self):
         return deepcopy(self)
+
+    def classify(self, scope: "Scope") -> "SubCallStatement":
+        """Converts keyword actual arguments. The callee is resolved by the walk."""
+        stmt = SubCallStatement(self.token)
+        stmt.lineno = self.lineno
+        fn = self.function
+        stmt.function = FuncExpression(
+            fn.token, fn.function, [to_actual_arg(a) for a in fn.args]
+        )
+        return stmt
 
 
 class IntegerLiteral(Expression):
@@ -259,7 +289,7 @@ class IOExpression(Expression):
         pass
 
     def __str__(self):
-        return str(self.expr) if self.expr else str(self.token)
+        return str(self.expr) if self.expr else self.token.literal
 
     def __eq__(self, other):
         return (
@@ -288,7 +318,7 @@ class PrefixExpression(Expression):
         pass
 
     def __str__(self):
-        return f"{self.operator} ({str(self.right_expr)})"
+        return f"({self.operator}{str(self.right_expr)})"
 
     def __eq__(self, other):
         if not isinstance(other, PrefixExpression):
@@ -334,7 +364,7 @@ class InfixExpression(Expression):
         return (self.left_expr, self.operator, self.right_expr)
 
     def __str__(self):
-        return str(self.left_expr) + f" {self.operator} " + str(self.right_expr)
+        return "("+str(self.left_expr) + f"{self.operator}" + str(self.right_expr)+")"
 
     def __eq__(self, other):
         if not isinstance(other, InfixExpression):
@@ -357,19 +387,6 @@ class InfixExpression(Expression):
             "Op": self.operator,
             "Right": self.right_expr.to_dict(),
         }
-
-    def classify(self, env: Environment):
-        if self.operator == "=" and isinstance(self.left_expr, Identifier):
-            var = env.variables.get(self.left_expr.value)
-            if not var:
-                raise SemanticError(f"Undeclared variable: {self.left_expr.value}")
-            return AssignmentStatement(
-                tok=self.token,
-                lhs=self.left_expr,
-                rhs=self.right_expr,
-                env=env,
-            )
-        return self
 
 
 class FieldAccessExpression(Expression):
@@ -455,6 +472,92 @@ class FuncExpression(Expression):
 
     def copy(self):
         return deepcopy(self)
+
+    def classify(self, scope: "Scope") -> "ArrayRef | FunctionCall":
+        """
+        name(...) is an array element/section if `name` (or the base of
+        `a%b%name`) is a data object, otherwise a function reference.
+        Component names (a%b(i)) are treated as array components: type-bound
+        function references are not distinguished without type information.
+        """
+        from spel.scripts.fortran_parser.symbols import SymbolKind
+
+        name = str(self.function)
+        base = name.split("%")[0]
+        sym = scope.resolve(base, context=str(self))
+        if sym.is_data or (sym.kind is SymbolKind.EXTERNAL and "%" in name):
+            return ArrayRef(self.token, self.function, self.args)
+        if "%" in name:
+            raise SemanticError(f"'{base}' is not a data object in {self}")
+        return FunctionCall(
+            self.token,
+            self.function,
+            [to_actual_arg(a) for a in self.args],
+            intrinsic=sym.kind is SymbolKind.INTRINSIC,
+        )
+
+
+class ArrayRef(FuncExpression):
+    """Array element or section: a(i), x%y(:, j)"""
+
+    def classify(self, scope: "Scope") -> "ArrayRef":
+        return self
+
+
+class FunctionCall(FuncExpression):
+    """Function reference; args may contain KeywordArgument."""
+
+    def __init__(
+        self, tok: Token, fn: Expression, args: list[Expression], intrinsic: bool
+    ):
+        super().__init__(tok, fn, args)
+        self.name: str = str(fn)
+        self.intrinsic: bool = intrinsic
+
+    def classify(self, scope: "Scope") -> "FunctionCall":
+        return self
+
+
+class KeywordArgument(Expression):
+    """keyword = value actual argument"""
+
+    def __init__(self, tok: Token, keyword: str, value: Expression):
+        self.token = tok
+        self.keyword: str = keyword
+        self.value: Expression = value
+
+    def expression_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return f"{self.keyword}={self.value}"
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, KeywordArgument)
+            and self.keyword == other.keyword
+            and self.value == other.value
+        )
+
+    def to_dict(self):
+        return {
+            "Node": "KeywordArgument",
+            "Keyword": self.keyword,
+            "Value": self.value.to_dict(),
+        }
+
+
+def to_actual_arg(arg: Expression) -> Expression:
+    if (
+        isinstance(arg, InfixExpression)
+        and arg.operator == "="
+        and isinstance(arg.left_expr, Identifier)
+    ):
+        return KeywordArgument(arg.token, arg.left_expr.value, arg.right_expr)
+    return arg
 
 
 class BoundsExpression(Expression):
@@ -627,10 +730,12 @@ class DoWhile(Statement):
         }
 
 
-class MacroIf(Statement):
-    def __init__(self, token: Token, symbol: str, body: BlockStatement):
-        self.token = token  # The #ifdef/#ifndef token
-        self.symbol = symbol  # The macro symbol
+class MacroBranch(Statement):
+    """`#elif <condition>` or `#else` (condition None) branch of a MacroIf"""
+
+    def __init__(self, token: Token, condition: Optional[str], body: BlockStatement):
+        self.token = token
+        self.condition = condition
         self.body = body
 
     def statement_node(self):
@@ -640,7 +745,40 @@ class MacroIf(Statement):
         return super().token_literal()
 
     def __str__(self) -> str:
-        return f"{self.token} {self.symbol} {self.body}"
+        head = f"#elif {self.condition}" if self.condition is not None else "#else"
+        return f"{head} {self.body}"
+
+
+class MacroIf(Statement):
+    """
+    #ifdef/#ifndef <symbol>  or  #if <condition>, then optional #elif/#else
+    branches. Conditions are raw C-preprocessor text.
+    """
+
+    def __init__(
+        self,
+        token: Token,
+        symbol: Optional[str],
+        body: BlockStatement,
+        condition: Optional[str] = None,
+        branches: Optional[list[MacroBranch]] = None,
+    ):
+        self.token = token  # The #ifdef/#ifndef/#if token
+        self.symbol = symbol  # The macro symbol (#ifdef/#ifndef)
+        self.condition = condition  # raw condition (#if)
+        self.body = body
+        self.branches: list[MacroBranch] = branches or []
+
+    def statement_node(self):
+        pass
+
+    def token_literal(self) -> str:
+        return super().token_literal()
+
+    def __str__(self) -> str:
+        head = self.symbol if self.condition is None else self.condition
+        tail = "".join(f" {b}" for b in self.branches)
+        return f"{self.token} {head} {self.body}{tail}"
 
 
 class MacroDefine(Statement):
@@ -776,6 +914,44 @@ class IfConstruct(Statement):
         return guards, else_guard
 
 
+class AssociateConstruct(Statement):
+    def __init__(
+        self,
+        tok: Token,
+        associations: dict[str, Expression],
+        body: BlockStatement,
+    ):
+        self.token = tok
+        self.associations: dict[str, Expression] = associations
+        self.body: BlockStatement = body
+        self.end_ln: int = -1
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return super().token_literal()
+
+    def __str__(self):
+        assoc = ", ".join(f"{k} => {v}" for k, v in self.associations.items())
+        return f"{self.lineno} associate({assoc}) {{\n  {self.body}\n}}"
+
+    def __eq__(self, other):
+        if not isinstance(other, AssociateConstruct):
+            return False
+        return (
+            self.token == other.token
+            and self.associations == other.associations
+            and self.body == other.body
+        )
+
+    def to_dict(self):
+        return {
+            "Node": "Associate",
+            "associations": {k: str(v) for k, v in self.associations.items()},
+        }
+
+
 class AssignmentStatement(Statement):
     def __init__(self, tok: Token, lhs: Expression, rhs: Expression):
         self.token: Token = tok
@@ -790,6 +966,461 @@ class AssignmentStatement(Statement):
 
     def __str__(self) -> str:
         return f"{self.left} = {self.right}"
+
+
+class PointerAssignment(Statement):
+    def __init__(self, tok: Token, pointer: Expression, target: Expression):
+        self.token: Token = tok
+        self.pointer = pointer
+        self.target = target
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return f"{self.pointer} => {self.target}"
+
+
+class ImplicitNoneStatement(Statement):
+    def __init__(self, tok: Token):
+        self.token = tok
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return "implicit none"
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, ImplicitNoneStatement)
+
+    def to_dict(self):
+        return {"Node": "ImplicitNoneStatement"}
+
+
+class ExitStatement(Statement):
+    """exit [construct-name]"""
+
+    def __init__(self, tok: Token, construct_name: Optional[str] = None):
+        self.token = tok
+        self.construct_name: Optional[str] = construct_name
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        name = f" {self.construct_name}" if self.construct_name else ""
+        return f"{self.token_literal()}{name}"
+
+    def __eq__(self, other) -> bool:
+        return type(other) is type(self) and self.construct_name == other.construct_name
+
+    def to_dict(self):
+        return {"Node": type(self).__name__, "Name": self.construct_name}
+
+
+class CycleStatement(ExitStatement):
+    """cycle [construct-name]"""
+
+
+class ReturnStatement(Statement):
+    def __init__(self, tok: Token):
+        self.token = tok
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return "return"
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, ReturnStatement)
+
+    def to_dict(self):
+        return {"Node": "ReturnStatement"}
+
+
+class StopStatement(Statement):
+    """[error] stop [stop-code]"""
+
+    def __init__(self, tok: Token, code: Optional[Expression] = None, error: bool = False):
+        self.token = tok
+        self.code: Optional[Expression] = code
+        self.error: bool = error
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        prefix = "error stop" if self.error else "stop"
+        return f"{prefix} {self.code}" if self.code is not None else prefix
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, StopStatement)
+            and self.error == other.error
+            and self.code == other.code
+        )
+
+    def to_dict(self):
+        return {
+            "Node": "StopStatement",
+            "Error": self.error,
+            "Code": self.code.to_dict() if self.code is not None else None,
+        }
+
+
+class GotoStatement(Statement):
+    """go to <label>"""
+
+    def __init__(self, tok: Token, target: int):
+        self.token = tok
+        self.target: int = target
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return f"go to {self.target}"
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, GotoStatement) and self.target == other.target
+
+    def to_dict(self):
+        return {"Node": "GotoStatement", "Target": self.target}
+
+
+class ContinueStatement(Statement):
+    def __init__(self, tok: Token):
+        self.token = tok
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return "continue"
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, ContinueStatement)
+
+    def to_dict(self):
+        return {"Node": "ContinueStatement"}
+
+
+class IntrinsicStatement(Statement):
+    """intrinsic [::] name-list"""
+
+    def __init__(self, tok: Token, names: list[str]):
+        self.token = tok
+        self.names: list[str] = names
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return f"intrinsic :: {', '.join(self.names)}"
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, IntrinsicStatement) and self.names == other.names
+
+    def to_dict(self):
+        return {"Node": "IntrinsicStatement", "Names": self.names}
+
+
+class DataImpliedDo(Expression):
+    """data-implied-do: (obj-list, i = start, end[, step]); objects may nest"""
+
+    def __init__(self, tok: Token, objects: list[Expression], loop: "ImpliedDo"):
+        self.token = tok
+        self.objects: list[Expression] = objects
+        self.loop: ImpliedDo = loop
+
+    def expression_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        objs = ", ".join(str(o) for o in self.objects)
+        return f"({objs}, {self.loop})"
+
+    def to_dict(self):
+        return {
+            "Node": "DataImpliedDo",
+            "objects": [o.to_dict() for o in self.objects],
+            "loop": self.loop.to_dict(),
+        }
+
+
+class DataValue:
+    """[repeat*]constant"""
+
+    def __init__(self, value: Expression, repeat: Optional[Expression] = None):
+        self.value: Expression = value
+        self.repeat: Optional[Expression] = repeat
+
+    def __str__(self) -> str:
+        return f"{self.repeat}*{self.value}" if self.repeat is not None else str(self.value)
+
+    def to_dict(self):
+        return {
+            "Node": "DataValue",
+            "repeat": self.repeat.to_dict() if self.repeat is not None else None,
+            "value": self.value.to_dict(),
+        }
+
+
+class DataSet:
+    """obj-list /value-list/"""
+
+    def __init__(self, objects: list[Expression], values: list[DataValue]):
+        self.objects: list[Expression] = objects
+        self.values: list[DataValue] = values
+
+    def __str__(self) -> str:
+        objs = ", ".join(str(o) for o in self.objects)
+        vals = ", ".join(str(v) for v in self.values)
+        return f"{objs} /{vals}/"
+
+    def to_dict(self):
+        return {
+            "Node": "DataSet",
+            "objects": [o.to_dict() for o in self.objects],
+            "values": [v.to_dict() for v in self.values],
+        }
+
+
+class DataStatement(Statement):
+    """data obj-list /value-list/ [[,] obj-list /value-list/]..."""
+
+    def __init__(self, tok: Token, sets: list[DataSet]):
+        self.token = tok
+        self.sets: list[DataSet] = sets
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return "data " + ", ".join(str(s) for s in self.sets)
+
+    def to_dict(self):
+        return {"Node": "DataStatement", "sets": [s.to_dict() for s in self.sets]}
+
+
+class FormatStatement(Statement):
+    """
+    <label> format (format-spec)
+      * spec: raw text inside the outer parentheses; edit descriptors
+        (1x, i10, f21.15, /, 3(...)) are not expressions and are not parsed
+    """
+
+    def __init__(self, tok: Token, spec: str):
+        self.token = tok
+        self.spec: str = spec
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return f"format ({self.spec})"
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, FormatStatement) and self.spec == other.spec
+
+    def to_dict(self):
+        return {"Node": "FormatStatement", "Spec": self.spec}
+
+
+class CaseBlock(Statement):
+    """
+    case (value-list) | case default
+      * values: None for `case default`; items may be BoundsExpression ranges
+    """
+
+    def __init__(self, tok: Token, values: Optional[list[Expression]], body: BlockStatement):
+        self.token = tok
+        self.values: Optional[list[Expression]] = values
+        self.body: BlockStatement = body
+
+    @property
+    def is_default(self) -> bool:
+        return self.values is None
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        sel = "default" if self.values is None else f"({', '.join(map(str, self.values))})"
+        return f"{self.lineno} case {sel} {{\n  {self.body}\n}}"
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, CaseBlock)
+            and self.values == other.values
+            and self.body == other.body
+        )
+
+
+class SelectCaseConstruct(Statement):
+    def __init__(self, tok: Token, selector: Expression, cases: list[CaseBlock]):
+        self.token = tok
+        self.selector = selector
+        self.cases: list[CaseBlock] = cases
+        self.end_ln: int = -1
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        cases = "\n".join(str(c) for c in self.cases)
+        return f"{self.lineno} select case ({self.selector}) {{\n{cases}\n}}"
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, SelectCaseConstruct)
+            and self.selector == other.selector
+            and self.cases == other.cases
+        )
+
+    def to_dict(self):
+        return {
+            "Node": "SelectCaseConstruct",
+            "Selector": self.selector.to_dict(),
+            "Cases": [
+                None if c.values is None else [v.to_dict() for v in c.values]
+                for c in self.cases
+            ],
+        }
+
+
+class NullifyStatement(Statement):
+    def __init__(self, tok: Token, objects: list[Expression]):
+        self.token = tok
+        self.objects: list[Expression] = objects
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return f"nullify({', '.join(map(str, self.objects))})"
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, NullifyStatement) and self.objects == other.objects
+
+    def to_dict(self):
+        return {"Node": "NullifyStatement", "Objects": [o.to_dict() for o in self.objects]}
+
+
+class ReadStatement(Statement):
+    """
+    read(control-list) [input-item-list]
+      * controls: positional (unit, fmt) or keyword (InfixExpression '=') specs
+      * items: input items (designators written by the read)
+    """
+
+    def __init__(self, tok: Token, controls: list[Expression], items: list[Expression]):
+        self.token = tok
+        self.controls: list[Expression] = controls
+        self.items: list[Expression] = items
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        ctrl = ",".join(map(str, self.controls))
+        return f"READ({ctrl}) {', '.join(map(str, self.items))}".rstrip()
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, ReadStatement)
+            and self.controls == other.controls
+            and self.items == other.items
+        )
+
+    def to_dict(self):
+        return {
+            "Node": "ReadStatement",
+            "Controls": [c.to_dict() for c in self.controls],
+            "Items": [i.to_dict() for i in self.items],
+        }
+
+
+class MacroCallStatement(Statement):
+    """
+    Function-like CPP macro used as a statement, e.g. SHR_ASSERT(cond, msg).
+    Arguments are treated as reads.
+    """
+
+    def __init__(self, tok: Token, name: str, args: list[Expression]):
+        self.token = tok
+        self.name: str = name
+        self.args: list[Expression] = args
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return f"{self.name}({', '.join(map(str, self.args))})"
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, MacroCallStatement)
+            and self.name == other.name
+            and self.args == other.args
+        )
+
+    def to_dict(self):
+        return {
+            "Node": "MacroCallStatement",
+            "Name": self.name,
+            "Args": [a.to_dict() for a in self.args],
+        }
 
 
 class WriteStatement(Statement):
@@ -978,6 +1609,85 @@ class VariableDecl(Statement):
         }
 
 
+class SubroutineDefinitionConstruct(Statement):
+    """
+    Subroutine or function definition:
+      [prefix...] [type-spec] function name([args]) [result(res)]
+      [prefix...] subroutine name[([args])]
+        body
+      [contains
+        internal subprograms]
+      end subroutine|function [name]
+    """
+
+    def __init__(
+        self,
+        tok: Token,
+        name: str,
+        prefixes: list[str],
+        args: list[str],
+        return_type: Optional[TypeSpec],
+        result: Optional[str],
+        body: BlockStatement,
+        contains: list["SubroutineDefinitionConstruct"],
+    ):
+        self.token = tok
+        self.name = name
+        self.is_function: bool = tok.token == TokenTypes.FUNCTION
+        self.prefixes = prefixes
+        self.args = args
+        self.return_type = return_type
+        self.result = result
+        self.body = body
+        self.contains = contains
+        self.end_ln: int = -1
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self):
+        kind = "function" if self.is_function else "subroutine"
+        header = " ".join(self.prefixes)
+        if self.return_type:
+            header += f" {self.return_type}"
+        header = f"{header} {kind} {self.name}({', '.join(self.args)})".strip()
+        if self.is_function and self.result != self.name:
+            header += f" result({self.result})"
+        result = f"{self.lineno} {header} {{\n  {self.body}\n"
+        for sub in self.contains:
+            result += f" contains {sub}\n"
+        return result + "}"
+
+    def __eq__(self, other):
+        if not isinstance(other, SubroutineDefinitionConstruct):
+            return False
+        return (
+            self.name == other.name
+            and self.is_function == other.is_function
+            and self.prefixes == other.prefixes
+            and self.args == other.args
+            and str(self.return_type) == str(other.return_type)
+            and self.result == other.result
+            and self.body == other.body
+            and self.contains == other.contains
+        )
+
+    def to_dict(self):
+        return {
+            "Node": "SubroutineDefinition",
+            "name": self.name,
+            "is_function": self.is_function,
+            "prefixes": self.prefixes,
+            "args": self.args,
+            "return_type": self.return_type.to_dict() if self.return_type else None,
+            "result": self.result,
+            "contains": [sub.to_dict() for sub in self.contains],
+        }
+
+
 class ImpliedDo:
     """
     Represents an implied-do array constructor:
@@ -1100,10 +1810,29 @@ class ProcedureStatement(Statement):
 
 
 class UseStatement(Statement):
-    def __init__(self, tok: Token, mod_name: Identifier, objs: list[Expression]):
+    """
+    * module: module name
+    * nature: "intrinsic" | "non_intrinsic" | None
+    * has_only: True if an `only:` clause is present (it may be empty)
+    * objs: the only-list (empty when there is no only clause)
+    * renames: `local => use_name` list when there is no only clause
+    """
+
+    def __init__(
+        self,
+        tok: Token,
+        mod_name: Identifier,
+        objs: list[Expression],
+        nature: Optional[str] = None,
+        has_only: Optional[bool] = None,
+        renames: Optional[list[Expression]] = None,
+    ):
         self.token = tok  # Should be 'Ident'
         self.module = mod_name.value
         self.objs = objs
+        self.nature: Optional[str] = nature
+        self.has_only: bool = bool(objs) if has_only is None else has_only
+        self.renames: list[Expression] = renames if renames is not None else []
 
     def token_literal(self) -> str:
         return self.token.literal
@@ -1112,26 +1841,120 @@ class UseStatement(Statement):
         return super().statement_node()
 
     def __str__(self) -> str:
-        use_str = f", only : {','.join(list(map(str,self.objs)))}" if self.objs else ""
-        return f"{self.lineno}: use {self.module}{use_str}"
+        nature = f", {self.nature} ::" if self.nature else ""
+        if self.has_only:
+            use_str = f", only : {','.join(list(map(str,self.objs)))}"
+        elif self.renames:
+            use_str = f", {', '.join(map(str, self.renames))}"
+        else:
+            use_str = ""
+        return f"{self.lineno}: use{nature} {self.module}{use_str}"
 
     def to_dict(self):
         return {
             "Node": "UseStatement",
             "Module": self.module,
+            "Nature": self.nature,
+            "HasOnly": self.has_only,
             "objs": [expr.to_dict() for expr in self.objs],
+            "renames": [expr.to_dict() for expr in self.renames],
         }
 
-# class AllocationStatement(Statement):
-#     def __init__(self, tok: Token):
-#         self.token = tok
-#
-#     def token_literal(self) -> str:
-#         return self.token.literal
-#
-#     def statement_node(self) -> None:
-#         return super().statement_node()
-#
+class ImportStatement(Statement):
+    """
+    import [[::] name-list]
+    import, only : name-list
+    import, none | all
+      * spec: None | "only" | "none" | "all"
+      * names: imported host entity names
+    """
+
+    def __init__(self, tok: Token, names: list[str], spec: Optional[str] = None):
+        self.token = tok
+        self.names: list[str] = names
+        self.spec: Optional[str] = spec
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def statement_node(self) -> None:
+        return super().statement_node()
+
+    def __str__(self) -> str:
+        names = ", ".join(self.names)
+        if self.spec == "only":
+            return f"import, only: {names}"
+        if self.spec:
+            return f"import, {self.spec}"
+        return f"import :: {names}" if names else "import"
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, ImportStatement)
+            and self.names == other.names
+            and self.spec == other.spec
+        )
+
+    def to_dict(self):
+        return {"Node": "ImportStatement", "Spec": self.spec, "Names": self.names}
+
+
+class AllocateStatement(Statement):
+    """
+    allocate([type-spec ::] obj-list [, alloc-opt-list])
+    deallocate(obj-list [, dealloc-opt-list])
+      * type_spec: Optional[TypeSpec]
+      * objects: list[Expression]
+      * options: dict[str, Expression]  (stat, errmsg, source, mold)
+    """
+
+    def __init__(
+        self,
+        tok: Token,
+        type_spec: Optional[TypeSpec],
+        objects: list[Expression],
+        options: dict[str, Expression],
+    ):
+        self.token = tok  # ALLOCATE or DEALLOCATE
+        self.type_spec: Optional[TypeSpec] = type_spec
+        self.objects: list[Expression] = objects
+        self.options: dict[str, Expression] = options
+
+    @property
+    def is_deallocate(self) -> bool:
+        return self.token.token == TokenTypes.DEALLOCATE
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def statement_node(self) -> None:
+        return super().statement_node()
+
+    def __str__(self) -> str:
+        items = ", ".join(str(o) for o in self.objects)
+        if self.type_spec is not None:
+            items = f"{self.type_spec} :: {items}"
+        opts = "".join(f", {k}={v}" for k, v in self.options.items())
+        return f"{self.token.literal}({items}{opts})"
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, AllocateStatement)
+            and self.token == other.token
+            and str(self.type_spec) == str(other.type_spec)
+            and self.objects == other.objects
+            and self.options == other.options
+        )
+
+    def to_dict(self):
+        return {
+            "Node": "AllocateStatement",
+            "Token": self.token.literal,
+            "TypeSpec": self.type_spec.to_dict() if self.type_spec else None,
+            "Objects": [o.to_dict() for o in self.objects],
+            "Options": {k: v.to_dict() for k, v in self.options.items()},
+        }
+
 
 class NameListStatement(Statement):
     """

@@ -232,6 +232,9 @@ class FortranModule:
 
         # modules available to all subroutines
         self.head_modules: dict[str, ModUsage] = {}
+        # every `use` statement in the file as originally written (including
+        # modules SPEL can't load, which are commented out of module_lines)
+        self.use_stmts: list[UseStatement] = []
 
         self.modified: bool = False  # if module has been through modify_file or not.
         self.variables_sorted: bool = False

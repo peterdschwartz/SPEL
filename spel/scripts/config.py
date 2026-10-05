@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # Configure path information
 scripts_dir = Path(os.path.dirname(__file__))
 spel_dir = Path(f"{scripts_dir}/../../").resolve()
-database_app = spel_dir / 'db'
+database_app = spel_dir / "spel" / "db"
 database_csv =  database_app / "app/management/commands/csv/"
 presets = database_app / "app/management/comands/presets/"
 unittests_dir = spel_dir / "unit-tests/"

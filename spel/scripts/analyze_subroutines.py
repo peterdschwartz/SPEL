@@ -9,32 +9,25 @@ from pathlib import Path
 from pprint import pformat, pprint
 from typing import Any, Optional
 
-import spel.scripts.config as cfg
 from spel.scripts.config import _bc, spel_dir
 from spel.scripts.DerivedType import DerivedType, expand_dtype, get_component
 from spel.scripts.fortran_modules import FortranModule
 from spel.scripts.fortran_parser.environment import Environment
-from spel.scripts.fortran_parser.spel_ast import Statement
-from spel.scripts.fortran_parser.tracing import Trace
-from spel.scripts.helper_functions import (
-    ReadWrite,
-    SubroutineCall,
-    analyze_sub_variables,
-    combine_many_statuses,
-    find_child_subroutines,
-    is_derived_type,
-    merge_status_list,
-    normalize_soa_keys,
-    replace_elmtype_arg,
-    trace_derived_type_arguments,
-    trace_dtype_globals,
+from spel.scripts.fortran_parser.scope_walk import SubroutineRecord, walk_subroutine
+from spel.scripts.fortran_parser.spel_ast import (
+    Program,
+    Statement,
+    SubroutineDefinitionConstruct,
 )
+from spel.scripts.fortran_parser.spel_parser import Parser
+from spel.scripts.fortran_parser.tracing import Trace
+from spel.scripts.module_resolver import ModuleResolver, ModuleScopes
+from spel.scripts.record_access import AccessDict, AccessMaps
+from spel.scripts.helper_functions import combine_many_statuses, find_child_subroutines
 from spel.scripts.logging_configs import get_logger, set_logger_level
 from spel.scripts.LoopConstructs import Loop
 from spel.scripts.process_associate import getAssociateClauseVars
 from spel.scripts.types import (
-    ArgLabel,
-    ArgUsage,
     CallBinding,
     CallDesc,
     CallTag,
@@ -43,8 +36,9 @@ from spel.scripts.types import (
     FlatIfs,
     LineTuple,
     PropagatedAccess,
-    Scope,
+    ReadWrite,
     SubInit,
+    SubroutineCall,
 )
 from spel.scripts.utilityFunctions import (
     Variable,
@@ -79,12 +73,32 @@ class Subroutine(object):
 
         self.filepath: Path = init_obj.file
         self.startline: int = init_obj.start
-        self.endline: int = init_obj.end
         self.module: str = init_obj.mod_name
         self.fort_mod: FortranModule = init_obj.fort_mod
 
+        # endline/cpp_endline: end of this routine's own statements (its `contains`
+        # line if it hosts internal subprograms). The regex-based analysis uses these
+        # so internal subprograms aren't attributed to the host.
+        # end_stmt_ln/cpp_end_stmt_ln: the routine's END statement (used for parsing).
+        self.end_stmt_ln: int = init_obj.end
+        self.cpp_end_stmt_ln: int | None = init_obj.cpp_end
+        self.contains_ln: Optional[int] = init_obj.contains_ln
+        self.cpp_contains_ln: Optional[int] = init_obj.cpp_contains_ln
+        self.endline: int = (
+            init_obj.contains_ln if init_obj.contains_ln is not None else init_obj.end
+        )
+
         self.id: str = f"{self.module}::{self.name}"
         self.mod_deps: set[str] = set()
+
+        # Internal subprograms (after a host's `contains`). Links are set by
+        # link_internal_subprograms once every Subroutine has been created.
+        self.is_internal: bool = bool(init_obj.parent)
+        self.host_id: Optional[str] = (
+            f"{self.module}::{init_obj.parent}" if init_obj.parent else None
+        )
+        self.host: Optional[Subroutine] = None
+        self.internal_subs: dict[str, Subroutine] = {}
 
         # CallTree where repeated child subroutines are not considered.
         self.abstract_call_tree: Optional[CallTree] = None
@@ -101,7 +115,11 @@ class Subroutine(object):
 
         # Compiler preprocessor flags
         self.cpp_startline: int | None = init_obj.cpp_start
-        self.cpp_endline: int | None = init_obj.cpp_end
+        self.cpp_endline: int | None = (
+            init_obj.cpp_contains_ln
+            if init_obj.cpp_contains_ln is not None
+            else init_obj.cpp_end
+        )
         self.cpp_filepath: str | None = init_obj.cpp_fn
 
         # Process the Associate Clause
@@ -124,9 +142,21 @@ class Subroutine(object):
         self.if_blocks: list[Statement] = []
         self.flat_ifs: list[FlatIfs] = []
         self.ifs_analyzed: bool = False
+        self.syntax_tree: Optional[SubroutineDefinitionConstruct] = None
+
+        # Populated by walk_syntax_tree; source of truth for routine data
+        self.record: Optional[SubroutineRecord] = None
+        # access maps derived from self.record (record_access.AccessMapper)
+        self.record_access: Optional[AccessMaps] = None
+        # unit-test roots: global accesses at the elm_drv call sites
+        # (driver_callsites.driver_callsites); None if not called by elm_drv
+        self.driver_access: Optional[AccessDict] = None
 
         if not lib_func:
-            self.sub_lines = self.get_sub_lines(init_obj.mod_lines)
+            full_lines = self.get_sub_lines(init_obj.mod_lines, full=True)
+            own_end = self.get_file_info(all=True).endln
+            self.sub_lines = [lt for lt in full_lines if lt.ln <= own_end]
+            self.parse(full_lines)
             if not self.sub_lines:
                 sys.exit(f"FAILED TO GET SUB_LINES FOR { self.name }")
 
@@ -163,12 +193,10 @@ class Subroutine(object):
             self.arguments = sort_args.copy()
 
         # Access by ln
-        self.arguments_rw_summary: dict[str, ReadWrite] = {}
         self.arg_access_by_ln: dict[str, list[ReadWrite]] = {}
         self.elmtype_access_by_ln: dict[str, list[ReadWrite]] = {}
         self.elmtype_access_summary: dict[str, ReadWrite] = {}
         self.local_vars_access_by_ln: dict[str, list[ReadWrite]] = {}
-        self.local_vars_summary: dict[str, list[ReadWrite]] = {}
 
         self.propagated_access_by_ln: dict[str, list[PropagatedAccess]] = {}
 
@@ -189,9 +217,6 @@ class Subroutine(object):
         self.acc_status: bool = False
         self.analyzed_child_subroutines: bool = False
         self.preprocessed: bool = False
-        self.args_analyzed: bool = False
-        self.vars_analyzed: bool = False
-        self.summarized: bool = False
 
         self.environment: Optional[Environment] = None
         self.inherits_from: str = init_obj.parent
@@ -414,14 +439,16 @@ class Subroutine(object):
         return None
 
     def get_sub_lines(
-        self, mod_lines: Optional[list[LineTuple]] = None
+        self, mod_lines: Optional[list[LineTuple]] = None, full: bool = False
     ) -> list[LineTuple]:
         """
         Function that returns lines of a subroutine after trimming comments,
-        removing line continuations, and lower-case
+        removing line continuations, and lower-case.
+            full: include internal subprograms through the END statement
         """
-        fileinfo = self.get_file_info(all=True)
+        fileinfo = self.get_file_info(all=True, full=full)
         regex_all = re.compile(r"(.*)")
+        fline_list: list[LineTuple] = []
         if not mod_lines:
             self.logger.error("no mod lines!!!")
         else:
@@ -475,9 +502,10 @@ class Subroutine(object):
 
         return None
 
-    def get_file_info(self, all: bool = False):
+    def get_file_info(self, all: bool = False, full: bool = False):
         """
         Getter that returns tuple for fn, start and stop linenumbers.takes into account cpp files
+            full: end at the END statement instead of the host's `contains`
         """
         if self.cpp_filepath:
             fn = self.cpp_filepath
@@ -485,14 +513,14 @@ class Subroutine(object):
                 start_ln = self.cpp_startline
             else:
                 start_ln = self.associate_end
-            endline = self.cpp_endline
+            endline = self.cpp_end_stmt_ln if full else self.cpp_endline
         else:
             fn = self.filepath
             if self.associate_end == 0 or all:
                 start_ln = self.startline
             else:
                 start_ln = self.associate_end
-            endline = self.endline
+            endline = self.end_stmt_ln if full else self.endline
 
         return FileInfo(fpath=fn, startln=start_ln, endln=endline)
 
@@ -594,118 +622,58 @@ class Subroutine(object):
 
         return None
 
-    @Trace.trace_decorator("analyze_variables")
-    def analyze_variables(
-        self,
-        sub_dict: dict[str, Subroutine],
-        verbose: bool = False,
-    ):
+    def parse(self, lines: Optional[list[LineTuple]] = None):
         """
-        Function used to determine read and write variables
-        If var is written to first, then rest of use is ignored.
-        Vars determined to be read are read-in from a file generated by
-            full E3SM run called {unit-test}_vars.txt by default.
-
-        Vars that are written to must be checked to verify
-        results of unit-testing.
-
+        Parse the routine (including internal subprograms) into self.syntax_tree
         """
-        func_name = "( analyze_variables )"
+        lines = lines if lines is not None else self.sub_lines
+        self.check_assert(lines is not None, msg="Got Empty lines for subroutine!!")
 
-        var_dict: dict[str, Variable] = {
-            key: val for key, val in self.dtype_vars.items() if "%" in key
-        }
-        globals_accessed = analyze_sub_variables(
-            self,
-            sub_dict,
-            var_dict,
-            mode=ArgLabel.globals,
-            verbose=verbose,
+        parser = Parser(lines=lines, logger=f"Parser-{self.id}")
+        program = parser.parse_program()
+        cond = len(program.statements) == 1 and isinstance(
+            program.statements[0], SubroutineDefinitionConstruct
         )
-        norm = normalize_soa_keys(globals_accessed)
-
-        for var_name, stat_list in norm.items():
-            if var_name in self.active_global_vars:
-                continue
-            if var_name in self.associate_vars:
-                actual_name = self.associate_vars[var_name]
-                inst, _ = actual_name.split("%")
-                if inst in self.arguments:
-                    merge_status_list(actual_name, self.arg_access_by_ln, stat_list)
-                else:
-                    merge_status_list(actual_name, self.elmtype_access_by_ln, stat_list)
-            else:
-                self.elmtype_access_by_ln[var_name] = stat_list.copy()
-
-        # Analyze local variables and add any pointers to elmtypes to elmtype_access_by_ln
-        local_var_dict = self.local_variables
-        local_accessed = analyze_sub_variables(
-            self,
-            sub_dict,
-            local_var_dict,
-            mode=ArgLabel.locals,
-            verbose=verbose,
+        self.check_assert(
+            cond,
+            msg=f"Got {[type(s) for s in program.statements]}\nExpected: SubroutineDefinitionConstruct",
+        )
+        assert len(program.statements) == 1 and isinstance(
+            program.statements[0], SubroutineDefinitionConstruct
+        )
+        self.syntax_tree = program.statements[0]
+        self.check_assert(
+            self.name == self.syntax_tree.name,
+            msg=f"Name from parsing doesn't match:  {self.name} != {self.syntax_tree.name}",
         )
 
-        self.local_vars_access_by_ln = local_accessed
-        # # For local variables that are pointers, merge their ReadWrite status with their target
-        for ptr, gv_list in self.ptr_vars.items():
-            stat_list = local_accessed.get(ptr)
-            if stat_list is None:
-                continue
-            for gv in gv_list:
-                inst, _ = gv.split("%")
-                if inst in self.arguments:
-                    merge_status_list(gv, self.arg_access_by_ln, stat_list)
-                else:
-                    merge_status_list(gv, self.elmtype_access_by_ln, stat_list)
-
-        if self.call_bindings:
-            self.apply_bindings()
-
-        self.arguments_rw_summary = {
-            k: ReadWrite(
-                status=combine_many_statuses([s.status for s in rws]),
-                ln=-1,
-                line=None,
-            )
-            for k, rws in self.arg_access_by_ln.items()
-        }
-        self.map_targets_to_ptrs()
-        self.vars_analyzed = True
-
         return
 
-    def map_targets_to_ptrs(self):
+    def walk_syntax_tree(self, scopes: ModuleScopes) -> SubroutineRecord:
         """
-        This function goes through elmtype_access_by_ln and checks if any variables are True pointers.
-        Then, the targets for those pointers are added to the access dict with the same statuses as the pointer.
+        Scope-aware walk of self.syntax_tree into self.record (once).
+        An internal subprogram needs its host's scope, so the host is walked
+        first, with its own resolver.
         """
-        for var in self.dtype_vars.values():
-            if "%" not in var.name or var.name not in self.elmtype_access_by_ln.keys():
-                continue
-            if var.pointer:
-                status = self.elmtype_access_by_ln[var.name]
-                for target in var.pointer:
-                    self.elmtype_access_by_ln[target] = status.copy()
-        return
+        if self.record is not None:
+            return self.record
+        self.check_assert(
+            self.syntax_tree is not None, msg=f"{self.name}: not parsed before walk"
+        )
+        host_rec = None
+        if self.is_internal:
+            self.check_assert(self.host is not None, msg=f"{self.name}: host not linked")
+            host_rec = self.host.walk_syntax_tree(scopes)
+        resolver = ModuleResolver.for_subroutine(
+            self, scopes.mod_dict, scopes.sub_dict, scopes=scopes
+        )
+        self.record = walk_subroutine(self.syntax_tree, resolver=resolver, host=host_rec)
+        return self.record
 
-    def match_arg_to_inst(self, type_dict: dict[str, DerivedType]):
-        """
-        Called for parent subroutine: populate elmtype_access_by_ln
-        with instances with status from arg_access_by_ln
-        """
-        verbose = False
-        name_map: dict[str, str] = {}
-        for arg in self.arguments.values():
-            dtype = type_dict.get(arg.type, None)
-            if dtype:
-                for inst in dtype.instances:
-                    name_map[arg.name] = inst
-        if not name_map:
-            return
-        replace_elmtype_arg(name_map, self, verbose)
-        return
+    def check_assert(self, cond: bool, msg: str):
+        if not cond:
+            self.logger.error(msg)
+            raise RuntimeError
 
     def summarize_readwrite(self, verbose=False):
         """
@@ -718,7 +686,6 @@ class Subroutine(object):
                 ln=-1,
                 line=None,
             )
-        self.summarized = True
         return
 
     def print_variable_access(self, all=False):
@@ -1032,154 +999,6 @@ class Subroutine(object):
             print(_bc.BOLD + _bc.WARNING + "NO CHANGE" + _bc.ENDC)
         return None
 
-    def parse_arguments(
-        self,
-        sub_dict: dict[str, Subroutine],
-        verbose=False,
-    ):
-        """
-        Function that will analyze the variable status for only the arguments
-            'sub.arguments_read_write' : { `arg` : ReadWrite }
-        """
-        func_name = "(parse_arguments)"
-        associate_set: set[str] = set()
-        var_dict = self.arguments.copy()
-
-        args_accessed = analyze_sub_variables(
-            self,
-            sub_dict,
-            var_dict,
-            mode=ArgLabel.dummy,
-            verbose=verbose,
-        )
-        # Substitute any associated pointer names
-        for key in associate_set:
-            full_name = self.associate_vars[key]
-            ptr_status = args_accessed.pop(key, None)
-            if ptr_status:
-                args_accessed.setdefault(full_name, []).extend(ptr_status)
-
-        for key in associate_set:
-            full_name = self.associate_vars[key]
-            regex_alias = re.compile(rf"\b{key}\b")
-            for arg in list(args_accessed.keys()):
-                if regex_alias.search(arg):
-                    alias, field = arg.split("%")
-                    arg_status = args_accessed.pop(arg)
-                    new_alias = regex_alias.sub(full_name, alias)
-                    new_name = "%".join([new_alias, field])
-                    args_accessed.setdefault(new_name, []).extend(arg_status)
-
-        self.arg_access_by_ln = args_accessed.copy()
-        for arg in list(self.arg_access_by_ln.keys()):
-            arg_var = self.arguments.get(arg)
-            if arg_var is None:
-                continue
-            if is_derived_type(arg_var):
-                _ = self.arg_access_by_ln.pop(arg)
-
-        if not self.arg_access_by_ln and not self.arguments:
-            self.logger.error(f"{func_name}::ERROR: Failed to analyze arguments")
-            sys.exit(1)
-
-        return None
-
-    def apply_bindings(self):
-        """
-        This function is called on leaf nodes -> root nodes.
-        Go through call site bindings and apply the overall read-write status of the arg
-        to the parent subroutine's AccessDicts.
-         - If the arg is a global variable or argument of the parent subroutine, the child_sub.propagated_access_by_ln
-         will be filled in with the relevant args_access_by_ln with variable names substituted.
-        """
-        for calltag, bindings in self.call_bindings.items():
-            for binding in bindings:
-                var_name = (
-                    f"{binding.var_name}%{binding.member_path}"
-                    if binding.member_path
-                    else binding.var_name
-                )
-                roots = self._get_ptr_targets(var_name)
-                child_sub = self.child_subroutines[binding.callee]
-                if child_sub.library:
-                    continue
-                dummy_arg = child_sub.dummy_args_list[binding.argn]
-                for argvar, rws in child_sub.arg_access_by_ln.items():
-                    if not re.match(rf"\b{dummy_arg}\b", argvar):
-                        continue
-                    for var_name in roots:
-                        if "%" not in argvar:
-                            new_key = argvar.replace(dummy_arg, var_name)
-                        else:
-                            inst, member_path = argvar.split("%", 1)
-                            new_key = f"{var_name}%{member_path}"
-                        new_rw = ReadWrite(
-                            status=combine_many_statuses([s.status for s in rws]),
-                            ln=calltag.call_ln,
-                            line=None,
-                        )
-                        if binding.arg_usage == ArgUsage.INDIRECT:
-                            assert new_rw.status == "r", (
-                                "Indirect or Nested argument usage should be read-only"
-                                + f"\n Calltag: {calltag}\nBinding: {binding}\nArgvar: {argvar}\nRWs: {rws}"
-                            )
-                        elif binding.arg_usage == ArgUsage.NESTED:
-                            new_rw.status = "r"  # No assertion because var isn't actually passed to child
-
-                        # Add overall read write status to parent line info at the call site
-                        scope = self._determine_scope(new_key)
-
-                        if not cfg.options.db_mode:
-                            self._add_access(scope, new_key, new_rw)
-
-                        if binding.arg_usage != ArgUsage.NESTED:
-                            child_sub.propagated_access_by_ln.setdefault(
-                                new_key, []
-                            ).append(
-                                PropagatedAccess(
-                                    tag=calltag,
-                                    rw_statuses=rws.copy(),
-                                    scope=scope,
-                                    dummy=dummy_arg,
-                                    binding=binding,
-                                )
-                            )
-        # clean up:
-        if not cfg.options.db_mode:
-            self.elmtype_access_by_ln = {
-                key: sorted(list(set(rws)), key=lambda x: x.ln)
-                for key, rws in self.elmtype_access_by_ln.items()
-            }
-            self.arg_access_by_ln = {
-                key: sorted(list(set(rws)), key=lambda x: x.ln)
-                for key, rws in self.arg_access_by_ln.items()
-            }
-            self.local_vars_access_by_ln = {
-                key: sorted(list(set(rws)), key=lambda x: x.ln)
-                for key, rws in self.local_vars_access_by_ln.items()
-            }
-
-        return
-
-    def _add_access(self, scope: Scope, key: str, rw: ReadWrite):
-        match scope:
-            case Scope.ELMTYPE:
-                self.elmtype_access_by_ln.setdefault(key, []).append(rw)
-            case Scope.ARG:
-                self.arg_access_by_ln.setdefault(key, []).append(rw)
-            case Scope.LOCAL:
-                self.local_vars_access_by_ln.setdefault(key, []).append(rw)
-        return
-
-    def _determine_scope(self, key: str) -> Scope:
-        if key.split("%")[0] in self.dtype_vars:
-            return Scope.ELMTYPE
-        elif key.split("%")[0] in self.arguments:
-            return Scope.ARG
-        elif key.split("%")[0] in self.local_variables:
-            return Scope.LOCAL
-        return Scope.UNKNOWN
-
     def _get_ptr_targets(self, pot_ptr: str) -> list[str]:
         return self.ptr_vars.get(pot_ptr, [pot_ptr])
 
@@ -1247,3 +1066,20 @@ class Subroutine(object):
         for var in sorted(list(boths)):
             print(var)
         return
+
+
+def link_internal_subprograms(sub_dict: dict[str, Subroutine]) -> None:
+    """
+    Connect internal subprograms to their host routine (and vice versa) so that
+    symbol lookups can fall back to the host's scope.
+    """
+    for sub in sub_dict.values():
+        if not sub.is_internal:
+            continue
+        assert sub.host_id, f"{sub.id} is internal but has no host"
+        host = sub_dict.get(sub.host_id)
+        if host is None:
+            sub.logger.error(f"Host {sub.host_id} not found for internal {sub.id}")
+            sys.exit(1)
+        sub.host = host
+        host.internal_subs[sub.name] = sub

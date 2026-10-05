@@ -222,7 +222,7 @@ class FunctionalUnitTest:
             name
             for subroutine in self.primary_subroutines.values()
             for name, access in subroutine.elmtype_access_summary.items()
-            if access in {"w", "rw"}
+            if access.status in {"w", "rw"}
         }
 
     # ------------------------------------------------------------------
@@ -322,8 +322,9 @@ class FunctionalUnitTest:
                 mod_name=mod_name,
                 fort_mod=FortranModule(fname=fn, name=mod_name, ln=0),
                 file=Path(fn),
-                start=startl,
-                end=endl,
+                # find_file_for_subroutine is 1-based
+                start=startl - 1,
+                end=endl - 1,
                 mod_lines=mod_lines,
                 function=None,
                 cpp_start=None,

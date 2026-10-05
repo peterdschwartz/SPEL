@@ -4,7 +4,14 @@ from logging import Logger
 from typing import Optional
 
 from spel.scripts.config import spel_output_dir
-from spel.scripts.types import FunctionReturn, ParseState, PreProcTuple, SubInit, SubStart
+from spel.scripts.types import (
+    FunctionReturn,
+    ParseState,
+    PreProcTuple,
+    RoutineFrame,
+    SubInit,
+    SubStart,
+)
 from spel.scripts.utilityFunctions import intrinsic_type, split_func_line
 
 
@@ -67,6 +74,7 @@ def create_init_obj(
     logger: Logger,
     sub_start: Optional[SubStart] = None,
     func_init: Optional[FunctionReturn] = None,
+    frame: Optional[RoutineFrame] = None,
 ) -> None:
     """
     Function to instantiate function if not in sub_dict
@@ -82,7 +90,8 @@ def create_init_obj(
     assert state.curr_line
 
     end_ln = state.curr_line.ln
-    cpp_end = state.line_it.i if state.host_program == -1 else state.host_program
+    # line_it.i is one past the END statement's last physical line
+    cpp_end = state.line_it.i - 1
 
     sub_name = None
     start_ln = None
@@ -122,9 +131,10 @@ def create_init_obj(
         cpp_end=cpp_end,
         function=func_init,
         parent=parent,
+        contains_ln=frame.contains_ln if frame else None,
+        cpp_contains_ln=frame.cpp_contains_ln if frame else None,
     )
 
     state.sub_init_dict[f"{state.module_name}::{sub_name}"] = init_obj
-    state.host_program = -1 # reset
 
     return None

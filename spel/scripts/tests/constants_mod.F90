@@ -11,6 +11,19 @@ module constants_mod
   real, allocatable :: notused(:)
 
   logical :: use_fates = .true.
+  logical :: use_c13 = .false.
+  logical :: use_c14 = .false.
+  real, parameter :: spval = 1.e36
+  integer, parameter :: total_comps = 3
+  integer :: io_compid(total_comps)
+  character(len=16) :: io_compname(total_comps)
+  real, allocatable :: woody(:)
+  real, allocatable :: evergreen(:)
+  integer, parameter :: max_lunit = 9
+  integer, parameter :: istsoil = 1
+  integer, parameter :: istcrop = 2
+  real, parameter :: alpha = 0.5
+  real :: anew(4), agro(4), amat(4), aold(4)
   type(test_type), public :: unused_inst
   contains
 

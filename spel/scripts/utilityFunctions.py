@@ -303,7 +303,8 @@ def find_end_subroutine(fn, startline):
             continue
         match = regex_end_subroutine.search(line)
         if match:
-            endline = ln
+            # 1-based, consistent with grep -n in find_file_for_subroutine
+            endline = ln + 1
             break
 
     return endline
@@ -313,6 +314,7 @@ def find_file_for_subroutine(name, fn="", ignore_interface=False, verbose=False)
     """
     finds file, start and end line numbers for subroutines
     find file and start of interface block for interfaces
+    NOTE: line numbers are 1-based (grep -n); SubInit expects 0-based.
     """
     func_name = "find_file_for_subroutine"
     if not fn:

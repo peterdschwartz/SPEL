@@ -17,6 +17,9 @@ class Environment:
     globals: dict[str, Variable] = field(default_factory=dict)
     dummy_args: dict[str, Variable] = field(default_factory=dict)
     fns: dict[str, Subroutine] = field(default_factory=dict)
+    # Identifier (e.g. "module::subroutine") of the Subroutine this
+    # Environment was built for. Used only to enrich error messages.
+    sub_name: str = ""
 
     def to_dict(self):
         return asdict(self)

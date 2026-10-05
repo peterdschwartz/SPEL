@@ -56,6 +56,21 @@ def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList])
     return
 
 
+def nml_guards(root_sub: Subroutine) -> dict[str, ConditionExpectation]:
+    """
+    inst%field -> namelist condition under which root_sub (incl. its children,
+    via their call sites) accesses it, for fields ONLY accessed under namelist ifs.
+    """
+    exclusive = root_sub.elmtype_accesses_exclusive_to_namelist_ifs()
+    var_dict: dict[str, ConditionExpectation] = {}
+    for v, flatifs in exclusive.items():
+        expectations: set[ConditionExpectation] = {if_.condtional_expectation for if_ in flatifs}
+        combined = simplify(AnyOf(tuple(expectations)))
+        if combined != NO_EXPECTATION:
+            var_dict[v] = combined
+    return var_dict
+
+
 def check_sub_for_nml_guarded_vars(
     root_sub: Subroutine,
     instance_dict: dict[str, DerivedType],
@@ -64,15 +79,7 @@ def check_sub_for_nml_guarded_vars(
     Given a root subroutine node, check
     if any global variables are ONLY accessed under certain NML options
     """
-    exclusive = root_sub.elmtype_accesses_exclusive_to_namelist_ifs()
-    var_dict: dict[str, ConditionExpectation] = {}
-    if exclusive:
-        for v, flatifs in exclusive.items():
-            expectations: set[ConditionExpectation] = {if_.condtional_expectation for if_ in flatifs}
-            combined_expectations: ConditionExpectation = AnyOf(tuple(expectations))
-            combined = simplify(combined_expectations)
-            if combined != NO_EXPECTATION:
-                var_dict[v] = combined
+    var_dict = nml_guards(root_sub)
 
     temp = defaultdict(list)
     for v, cond in var_dict.items():

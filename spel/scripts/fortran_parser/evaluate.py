@@ -44,6 +44,50 @@ map_py_to_f_types = {
 }
 
 
+class EvaluationError(Exception):
+    """
+    Raised when an argument expression cannot be evaluated against the
+    Environment, e.g. referencing a variable/function/field that isn't
+    present in the current subroutine's scope.
+    """
+
+    pass
+
+
+def _lookup(
+    table: Dict[str, Any],
+    ident: str,
+    kind: str,
+    branch: Optional[ArgTree] = None,
+    sub_name: str = "",
+) -> Any:
+    """
+    dict lookup with rich error reporting. Raises EvaluationError (instead of
+    a bare KeyError) when `ident` is missing from `table`, including which
+    subroutine/argument expression triggered the lookup and what identifiers
+    were actually available.
+    """
+    try:
+        return table[ident]
+    except KeyError:
+        available = sorted(table.keys())
+        max_shown = 25
+        shown = available[:max_shown]
+        more = (
+            f", ... ({len(available) - max_shown} more)"
+            if len(available) > max_shown
+            else ""
+        )
+        node_info = f"\n  Argument expression node: {branch.node}" if branch else ""
+        raise EvaluationError(
+            f"Unknown {kind} '{ident}'"
+            + (f" while parsing subroutine '{sub_name}'" if sub_name else "")
+            + "."
+            + node_info
+            + f"\n  Available {kind}s ({len(available)}): {shown}{more}"
+        ) from None
+
+
 @dataclass
 class SymbolTable:
     vars: List[ArgNode]
@@ -262,15 +306,23 @@ def parse_subroutine_call(
         env = sub.environment
 
     arg_tree = construct_arg_tree(arg_list, sub, sub_dict)
-    arg_desc_list = create_arg_descr(arg_tree, env)
+    try:
+        arg_desc_list = create_arg_descr(arg_tree, env)
 
-    fn = ""
-    if sub_name in ilist:
-        fn = resolve_interface2(sub_name, arg_desc_list, sub_dict)
-    elif "%" in sub_name:
-        fn = resolve_class_method(sub_name, sub, arg_desc_list, arg_tree)
-    else:
-        fn = sub._get_child_sub_id(sub_name, sub_dict)
+        fn = ""
+        if sub_name in ilist:
+            fn = resolve_interface2(sub_name, arg_desc_list, sub_dict)
+        elif "%" in sub_name:
+            fn = resolve_class_method(sub_name, sub, arg_desc_list, arg_tree)
+        else:
+            fn = sub._get_child_sub_id(sub_name, sub_dict)
+    except EvaluationError as e:
+        raise EvaluationError(
+            f"{e}\n"
+            f"  While parsing call to '{sub_name}' in '{sub.id}' "
+            f"at line {input.ln}:\n"
+            f"    {input.line.strip()}"
+        ) from e
 
     if not fn:
         fn = sub_name
@@ -300,7 +352,9 @@ def resolve_class_method(
     if subname.count("%") > 1:
         print(subname)
     inst_name, method = subname.split("%")
-    dtype = sub.environment.inst_dict[inst_name]
+    dtype = _lookup(
+        sub.environment.inst_dict, inst_name, "instance", sub_name=sub.id
+    )
     for arg in arg_desc_list:
         arg.increment_arg_number()
 
@@ -329,7 +383,9 @@ def resolve_class_method(
 
     arg_desc_list.insert(0, class_arg_desc)
 
-    return dtype.procedures[f"{method}"]
+    return _lookup(
+        dtype.procedures, method, f"procedure of '{inst_name}'", sub_name=sub.id
+    )
 
 
 def create_environment(
@@ -411,6 +467,7 @@ def create_environment(
         globals=global_dict,
         fns=sub_dict,
         inst_dict=instance_dict,
+        sub_name=sub.id,
     )
 
 
@@ -701,13 +758,17 @@ def evaluate_arg_node(branch: ArgTree, env: Environment) -> ArgType:
     node = branch.node
     match node.kind:
         case IdentKind.variable:
-            var = env.variables[node.ident]
+            var = _lookup(env.variables, node.ident, "variable", branch, env.sub_name)
             dim = adjust_dim(var.dim, branch) if branch.children else var.dim
             return ArgType(datatype=var.type, dim=dim)
         case IdentKind.intrinsic:
-            return intrinsic_fns[node.ident]
+            return _lookup(
+                intrinsic_fns, node.ident, "intrinsic function", branch, env.sub_name
+            )
         case IdentKind.function:
-            fn = env.fns[node.ident]
+            fn = _lookup(
+                env.fns, node.ident, "function/subroutine", branch, env.sub_name
+            )
             res_var: Variable = fn.result
             return ArgType(datatype=res_var.type, dim=res_var.dim)
         case IdentKind.infix:
@@ -737,8 +798,10 @@ def evaluate_field_access(branch: ArgTree, env: Environment) -> ArgType:
 
     # FieldAccessExpression only gets used if the instance is AoS
     inst_name = get_ident(inst_node)
-    inst = env.inst_dict[inst_name]
-    field_var: Variable = inst.components[field_name]
+    inst = _lookup(env.inst_dict, inst_name, "instance", branch, env.sub_name)
+    field_var: Variable = _lookup(
+        inst.components, field_name, f"field of '{inst_name}'", branch, env.sub_name
+    )
 
     branch.node.ident = inst_name + "(index)%" + field_name
     branch.node.kind = IdentKind.variable
