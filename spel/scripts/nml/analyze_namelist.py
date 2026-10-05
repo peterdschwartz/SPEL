@@ -2,21 +2,25 @@ import re
 import subprocess
 from collections import defaultdict
 from pprint import pprint
+import sys
 
 from spel.scripts.analyze_subroutines import Subroutine
 from spel.scripts.config import ELM_SRC
+from spel.scripts.DerivedType import DerivedType, get_component
 from spel.scripts.fortran_parser.boolen_expression import (
     NO_EXPECTATION,
+    AnyOf,
     ConditionExpectation,
     Expectation,
     expected_constraints,
     infer_condition_expectations,
-    simplify_expectations,
+    simplify,
 )
 from spel.scripts.fortran_parser.spel_ast import NameListStatement, Program
 from spel.scripts.fortran_parser.spel_parser import Parser
 from spel.scripts.nml.namelist_cascade import NML_CASCADES
 from spel.scripts.types import FlatIfs, LineTuple, LogicalLineIterator, NameList
+from spel.scripts.utilityFunctions import Variable
 
 
 def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList]):
@@ -52,25 +56,30 @@ def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList])
     return
 
 
-def check_sub_for_nml_guarded_vars(root_sub: Subroutine)-> dict[ConditionExpectation,list[str]]:
+def check_sub_for_nml_guarded_vars(
+    root_sub: Subroutine,
+    instance_dict: dict[str, DerivedType],
+) -> dict[ConditionExpectation, list[Variable]]:
     """
-    Given a root subroutine node, traverse the calltree and determine
+    Given a root subroutine node, check
     if any global variables are ONLY accessed under certain NML options
     """
     exclusive = root_sub.elmtype_accesses_exclusive_to_namelist_ifs()
     var_dict: dict[str, ConditionExpectation] = {}
     if exclusive:
         for v, flatifs in exclusive.items():
-            combined_expectations: set[Expectation] = set()
-            for _if in flatifs:
-                combined_expectations.update(_if.expected_namelist_values)
-            combined = simplify_expectations(combined_expectations)
+            expectations: set[ConditionExpectation] = {if_.condtional_expectation for if_ in flatifs}
+            combined_expectations: ConditionExpectation = AnyOf(tuple(expectations))
+            combined = simplify(combined_expectations)
             if combined != NO_EXPECTATION:
                 var_dict[v] = combined
 
     temp = defaultdict(list)
     for v, cond in var_dict.items():
-        temp[cond].append(v)
+        var = get_component(instance_dict,*v.split('%'))
+        if var is None:
+            raise ValueError(f"Error: expected derived type of the for inst%field, Got {v}")
+        temp[cond].append(var)
 
     return temp
 

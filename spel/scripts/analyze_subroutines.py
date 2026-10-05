@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 import os.path
-from pathlib import Path
 import re
 import sys
 from collections import defaultdict
+from pathlib import Path
 from pprint import pformat, pprint
 from typing import Any, Optional
 
@@ -487,7 +487,6 @@ class Subroutine(object):
                 start_ln = self.associate_end
             endline = self.cpp_endline
         else:
-            print("NO CPP FILE", self.name)
             fn = self.filepath
             if self.associate_end == 0 or all:
                 start_ln = self.startline
@@ -1197,15 +1196,21 @@ class Subroutine(object):
         ]
 
         def matching_namelist_if(access: ReadWrite) -> Optional[FlatIfs]:
-            for x_if in nml_ifs:
-                if x_if.start_ln <= access.ln <= x_if.end_ln:
-                    return x_if.copy()
+            distance_from_if = [
+                (dist, x_if)
+                for x_if in nml_ifs
+                if (dist := access.ln - x_if.start_ln) >= 0 and access.ln < x_if.end_ln
+            ]
+            distance_from_if.sort(key=lambda x: x[0])
+
+            if distance_from_if:
+                return distance_from_if[0][1].copy()
             return None
 
         exclusive: dict[str, set[FlatIfs]] = {}
 
         for elm_field, accesses in self.elmtype_access_by_ln.items():
-            guarded_accesses = [ matching_namelist_if(rw) for rw in accesses]
+            guarded_accesses = [matching_namelist_if(rw) for rw in accesses]
             guarded_accesses = [_if for _if in guarded_accesses if _if is not None]
 
             # check if every access is a guarded access

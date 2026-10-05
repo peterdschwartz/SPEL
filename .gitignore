@@ -55,6 +55,9 @@ Thumbs.db
 .sfdx/
 
 .fortls.json
+
+# Per-developer local overrides (e.g. SPEL_E3SM_SRCROOT), see spel/scripts/config.py
+.spel.env
 # Ignore CMake artifacts
 **/CMakeLists.txt.user
 **/CMakeLists.txt.cache

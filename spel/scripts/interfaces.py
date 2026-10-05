@@ -6,7 +6,7 @@ import sys
 from typing import TYPE_CHECKING, Optional
 
 from spel.scripts.fortran_modules import get_module_name_from_file
-from spel.scripts.types import ArgDesc, ArgType
+from spel.scripts.types import ArgDesc, ArgType, LineTuple, LogicalLineIterator
 
 if TYPE_CHECKING:
     from spel.scripts.analyze_subroutines import Subroutine
@@ -230,22 +230,26 @@ def get_interface_procedures(iname: str) -> list[str]:
     lines = ifile.readlines()
     ifile.close()
     # Get list of possible procedures within the interface
+    lpairs = [LineTuple(line=line,ln=i) for i, line in enumerate(lines)]
+    line_iter = LogicalLineIterator(lines=lpairs)
 
+    regex_start = re.compile(r"^\s*(interface)\s*")
     regex_end = re.compile(r"^\s*(end)\s+(interface)", re.IGNORECASE)
     regex_procedure = re.compile(r"^\s*(module)\s+(procedure)\s+", re.IGNORECASE)
 
     interface_sub_names: list[str] = []  # list of subroutine names in the interface
-    ct = ln - 1
-    in_interface = True
-    while in_interface:
-        m_end = regex_end.search(lines[ct])
-        if m_end:
-            in_interface = False
-        else:
-            m_proc = regex_procedure.search(lines[ct])
-            if m_proc:
-                subname = lines[ct].replace(m_proc.group(), "").strip().lower()
-                interface_sub_names.extend([f"{module}::{s.strip()}" for s in subname.split(",")])
-        ct += 1
 
+    for fline in line_iter:
+        full_line = fline.line
+        m_start = regex_start.search(full_line)
+        if m_start:
+            block, _ = line_iter.consume_until(regex_end, None)
+            for ltuple in block:
+                m_proc = regex_procedure.search(ltuple.line)
+                if m_proc:
+                    subname = ltuple.line.replace(m_proc.group(), "").strip().lower()
+                    subnames = subname.split('::')[-1]
+                    interface_sub_names.extend([f"{module}::{s.strip()}" for s in subnames.split(",")])
+
+    print(f"Found these subroutines for interface {iname}: {interface_sub_names}")
     return interface_sub_names

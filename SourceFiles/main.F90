@@ -57,7 +57,7 @@ ELSEIF (COMMAND_ARGUMENT_COUNT() == 2) THEN
 END IF
 
 block 
-   character(len=256) :: input_path = "/home/me/SPEL/unit-tests/input-data/"
+   !#INPUT_PATH
    call io_constants%init(base_fn=trim(input_path)//'spel-constants',max_tpf=720,read_io=.true.)
    call io_inputs%init(base_fn=trim(input_path)//'spel-inputs',max_tpf=720,read_io=.true.)
    call io_outputs%init(base_fn=trim(input_path)//'fut-outputs',max_tpf=720,read_io=.false.)
@@ -105,12 +105,13 @@ block
        end if
        if (io_inputs%end_run .or. step > max_step) exit
 
-       !$acc parallel loop independent gang vector default(present) private(bounds_clump)
-       do nc = 1, nclumps
-          call get_clump_bounds(nc, bounds_clump)
-          !#CALL_SUB
+      do nc=1,nclumps
+        call get_clump_bounds(nc,bounds_clump)
 
-       end do
+      !#CALL_SUB
+
+      end do
+
        !#IO_WRITE
 
        step = step + 1
