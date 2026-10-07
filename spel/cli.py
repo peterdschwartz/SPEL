@@ -1,15 +1,15 @@
 import argparse
 import os
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
+from spel.scripts.config import unittests_dir
 from spel.scripts.export_objects import unpickle_unit_test
 from spel.scripts.ml_training.dataset_analysis import summarize_data
 from spel.scripts.ml_training.prepare_dataset import separate_inputs_outputs
 from spel.scripts.ml_training.sample_spel_output import sample
 from spel.scripts.ml_training.train import train
 from spel.scripts.profiler_context import profile_ctx
-from spel.scripts.config import unittests_dir
 
 SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -34,8 +34,24 @@ def export(args):
 
 def diff(args):
     from spel.scripts.relerror import find_diffs
+    from spel.scripts.validate_access import case_dir_for, run_validation
 
-    find_diffs(refn=args.ref, compfn=args.test, var=args.var)
+    if not args.test and not args.inputs:
+        raise SystemExit("spel diff: give --test and/or --inputs")
+    if args.inputs and not args.case:
+        raise SystemExit("spel diff: --inputs requires --case")
+    if args.test:
+        find_diffs(refn=args.ref, compfn=args.test, var=args.var)
+    if args.inputs:
+        # the reference is the post-call state of the model itself
+        code = run_validation(
+            inputs_fn=args.inputs,
+            outputs_fn=args.ref,
+            case_dir=case_dir_for(args.case),
+            constants_fn=args.constants,
+        )
+        if code:
+            raise SystemExit(code)
     return
 
 
@@ -44,9 +60,11 @@ def sample_training(args):
     unit_test = unpickle_unit_test(casename=args.case_name)
     input_set: set[str] = set()
     output_set: set[str] = set()
-    separate_inputs_outputs(unit_test.subroutine_dict, inputs=input_set, outputs=output_set)
-    sample(args.case_name,"spel-inputs", samples_per_file=n, var_name_set=input_set)
-    sample(args.case_name,"spel-outputs", samples_per_file=n, var_name_set=output_set)
+    separate_inputs_outputs(
+        unit_test.subroutine_dict, inputs=input_set, outputs=output_set
+    )
+    sample(args.case_name, "spel-inputs", samples_per_file=n, var_name_set=input_set)
+    sample(args.case_name, "spel-outputs", samples_per_file=n, var_name_set=output_set)
     summarize_data(args.case_name)
     return
 
@@ -96,9 +114,11 @@ def repl(args):
 
 def upload(args):
     from spel.scripts.config import scripts_dir
+
     SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     mach = args.machine
     dest = args.dest
+    upload_script = Path(__file__).parent / "scripts" / "upload.sh"
     subprocess.run(
         [f"{scripts_dir}/upload.sh", mach, dest],
         check=True,
@@ -148,7 +168,7 @@ def main():
         "   SPEL analyzes all dependencies related"
         "   to the subroutines"
         "spel export: "
-        "   Given commit number, take pkl files and create database csvs"
+        "   Given a casename, take pkl files and create database csvs"
         "spel diff: "
         "   Input two netcdf files to compare with scripts.relerror"
     )
@@ -193,7 +213,7 @@ def main():
         "-c",
         required=True,
         dest="commit",
-        help="Specify commit value ",
+        help="Casename of the pickled unit test (spel/scripts/fut_<casename>.pkl)",
     )
     export_parser.set_defaults(func=export)
 
@@ -203,11 +223,11 @@ def main():
         "--ref",
         required=True,
         dest="ref",
-        help="reference netcdf file",
+        help="reference netcdf file (post-call state, e.g. spel-outputs0001.nc)",
     )
     diff_parser.add_argument(
         "--test",
-        required=True,
+        required=False,
         dest="test",
         help="test netcdf file",
     )
@@ -216,6 +236,31 @@ def main():
         required=False,
         dest="var",
         help="Optional: only report variable var",
+    )
+    diff_parser.add_argument(
+        "--inputs",
+        required=False,
+        dest="inputs",
+        help=(
+            "pre-call netcdf file (e.g. spel-inputs0001.nc). Validates SPEL's "
+            "static analysis against --ref: inputs must not change (fails), "
+            "outputs that never change are flagged"
+        ),
+    )
+    diff_parser.add_argument(
+        "--case",
+        required=False,
+        dest="case",
+        help="unit-test case name or directory holding spel_access.json (with --inputs)",
+    )
+    diff_parser.add_argument(
+        "--constants",
+        required=False,
+        dest="constants",
+        help=(
+            "netcdf file with the run's namelist values used to evaluate namelist "
+            "guards (default: spel-constants file next to --inputs)"
+        ),
     )
     diff_parser.set_defaults(func=diff)
 

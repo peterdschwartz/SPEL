@@ -27,13 +27,18 @@ def test_line_iterator():
 
     regex_sub = re.compile(r"^\s*(subroutine)\s+")
     it = LogicalLineIterator(test_lines)
-    for unwrap, new_ln in it:
-        start = new_ln
-        if regex_sub.search(unwrap):
-            _, _ = it.consume_until(re.compile(r"^(end\s+subroutine)"))
+    for logical_line in it:
+        start = it.start_index
+        if regex_sub.search(logical_line.line):
+            _, _ = it.consume_until(
+                re.compile(r"^(end\s+subroutine)"), start_pattern=None
+            )
             it.comment_cont_block(start)
 
-    print(test_lines)
     test_lines = apply_comments(test_lines)
     for l in test_lines:
         print(l.line)
+
+    for l in test_lines:
+        if l.line.strip():
+            assert l.line.lstrip().startswith("!#py "), l.line

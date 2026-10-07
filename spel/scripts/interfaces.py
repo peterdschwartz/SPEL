@@ -205,11 +205,22 @@ def compare_args(
     return True
 
 
+_interface_procs_cache: dict[str, list[str]] = {}
+
+
 def get_interface_procedures(iname: str) -> list[str]:
     """
-    Function that finds the potential procedures of an interface
+    Function that finds the potential procedures of an interface.
+    Results are cached so each interface is only searched for once.
     """
-    cmd = f'grep -rin --exclude-dir={ELM_SRC}external_models/ -E "^[[:space:]]+(interface {iname})" {ELM_SRC}*'
+    key = iname.lower()
+    if key not in _interface_procs_cache:
+        _interface_procs_cache[key] = _find_interface_procedures(iname)
+    return list(_interface_procs_cache[key])
+
+
+def _find_interface_procedures(iname: str) -> list[str]:
+    cmd = f'grep -rin --exclude-dir={ELM_SRC}/external_models/ -E "^[[:space:]]+(interface {iname})" {ELM_SRC}*'
     output = sp.getoutput(cmd)
 
     # Get file and line number for interface
@@ -251,5 +262,4 @@ def get_interface_procedures(iname: str) -> list[str]:
                     subnames = subname.split('::')[-1]
                     interface_sub_names.extend([f"{module}::{s.strip()}" for s in subnames.split(",")])
 
-    print(f"Found these subroutines for interface {iname}: {interface_sub_names}")
     return interface_sub_names

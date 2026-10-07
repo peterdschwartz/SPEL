@@ -1,8 +1,8 @@
 module test_sub_parse
 
   use shr_const_mod
-  use constants_mod, only: nlevdecomp_full, use_fates
-
+  use constants_mod, only: nlevdecomp_full, use_fates, use_c13, use_c14, spval, total_comps, io_compid, io_compname, woody, evergreen, max_lunit, istsoil, istcrop, alpha, anew, agro, amat, aold
+  use shr_sys_mod, only: shr_sys_abort
   use remove_mod, only : elm_fates
   real(r8), parameter :: nan = SHR_CONST_SPVAL
 
@@ -120,6 +120,21 @@ module test_sub_parse
     module procedure Tridiagonal_sr
     module procedure Tridiagonal_mr
   end interface Tridiagonal
+
+  abstract interface
+     subroutine soil_hk_interface(this, iface_smp, iface_hk)
+       import :: soil_water_retention_curve_type, r8
+       class(soil_water_retention_curve_type), intent(in) :: this
+       real(r8), intent(in)  :: iface_smp
+       real(r8), intent(out) :: iface_hk
+     end subroutine soil_hk_interface
+
+     real(r8) function soil_suction_interface(this, iface_sat)
+       import
+       class(soil_water_retention_curve_type), intent(in) :: this
+       real(r8), intent(in) :: iface_sat
+     end function soil_suction_interface
+  end interface
 
    type(column_nitrogen_flux), target :: col_nf, & 
       !! hekadfklalkljasddf;lfkjasadldlfkjkj
@@ -734,7 +749,7 @@ function constructor(bounds) result(this)
       real(r8), intent(in) :: x,y,z
       real(r8) :: test, fxy
 
-      call sub_program1(x,y,test)
+      call sub_program(x,y,test)
       fxy = sub_func1(x,y)
 
    contains

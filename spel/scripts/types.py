@@ -45,6 +45,18 @@ class SubStart(NamedTuple):
     parent: str = ""
 
 
+@dataclass
+class RoutineFrame:
+    """
+    An open subroutine/function while scanning a module. Records where the
+    routine's own `contains` is so internal subprograms can be split off.
+    """
+
+    name: str
+    contains_ln: Optional[int] = None
+    cpp_contains_ln: Optional[int] = None
+
+
 class ArgUsage(Enum):
     DIRECT = auto()
     INDIRECT = auto()
@@ -379,6 +391,9 @@ class SubInit:
         cpp_start: int
         cpp_end: int
         function: Optional[FunctionReturn]
+        parent: name of host routine if this is an internal subprogram
+        contains_ln: line of this routine's own `contains` (None if absent)
+        cpp_contains_ln: same as contains_ln for the cpp file
     """
 
     name: str
@@ -388,11 +403,13 @@ class SubInit:
     cpp_fn: str
     mod_lines: list[LineTuple]
     start: int
-    end: int
+    end: int  # line of the routine's END statement
     cpp_start: Optional[int]
     cpp_end: Optional[int]
     function: Optional[FunctionReturn]
     parent: str
+    contains_ln: Optional[int] = None
+    cpp_contains_ln: Optional[int] = None
 
 
 @dataclass
@@ -420,7 +437,15 @@ class ParseState:
     )  # holds start of function info
     in_sub: int = 0  # flag if parser is currently in a subroutine
     in_func: int = 0  # flag if parser is in a function
-    host_program: int = -1
+    # Open subroutines/functions, innermost last (host -> internal)
+    routine_stack: list[RoutineFrame] = field(default_factory=list)
+    # Depth of open interface blocks; routine headers inside are interface bodies
+    in_interface: int = 0
+    # Names that must be commented out of this file (global bad symbols plus
+    # file-local ones, e.g. locals bound to unavailable imports)
+    bad_names: set[str] = field(default_factory=set)
+    # original line number of an edited `use` statement -> local names removed
+    pruned_uses: dict[int, set[str]] = field(default_factory=dict)
 
     def get_start_index(self) -> int:
         return self.line_it.start_index

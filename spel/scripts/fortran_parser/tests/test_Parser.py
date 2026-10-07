@@ -1,9 +1,9 @@
-from scripts.fortran_parser.lexer import Lexer
-from scripts.fortran_parser.spel_ast import IfConstruct, Program
-from scripts.fortran_parser.spel_parser import Parser
-from scripts.fortran_parser.tracing import Trace
-from scripts.nml.analyze_ifs import flatten_if
-from scripts.types import FlatIfs, LineTuple, LogicalLineIterator
+from spel.scripts.fortran_parser.lexer import Lexer
+from spel.scripts.fortran_parser.spel_ast import AssociateConstruct, IfConstruct, Program
+from spel.scripts.fortran_parser.spel_parser import Parser
+from spel.scripts.fortran_parser.tracing import Trace
+from spel.scripts.nml.analyze_ifs import flatten_if
+from spel.scripts.types import FlatIfs, LineTuple, LogicalLineIterator
 
 var_txt = """
     ! 1) Old-style, no attributes (no :: allowed/used)
@@ -347,6 +347,44 @@ def test_do_parsing():
 
     for stmt in program.statements:
         print(stmt)
+
+
+associate_txt = """
+    associate( &
+         forc_t => atm2lnd_inst%forc_t_downscaled_col(c), &
+         lat    => grc%lat(g), &
+         temp   => veg_pp%t_veg(p) &
+         )
+
+      if (forc_t > tfrz) then
+         temp = forc_t + lat
+      else
+         temp = tfrz
+      end if
+
+    end associate
+    """
+
+
+def test_associate_parsing():
+    program = parse_statements(associate_txt)
+
+    assert len(program.statements) == 1
+    assoc = program.statements[0]
+    assert isinstance(assoc, AssociateConstruct)
+
+    selectors = {k: str(v) for k, v in assoc.associations.items()}
+    assert selectors == {
+        "forc_t": "atm2lnd_inst%forc_t_downscaled_col(c)",
+        "lat": "grc%lat(g)",
+        "temp": "veg_pp%t_veg(p)",
+    }
+    assert assoc.end_ln == 13
+
+    # body of the associate construct should be parsed as nested statements,
+    # not swallowed/ignored (e.g. the if-construct inside should show up)
+    assert len(assoc.body.statements) == 1
+    assert isinstance(assoc.body.statements[0], IfConstruct)
 
 
 def test_var_parsing():

@@ -193,6 +193,8 @@ class DerivedType(object):
         Attempt to find any allocation statements for components of a derived type
         and set the bounds information, accordingly
         """
+        if not self.components:
+            return
 
         init_mod = mod_dict[f"{self.declaration}"]
         lines = init_mod.module_lines

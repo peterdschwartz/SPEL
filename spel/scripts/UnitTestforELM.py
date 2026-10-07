@@ -22,14 +22,31 @@ from spel.scripts.fortran_parser.boolen_expression import ConditionExpectation
 from spel.scripts.functional_unit_test import FunctionalUnitTest
 from spel.scripts.helper_functions import construct_call_tree
 from spel.scripts.logging_configs import get_logger
+from spel.scripts.driver_callsites import driver_callsites
+from spel.scripts.module_resolver import ModuleScopes
+from spel.scripts.record_access import (
+    AccessMapper,
+    ArgBinding,
+    access_summary,
+    dummy_actuals,
+    elmtype_view,
+    propagated_access,
+    single_instance_actuals,
+)
 from spel.scripts.nml.analyze_ifs import get_if_blocks
 from spel.scripts.nml.analyze_namelist import (
     check_sub_for_nml_guarded_vars,
     find_all_namelist,
     find_nml_ifs,
+    nml_guards,
 )
 from spel.scripts.types import ReadWrite, UnitTestMode
 from spel.scripts.utilityFunctions import Variable
+from spel.scripts.validate_access import (
+    access_manifest,
+    merge_guards,
+    write_access_manifest,
+)
 from spel.scripts.variable_analysis import determine_global_variable_status
 
 ModDict = dict[str, FortranModule]
@@ -42,10 +59,11 @@ def create_unit_test(
     casename: str,
     keep: bool,
     db_mode: bool,
-) -> None:
+) -> FunctionalUnitTest:
     """
     Edit case_dir and sub_name_list to create a Functional Unit Test
     in a directory called {case_dir} for the subroutines in sub_name_list.
+    Returns the (pickled) FunctionalUnitTest.
     """
     import os
     import sys
@@ -180,18 +198,18 @@ def create_unit_test(
         for instance in dtype.instances.values():
             instance_dict[instance.name] = dtype
 
-    if not db_mode:
-        fut_subs: set[str] = {
-            sub.id
-            for sub in unit_test.subroutine_dict.values()
-            if sub.unit_test_function and sub.name != "setfilters"
-        }
-        for sub_id in fut_subs:
-            parent_sub = unit_test.subroutine_dict[sub_id]
-            merge_elmtype_from_children(parent_sub, unit_test, instance_dict)
-        for sub in unit_test.subroutine_dict.values():
-            sub.match_arg_to_inst(type_dict)
-            sub.summarize_readwrite(verbose=True)
+    fut_subs: set[str] = {
+        sub.id
+        for sub in unit_test.subroutine_dict.values()
+        if sub.unit_test_function and sub.name != "setfilters"
+    }
+    for sub_id in fut_subs:
+        sub_obj = unit_test.subroutine_dict[sub_id]
+        if sub_obj.abstract_call_tree and "filter" not in sub_obj.name:
+            unit_test.guarded_usage_dict = check_sub_for_nml_guarded_vars(
+                root_sub=sub_obj,
+                instance_dict=instance_dict,
+            )
 
     aggregate_dtype_vars(
         sub_dict=unit_test.subroutine_dict,
@@ -267,9 +285,18 @@ def create_unit_test(
 
     logger.info("Finished -- Pickling results")
 
+    write_access_manifest(
+        case_dir,
+        list(unit_test.primary_subroutines),
+        access_manifest(unit_test.primary_subroutines.values()),
+        merge_guards(
+            (sub.elmtype_access_summary, nml_guards(sub))
+            for sub in unit_test.primary_subroutines.values()
+        ),
+    )
     pickle_unit_test(unit_test)
 
-    return None
+    return unit_test
 
 
 def process_subroutines_for_unit_test(unit_test: FunctionalUnitTest):
@@ -311,6 +338,9 @@ def process_subroutines_for_unit_test(unit_test: FunctionalUnitTest):
         for sub in sub_dict.values():
             sub.summarize_readwrite(verbose=True)
     else:
+        # one module-scope cache shared by all routine walks
+        scopes = ModuleScopes(mod_dict, sub_dict)
+        mapper = AccessMapper(sub_dict, scopes)
         for sub_id in fut_subs:
             sub = sub_dict[sub_id]
             sub.collect_var_and_call_info(
@@ -333,12 +363,23 @@ def process_subroutines_for_unit_test(unit_test: FunctionalUnitTest):
                     sub_obj = sub_dict[subname]
                     if sub_obj.library:
                         continue
-                    if not sub_obj.args_analyzed and sub_obj.arguments:
-                        sub_obj.parse_arguments(sub_dict)
-                    if not sub_obj.vars_analyzed:
-                        sub_obj.analyze_variables(sub_dict)
                     if not sub_obj.ifs_analyzed:
                         get_if_blocks(sub_obj)
+                    # leaf -> parent: children are walked before their callers
+                    sub_obj.walk_syntax_tree(scopes)
+                    mapper.maps(sub_obj)
+
+        # roots: dummies bound to what elm_drv passes at each call site.
+        # setfilters stays a special case: not bound at elm_drv.
+        roots = [
+            sub_dict[s]
+            for s in fut_subs
+            if sub_dict[s].record_access is not None and sub_dict[s].name != "setfilters"
+        ]
+        drv_access, drv_bindings = driver_callsites(roots, sub_dict, mod_dict)
+        for sub_id, access in drv_access.items():
+            sub_dict[sub_id].driver_access = access
+        adopt_record_access(sub_dict, type_dict, fut_subs, drv_bindings)
 
         if nml_dict:
             find_nml_ifs(sub_dict, nml_dict)
@@ -346,37 +387,46 @@ def process_subroutines_for_unit_test(unit_test: FunctionalUnitTest):
     return
 
 
-def merge_elmtype_from_children(
-    parent_sub: Subroutine,
-    unit_test: FunctionalUnitTest,
-    instance_dict: dict[str, DerivedType],
-):
-    """ """
-    if not parent_sub.abstract_call_tree:
-        return
-
-    for tree in parent_sub.abstract_call_tree.traverse_postorder():
-        curr_sub = unit_test.subroutine_dict[tree.node.subname]
-        for ln, desc in curr_sub.sub_call_desc.items():
-            child_sub = curr_sub.child_subroutines[desc.fn]
-            assert child_sub.summarized
-
-            for var, status in child_sub.elmtype_access_summary.items():
-                t_status = status
-                t_status.ln = ln
-                curr_sub.elmtype_access_by_ln.setdefault(var, []).append(t_status)
-        if not curr_sub.summarized:
-            curr_sub.summarize_readwrite()
-
-    fut_subs: list[Subroutine] = [
-        sub for sub in unit_test.subroutine_dict.values() if sub.unit_test_function
-    ]
-    for sub_obj in fut_subs:
-        if "filter" not in sub_obj.name:
-            unit_test.guarded_usage_dict = check_sub_for_nml_guarded_vars(
-                root_sub=sub_obj,
-                instance_dict=instance_dict,
-            )
-
-    parent_sub.summarize_readwrite()
-    return
+def adopt_record_access(
+    sub_dict: dict[str, Subroutine],
+    type_dict: dict[str, DerivedType],
+    roots: set[str],
+    drv_bindings: list[ArgBinding],
+) -> None:
+    """
+    Fill the access fields of every mapped routine from its record_access.
+    A root's derived-type dummies are bound to the globals elm_drv passes
+    (setfilters excepted), else to their type's instance if it has only one.
+    """
+    instances = {name: list(dtype.instances) for name, dtype in type_dict.items()}
+    pointer_components = {
+        f"{inst}%{name}": list(comp.pointer)
+        for dtype in type_dict.values()
+        for name, comp in dtype.components.items()
+        if comp.pointer
+        for inst in dtype.instances
+    }
+    propagated = propagated_access(sub_dict)
+    for sub in sub_dict.values():
+        maps = sub.record_access
+        if maps is None:
+            continue
+        actuals: dict[str, set[str]] = {}
+        if sub.id in roots:
+            if sub.name != "setfilters":
+                actuals = dummy_actuals(drv_bindings, sub.id)
+            arg_types = {
+                name: arg.type
+                for name, arg in sub.arguments.items()
+                if name not in actuals and arg.type in type_dict
+            }
+            actuals |= single_instance_actuals(arg_types, instances)
+            if unbound := sorted(arg_types.keys() - actuals.keys()):
+                sub.logger.warning(
+                    f"{sub.id}: derived-type dummies not bound to a global: {unbound}"
+                )
+        sub.elmtype_access_by_ln = elmtype_view(maps, actuals, pointer_components)
+        sub.elmtype_access_summary = access_summary(sub.elmtype_access_by_ln)
+        sub.arg_access_by_ln = {k: list(v) for k, v in maps.args.items()}
+        sub.local_vars_access_by_ln = {k: list(v) for k, v in maps.locals.items()}
+        sub.propagated_access_by_ln = propagated.get(sub.id, {})

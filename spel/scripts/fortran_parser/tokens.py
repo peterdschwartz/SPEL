@@ -36,7 +36,7 @@ class TokenTypes(Enum):
     RPAREN = ")"
     NEWLINE = "\n"
     COLON = ":"
-    SEMICOLON = ';'
+    SEMICOLON = ";"
     PERCENT = "%"
     MACRO = "#"
     DOUBLE_COLON = "::"
@@ -71,10 +71,18 @@ class TokenTypes(Enum):
     DEF = "def"
     IFNDEF = "ifndef"
     M_ENDIF = "#endif"
+    M_IF = "#if"  # literal is the raw condition
+    M_ELIF = "#elif"  # literal is the raw condition
+    M_ELSE = "#else"
     ENDTYPE = "end type"
     PROC = "procedure"
     USE = "use"
     NAMELIST = "namelist"
+    ASSOCIATE = "associate"
+    ENDASSOCIATE = "end associate"
+    ENDSELECT = "end select"
+    ALLOCATE = "allocate"
+    DEALLOCATE = "deallocate"
 
 
 keywords: dict[str, TokenTypes] = {
@@ -119,6 +127,47 @@ keywords: dict[str, TokenTypes] = {
     "procedure": TokenTypes.PROC,
     "use": TokenTypes.USE,
     "namelist": TokenTypes.NAMELIST,
+    "associate": TokenTypes.ASSOCIATE,
+    "endassociate": TokenTypes.ENDASSOCIATE,
+    "endselect": TokenTypes.ENDSELECT,
+    "endsubroutine": TokenTypes.ENDSUB,
+    "endfunction": TokenTypes.ENDFUNC,
+    "allocate": TokenTypes.ALLOCATE,
+    "deallocate": TokenTypes.DEALLOCATE,
+}
+
+KEYWORDS_THAT_CAN_BE_IDENTIFIERS = {
+    TokenTypes.CALL,
+    TokenTypes.SUBROUTINE,
+    TokenTypes.FUNCTION,
+    TokenTypes.DOWHILE,
+    TokenTypes.DO,
+    TokenTypes.IF,
+    TokenTypes.ELSE,
+    TokenTypes.END,
+    TokenTypes.ENDDO,
+    TokenTypes.ENDIF,
+    TokenTypes.ELSEIF,
+    TokenTypes.THEN,
+    TokenTypes.PRINT,
+    TokenTypes.WRITE,
+    TokenTypes.IFDEF,
+    TokenTypes.DEF,
+    TokenTypes.IFNDEF,
+    TokenTypes.TYPE_DEF,
+    TokenTypes.TYPE,
+    TokenTypes.CONTAINS,
+    TokenTypes.ENDTYPE,
+    TokenTypes.PROC,
+    TokenTypes.USE,
+    TokenTypes.NAMELIST,
+    TokenTypes.ASSOCIATE,
+    TokenTypes.ENDASSOCIATE,
+    TokenTypes.ENDSELECT,
+    TokenTypes.ENDSUB,
+    TokenTypes.ENDFUNC,
+    TokenTypes.ALLOCATE,
+    TokenTypes.DEALLOCATE,
 }
 
 

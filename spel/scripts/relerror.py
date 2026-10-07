@@ -166,4 +166,7 @@ def find_diffs(refn: str, compfn: str, var: str = "", ostream=sys.stdout):
         error_log, summary = rel_error(refdata, compdata, var, error_log)
     ostream.write(tabulate(error_log, tablefmt="psql"))
     ostream.write("\n")
-    ostream.close()
+    if ostream in (sys.stdout, sys.stderr):
+        ostream.flush()
+    else:
+        ostream.close()

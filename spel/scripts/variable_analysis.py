@@ -56,8 +56,6 @@ def find_global_var_bounds(
     return
 
 
-
-
 def add_global_vars(
     mod_dict: dict[str, FortranModule],
     dep_mod: FortranModule,
@@ -237,4 +235,7 @@ def determine_global_variable_status(
             variables[var].active = True
             sub.active_global_vars[var] = variables[var].copy()
 
+    return
+
+def parse_variable_usage(subroutine: Subroutine):
     return

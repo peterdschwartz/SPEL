@@ -1,21 +1,21 @@
 from pprint import pprint
 
-from scripts.analyze_subroutines import Subroutine
-from scripts.export_objects import unpickle_unit_test
-from scripts.fortran_parser import lexer
-from scripts.fortran_parser.evaluate_ifs import eval_if_condition
-from scripts.fortran_parser.spel_ast import (
+from spel.scripts.analyze_subroutines import Subroutine
+from spel.scripts.export_objects import unpickle_unit_test
+from spel.scripts.fortran_parser import lexer
+from spel.scripts.fortran_parser.evaluate_ifs import eval_if_condition
+from spel.scripts.fortran_parser.spel_ast import (
     ExpressionStatement,
     PrefixExpression,
     expr_from_json,
     expr_to_json,
 )
-from scripts.fortran_parser.spel_parser import Parser
-from scripts.types import LineTuple, LogicalLineIterator
+from spel.scripts.fortran_parser.spel_parser import Parser
+from spel.scripts.types import LineTuple, LogicalLineIterator
 
 
 def test_ifs():
-    mod_dict, sub_dict, type_dict = unpickle_unit_test("4637ab7")
+    fut = unpickle_unit_test("fut")
     env_strings: dict[str, str] = {
         "use_lch4": ".false.",
         "no_frozen_nitrif_denitrif": ".true.",
@@ -41,7 +41,7 @@ def test_ifs():
         stmt.expression.left_expr.value: _get_expr_value(stmt.expression.right_expr)
         for stmt in program.statements
     }
-    for sub in sub_dict.values():
+    for sub in fut.subroutine_dict.values():
         assert isinstance(sub, Subroutine)
         for if_ in sub.flat_ifs:
             cond = if_.condition

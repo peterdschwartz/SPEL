@@ -1,5 +1,6 @@
-from spel.db.app.models import PresetConfig, SubroutineElmtypesByConfig, Subroutines
-from spel.db.app.utils.view_helper import reachable_subroutine_ids
+import spel.scripts.db_utils  # noqa: F401  (sets up Django before model imports)
+from db.app.models import PresetConfig, SubroutineElmtypesByConfig, Subroutines
+from db.app.utils.view_helper import reachable_subroutine_ids
 from spel.scripts.analyze_subroutines import Subroutine
 from spel.scripts.config import database_app, options
 from spel.scripts.fortran_modules import FortranModule

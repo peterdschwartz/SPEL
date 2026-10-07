@@ -1,6 +1,25 @@
+import re
+
 import spel.scripts.fortran_parser.tokens as tokens
 from spel.scripts.fortran_parser.tracing import Trace
 from spel.scripts.types import LogicalLineIterator
+
+# `.and.`, `.eq.`, `.true.` ...; never `.e5`, `.d0`, `._r8` (those end real literals)
+DOT_OPERATOR = re.compile(r"\.[a-zA-Z]+\.")
+
+# Conditional directives lexed as a single token; the rest of the line is the
+# (C preprocessor) condition, kept as raw text.
+CPP_CONDITIONAL = re.compile(r"#\s*(if|elif|else|endif)\b([^\n]*)", re.IGNORECASE)
+CPP_TOKENS = {
+    "if": tokens.TokenTypes.M_IF,
+    "elif": tokens.TokenTypes.M_ELIF,
+    "else": tokens.TokenTypes.M_ELSE,
+    "endif": tokens.TokenTypes.M_ENDIF,
+}
+
+
+class LexError(Exception):
+    pass
 
 
 class Lexer:
@@ -14,6 +33,10 @@ class Lexer:
         # position of current token in current line
         self.token_pos: int = -1
         self._fetch_next_line()
+
+
+    def get_current_line(self)-> str:
+        return self.line_iter.get_curr_line()
 
     def _fetch_next_line(self) -> None:
         """Get the next line from the iterator, or set EOF."""
@@ -37,9 +60,25 @@ class Lexer:
         """
         pos = self.position
         while self.peek_char() != delim:
+            if self.peek_char() in ("", "\n"):
+                # resume at end of line so the caller can recover
+                self.read_char()
+                raise LexError(
+                    f"Unterminated {delim} @{self.cur_ln}: {self.input.rstrip()}"
+                )
             self.read_char()
         self.read_char()
         return self.input[pos + 1 : self.position]
+
+    def read_rest_of_line(self) -> str:
+        """Raw text from the current char to end of line; leaves ch at the '\\n'"""
+        end = self.input.find("\n", self.position)
+        if end < 0:
+            end = len(self.input)
+        text = self.input[self.position : end]
+        self.read_position = end
+        self.read_char()
+        return text
 
     def read_char(self):
         if self.read_position >= len(self.input):
@@ -60,11 +99,15 @@ class Lexer:
         pos = self.position
         while is_number(self.ch):
             self.read_char()
-            if self.ch in ["."]:
+            if self.ch == "." and not self.at_dot_operator():
                 self.read_char()
         self.check_precision()
 
         return self.input[pos : self.position]
+
+    def at_dot_operator(self) -> bool:
+        """Whether the '.' at self.position opens an operator/logical (.and., .eq., .true.)"""
+        return DOT_OPERATOR.match(self.input, self.position) is not None
 
     def check_precision(self):
         """
@@ -204,7 +247,15 @@ class Lexer:
                     tok_type = tokens.lookup_identifer(f".{ lit }.")
                     tok = new_token(tok_type, f".{ lit }.")
             case "#":
-                tok = new_token(tokens.TokenTypes.MACRO, self.ch)
+                m = CPP_CONDITIONAL.match(self.input, self.position)
+                if m:
+                    kind = m.group(1).lower()
+                    cond = m.group(2).strip() if kind in ("if", "elif") else "#" + kind
+                    tok = new_token(CPP_TOKENS[kind], cond)
+                    # resume at the newline
+                    self.read_position = m.end()
+                else:
+                    tok = new_token(tokens.TokenTypes.MACRO, self.ch)
             case "[":
                 tok = new_token(tokens.TokenTypes.ARRAY_LBRACKET, self.ch)
             case "]":
