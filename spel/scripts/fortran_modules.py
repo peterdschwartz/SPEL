@@ -199,6 +199,54 @@ def insert_header_for_unittest(
     return None
 
 
+# Modules whose contained routines are never parsed or compiled: only their
+# module-level declarations matter, to resolve the names other modules import.
+# SPEL generates its own elm_instMod providing what a unit test imports.
+DECLARATION_ONLY_MODULES = frozenset({"elm_instmod"})
+
+
+def use_items(stmt: UseStatement) -> list[tuple[str, str]]:
+    """(local, remote) names of a `use ..., only:` list."""
+    from spel.scripts.fortran_parser.symbols import rename_pair
+
+    items = []
+    for obj in stmt.objs:
+        local, remote = rename_pair(obj) or (str(obj), str(obj))
+        items.append((local.lower(), remote.lower()))
+    return items
+
+
+def imported_from(mod_dict: dict, mods, provider: str) -> set[str]:
+    """Names (as `provider` calls them) that the modules `mods` import from it."""
+    return {
+        remote
+        for m in mods
+        for stmt in mod_dict[m].use_stmts
+        if stmt.module.lower() == provider
+        for _, remote in use_items(stmt)
+    }
+
+
+def declaration_source(
+    provider: FortranModule, name: str, type_dict: dict
+) -> Optional[tuple[str, str]]:
+    """
+    (module, only-item) that `provider` must use to provide `name`: the module
+    of its derived type if `name` is declared in provider's specification part,
+    else the module (and rename) it re-exports `name` from.
+    """
+    var = provider.global_vars.get(name)
+    if var is not None:
+        dtype = type_dict.get(var.type)
+        return (dtype.declaration, var.type) if dtype is not None else None
+    for stmt in provider.use_stmts:
+        for local, remote in use_items(stmt):
+            if local == name:
+                item = name if remote == name else f"{name} => {remote}"
+                return stmt.module.lower(), item
+    return None
+
+
 def parse_use_stmts(use_lines: list[LineTuple]) -> list[UseStatement]:
     if not use_lines:
         return []

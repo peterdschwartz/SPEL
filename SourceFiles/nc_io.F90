@@ -82,6 +82,26 @@ integer function nc_create_or_open_file(fn, mode) result(ncid)
 end function nc_create_or_open_file
 
 
+subroutine spel_io_init(path,read_io,max_tpf)
+  ! Initialize io_constants/io_inputs/io_outputs (no-op if already done).
+  ! Reading (offline unit test): outputs go to 'fut-outputs'.
+  ! Writing (instrumented ELM):  outputs go to 'spel-outputs'.
+  character(len=*), intent(in) :: path
+  logical, intent(in) :: read_io
+  integer, intent(in), optional :: max_tpf
+  integer :: tpf
+  if(io_constants%created) return
+  tpf = 720
+  if(present(max_tpf)) tpf = max_tpf
+  call io_constants%init(base_fn=trim(path)//'spel-constants',max_tpf=tpf,read_io=read_io)
+  call io_inputs%init(base_fn=trim(path)//'spel-inputs',max_tpf=tpf,read_io=read_io)
+  if(read_io) then
+    call io_outputs%init(base_fn=trim(path)//'fut-outputs',max_tpf=tpf,read_io=.false.)
+  else
+    call io_outputs%init(base_fn=trim(path)//'spel-outputs',max_tpf=tpf,read_io=.false.)
+  end if
+end subroutine spel_io_init
+
 subroutine init(this,base_fn,max_tpf,read_io)
   class(spel_io_type), intent(inout) :: this
   character(len=*), intent(in) :: base_fn
@@ -459,7 +479,9 @@ subroutine nc_read_string(ncid, varname, dim_name, var)
    allocate(character(strlen) :: buf); 
    call check(nf90_get_var(ncid, var_id, buf))
    var = ""
-   do i=1, strlen 
+   ! netCDF pads with NULs, which trim() keeps; stop at the first one
+   do i=1, min(strlen, len(var))
+      if (buf(i:i) == achar(0)) exit
       var(i:i) = buf(i:i)
    end do
 end subroutine

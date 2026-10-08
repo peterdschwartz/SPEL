@@ -354,10 +354,26 @@ def test_subroutine_calls():
     assert rec.accesses(path="col_nf")[0].origin is Origin.GLOBAL
 
 
-def test_unknown_subroutine_is_an_error():
+def test_undeclared_subroutine_is_external():
+    # implicit-interface external procedure (e.g. LAPACK's dgbsv)
+    txt = """
+subroutine s(n, info)
+  implicit none
+  integer, intent(in) :: n
+  integer, intent(out) :: info
+  call dgbsv(n, info)
+end subroutine s
+"""
+    rec = walk(txt)
+    (call,) = rec.calls
+    assert call.name == "dgbsv"
+
+
+def test_variable_called_as_subroutine_is_an_error():
     txt = """
 subroutine s()
   implicit none
+  integer :: nowhere
   call nowhere()
 end subroutine s
 """
@@ -591,3 +607,29 @@ end subroutine s
     assert acc(rec, 7) == [("r", "x", 7), ("w", "x", 7)]
     assert acc(rec, 8) == []
     assert acc(rec, 10) == [("r", "msg", 10)]
+
+
+def test_where_construct():
+    txt = """
+subroutine s(mask, a, b)
+  implicit none
+  real, intent(in) :: mask(:)
+  real, intent(inout) :: a(:)
+  real, intent(out) :: b(:)
+  where (mask > 0.) b = a
+  where (a < 0.)
+     a = 0.
+  elsewhere (mask < 0.)
+     a = mask
+  elsewhere
+     b = glob
+  end where
+end subroutine s
+"""
+    rec = walk(txt, globals=[gvar("glob")])
+    assert acc(rec, 6) == [("r", "mask", 6), ("r", "a", 6), ("w", "b", 6)]
+    assert acc(rec, 7) == [("r", "a", 7)]
+    assert acc(rec, 8) == [("w", "a", 8)]
+    assert acc(rec, 9) == [("r", "mask", 9)]
+    assert acc(rec, 10) == [("r", "mask", 10), ("w", "a", 10)]
+    assert acc(rec, 12) == [("r", "glob", 12), ("w", "b", 12)]

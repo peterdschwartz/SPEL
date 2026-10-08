@@ -83,6 +83,7 @@ def edit(txt: str, name: str) -> list[str]:
 def fresh_globals(monkeypatch):
     monkeypatch.setattr(ef, "bad_symbols", set(ef.bad_symbols))
     monkeypatch.setattr(ef, "unavailable_exports", {})
+    monkeypatch.setattr(ef, "bad_module_imports", {})
 
 
 def active(lines: list[str]) -> str:
@@ -146,3 +147,127 @@ def test_resolver_use_stmts_follow_pruned_imports():
 def test_untouched_when_nothing_is_unavailable():
     out = edit(USER.replace("decompmod", "othermod"), "firemod")
     assert active(out) == "\n".join(out)
+
+
+DRYDEP = """
+module drydepvelocity
+  implicit none
+contains
+  subroutine depvel_compute(x)
+    use seq_drydep_mod, only : rcls, ri
+    real :: x
+    x = ri(1) + rcls
+  end subroutine depvel_compute
+end module drydepvelocity
+"""
+
+CANFLUX = """
+module canopyfluxesmod
+  implicit none
+contains
+  subroutine canopyfluxes(ricsoilc)
+    real :: ri, ricsoilc
+    ri = 2.0
+    ricsoilc = 1.0 / ri
+  end subroutine canopyfluxes
+end module canopyfluxesmod
+"""
+
+
+def test_bad_module_imports_are_local_to_the_importing_file():
+    """`use <bad module>, only: ri` must not ban unrelated locals named ri elsewhere."""
+    drydep = edit(DRYDEP, "drydepvelocity")
+    assert "x = ri(1) + rcls" not in active(drydep)
+
+    out = edit(CANFLUX, "canopyfluxesmod")
+    assert active(out) == "\n".join(out)
+
+
+def test_module_level_bad_imports_are_unavailable_exports():
+    reexporter = """
+module wrapmod
+  use seq_drydep_mod, only : n_drydep, my_ri => ri
+  implicit none
+contains
+  subroutine s()
+    use seq_drydep_mod, only : rcls
+  end subroutine s
+end module wrapmod
+"""
+    edit(reexporter, "wrapmod")
+    assert ef.unavailable_exports["wrapmod"] == {"n_drydep", "my_ri"}
+
+
+def test_whole_bad_module_use_bans_names_imported_from_it_elsewhere():
+    importer = """
+module importer
+  use shr_sys_mod, only : shr_sys_abort
+  implicit none
+contains
+  subroutine a()
+    call shr_sys_abort('x')
+  end subroutine a
+end module importer
+"""
+    whole = """
+module fluxmod
+  use shr_sys_mod
+  implicit none
+contains
+  subroutine b(ri)
+    real :: ri
+    ri = 1.0
+    call shr_sys_abort('y')
+  end subroutine b
+end module fluxmod
+"""
+    edit(importer, "importer")
+    out = edit(whole, "fluxmod")
+    kept = active(out)
+    assert "use shr_sys_mod" not in kept
+    assert "call shr_sys_abort('y')" not in kept
+    assert "ri = 1.0" in kept
+
+
+def test_locals_of_unavailable_types_are_banned_within_their_routine(monkeypatch):
+    monkeypatch.setattr(
+        ef, "bad_module_imports", {k: set(v) for k, v in ef.BAD_MODULE_NAMES.items()}
+    )
+    src = """
+module firemod
+  use mct_mod
+  implicit none
+contains
+  subroutine hdm_init(n)
+    integer, intent(in) :: n
+    type(mct_ggrid)    :: dom_elm  ! domain information
+    integer :: k
+    k = n
+    call fill(dom_elm, n)
+  end subroutine hdm_init
+  subroutine reader(ncid, x)
+    type(mct_gsmap), intent(in) :: ncid
+    real :: x
+    x = 1.0
+  end subroutine reader
+  subroutine other(dom_elm)
+    real, intent(inout) :: dom_elm
+    dom_elm = 1.0
+  end subroutine other
+end module firemod
+"""
+    out = active(edit(src, "firemod"))
+    assert "type(mct_ggrid)" not in out
+    assert "call fill(dom_elm, n)" not in out
+    assert "k = n" in out
+    # same name in another routine is a different, valid variable
+    assert "real, intent(inout) :: dom_elm" in out
+    assert "dom_elm = 1.0" in out
+    # dummy arguments keep their declarations
+    assert "type(mct_gsmap), intent(in) :: ncid" in out
+
+
+def test_dummy_args():
+    assert ef.dummy_args("subroutine foo(ncid, Flag)") == {"ncid", "flag"}
+    assert ef.dummy_args("real(r8) function f(a, b) result(c)") == {"a", "b"}
+    assert ef.dummy_args("subroutine g") == set()

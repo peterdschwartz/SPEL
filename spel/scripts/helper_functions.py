@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from spel.scripts.fortran_modules import FortranModule
 
@@ -121,13 +121,6 @@ def find_child_subroutines(
         if call_desc:
             call_desc.aggregate_vars(sub)
             sub.sub_call_desc[call_desc.lpair.ln] = call_desc
-            sub.call_bindings[
-                CallTag(
-                    caller=sub.id,
-                    callee=call_desc.fn,
-                    call_ln=call_desc.lpair.ln,
-                )
-            ] = call_desc.export_bindings()
 
     return
 
@@ -138,15 +131,26 @@ def construct_call_tree(
     dtype_dict: dict[str, DerivedType],
     mod_dict: dict[str, FortranModule],
     nested: int,
+    failures: Optional[dict[str, str]] = None,
 ) -> list[CallTuple]:
     """
-    Function that constructs a CallTree for the input subroutine
+    Function that constructs a CallTree for the input subroutine.
+    failures: if given, a child whose call info can't be collected is
+    recorded there and kept as a leaf instead of raising.
     """
 
     for childsub in sub.child_subroutines.values():
         if childsub.preprocessed or childsub.library:
             continue
-        childsub.collect_var_and_call_info(sub_dict, dtype_dict,mod_dict)
+        if failures is not None and childsub.id in failures:
+            continue
+        try:
+            childsub.collect_var_and_call_info(sub_dict, dtype_dict, mod_dict)
+        except (Exception, SystemExit) as err:
+            if failures is None:
+                raise
+            failures[childsub.id] = f"{type(err).__name__}: {err}"
+            childsub.logger.error(f"Analysis failed for {childsub.id}: {failures[childsub.id]}")
 
     flat_call_list: list[CallTuple] = [
         CallTuple(
@@ -158,12 +162,16 @@ def construct_call_tree(
     for childsub in sub.child_subroutines.values():
         if childsub.library:
             continue
+        if failures is not None and childsub.id in failures:
+            flat_call_list.append(CallTuple(nested=nested + 1, subname=childsub.id))
+            continue
         child_list = construct_call_tree(
             childsub,
             sub_dict,
             dtype_dict,
             mod_dict,
             nested + 1,
+            failures,
         )
         flat_call_list.extend(child_list)
     sub.abstract_call_tree = make_call_tree(flat_call_list)

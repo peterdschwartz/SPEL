@@ -17,12 +17,16 @@ from spel.scripts.config import (
     unittests_dir,
 )
 from spel.scripts.DerivedType import DerivedType
-from spel.scripts.fortran_modules import FortranModule, get_filename_from_module
+from spel.scripts.fortran_modules import (
+    DECLARATION_ONLY_MODULES,
+    FortranModule,
+    get_filename_from_module,
+)
 from spel.scripts.fortran_parser.boolen_expression import ConditionExpectation
 from spel.scripts.functional_unit_test import FunctionalUnitTest
 from spel.scripts.helper_functions import construct_call_tree
 from spel.scripts.logging_configs import get_logger
-from spel.scripts.driver_callsites import driver_callsites
+from spel.scripts.driver_callsites import DRIVER_MODULE, driver_callsites
 from spel.scripts.module_resolver import ModuleScopes
 from spel.scripts.record_access import (
     AccessMapper,
@@ -59,114 +63,82 @@ def create_unit_test(
     casename: str,
     keep: bool,
     db_mode: bool,
+    reanalyze: bool = False,
+    direct: bool = False,
 ) -> FunctionalUnitTest:
     """
-    Edit case_dir and sub_name_list to create a Functional Unit Test
-    in a directory called {case_dir} for the subroutines in sub_name_list.
-    Returns the (pickled) FunctionalUnitTest.
+    Create a Functional Unit Test in unittests_dir/{casename} for the
+    subroutines in sub_names and return the (pickled) FunctionalUnitTest.
+
+    The analysis always has elm_drv as its root: it is read from the cached
+    elm_drv analysis (built first if missing, or when `reanalyze`), and the
+    requested routines are extracted from it. `direct` analyzes only the
+    requested routines instead (no cache; used by tests).
     """
-    import os
-    import sys
-
-    from spel.scripts.edit_files import process_for_unit_test
-    from spel.scripts.export_objects import pickle_unit_test
-    from spel.scripts.fortran_modules import insert_header_for_unittest
-
-    func_name = "( main )"
     logger = get_logger("SPEL", level=logging.INFO)
-
-    # Note unittests_dir is a location to make unit tests directories named {casename}
-    if not casename:
-        casename = "fut"
-
-    case_dir = unittests_dir / casename
 
     if not sub_names:
         sys.exit("Error- No subroutines provided for analysis")
     sub_name_list = [s.lower() for s in sub_names]
+    case_dir = unittests_dir / (casename or "fut")
 
-    logger.info(f"Creating UnitTest {casename} || {' '.join(sub_name_list)}")
+    logger.info(f"Creating UnitTest {case_dir.name} || {' '.join(sub_name_list)}")
     cfg.options.db_mode = db_mode
 
-    unit_test = FunctionalUnitTest(
-        casedir=case_dir,
-        cfg=cfg.options,
-        logger=logger,
-    )
-
-    # Create script output directory if not present:
-    if not os.path.isdir(f"{scripts_dir}/script-output"):
-        logger.info("Making script output directory")
-        os.system(f"mkdir {scripts_dir}/script-output")
-
-    # Create case directory
-    if not os.path.isdir(f"{case_dir}"):
-        logger.info(f"Making case directory {case_dir}")
-        if not os.path.isdir(f"{unittests_dir}"):
-            os.system(f"mkdir {unittests_dir}")
-        os.system(f"mkdir {case_dir}")
+    if direct:
+        prepare_case_dir(case_dir, keep, logger)
+        unit_test = FunctionalUnitTest(casedir=case_dir, cfg=cfg.options, logger=logger)
+        unit_test.write_meta_file()
+        analyze_unit_test(unit_test, sub_name_list)
     else:
-        # Check if user wants to re-use existing case without pre-processing
-        if keep:
-            preprocess = False
-        else:
-            os.system(f"rm -rf {case_dir}/*")
-            os.system(f"rm {scripts_dir}/*.pkl")
-            os.system(f"rm {spel_output_dir}/*.F90")
-            preprocess = True
+        from spel.scripts.analysis_cache import extract_unit_test, load_analysis
 
-    # Record which E3SM_SRCROOT this case is generated against so that
-    # `spel restore` can find it later even if the global config changes.
-    unit_test.write_meta_file()
+        analysis = load_analysis(reanalyze=reanalyze)
+        prepare_case_dir(case_dir, keep, logger)
+        unit_test = extract_unit_test(analysis, sub_name_list, case_dir, logger)
+        unit_test.write_meta_file()
 
-    # Retrieve possible interfaces
-    dg.populate_interface_list()
-    # Initialize dictionary that will hold instance of all subroutines encountered.
-    main_sub_dict: SubDict = {}
+    finalize_unit_test(unit_test, db_mode)
+    return unit_test
 
-    # dictionary holds instances for Unit Test specific subroutines
-    sub_name_list: list[str] = [s.lower() for s in sub_name_list]
 
-    # List to hold all the modules needed for the unit test
-    needed_mods = []
-    mod_dict: ModDict = {}
-    # Get general info of the subroutine
-    # Process files by removing certain modules
-    # so that a standalone unit test can be compiled.
-    # All file information will be stored in `mod_dict` and `main_sub_dict`
-    ordered_mods = process_for_unit_test(
-        case_dir=case_dir,
-        mod_dict=mod_dict,
-        mods=needed_mods,
-        required_mods=default_mods,
-        sub_dict=main_sub_dict,
-        sub_name_list=sub_name_list,
-        overwrite=True,
-        verbose=False,
-    )
-    if "elm_instmod" in mod_dict:
-        sys.exit("IN MOD DICT")
+def prepare_case_dir(case_dir: Path, keep: bool, logger: logging.Logger) -> None:
+    import os
 
+    os.makedirs(f"{scripts_dir}/script-output", exist_ok=True)
+    if not case_dir.is_dir():
+        logger.info(f"Making case directory {case_dir}")
+        case_dir.mkdir(parents=True)
+    elif not keep:
+        os.system(f"rm -rf {case_dir}/*")
+        os.system(f"rm -f {scripts_dir}/*.pkl")
+        os.system(f"rm -f {spel_output_dir}/*.F90")
+
+
+def select_subroutines(
+    sub_dict: SubDict, sub_name_list: list[str], logger: logging.Logger
+) -> dict[str, Subroutine]:
+    """Subroutines named `name` or `mod::name`, flagged as unit-test functions."""
+    selected: dict[str, Subroutine] = {}
     for s in sub_name_list:
         if "::" in s:
-            unit_test.primary_subroutines[s] = main_sub_dict[s]
-            unit_test.primary_subroutines[s].unit_test_function = True
+            candidates = {s} if s in sub_dict else set()
         else:
-            candidates = {
-                k for k in main_sub_dict.keys() if re.search(rf"(?<=::){s}\b", k)
-            }
-            if len(candidates) > 1:
-                logger.warning(
-                    f"Multiple Subroutines match {s}, Adding them all: {candidates}\nRe-run with <mod_name>::<sub_name>"
-                )
-            for c in candidates:
-                unit_test.primary_subroutines[c] = main_sub_dict[c]
-                unit_test.primary_subroutines[c].unit_test_function = True
+            candidates = {k for k in sub_dict if re.search(rf"(?<=::){s}$", k)}
+        if not candidates:
+            sys.exit(f"Error- subroutine {s} not found")
+        if len(candidates) > 1:
+            logger.warning(
+                f"Multiple Subroutines match {s}, Adding them all: {candidates}\n"
+                "Re-run with <mod_name>::<sub_name>"
+            )
+        for c in sorted(candidates):
+            selected[c] = sub_dict[c]
+            selected[c].unit_test_function = True
+    return selected
 
-    if not mod_dict or not ordered_mods:
-        logger.error(f"{func_name}Error didn't find any modules related to subroutines")
-        sys.exit(1)
 
+def build_type_dict(mod_dict: ModDict) -> TypeDict:
     type_dict: TypeDict = {}
     for mod in mod_dict.values():
         for utype, dtype in mod.defined_types.items():
@@ -184,14 +156,76 @@ def create_unit_test(
 
     bounds_inst = Variable(type="bounds_type", name="bounds", dim=0, subgrid="?", ln=-1)
     type_dict["bounds_type"].instances["bounds"] = bounds_inst.copy()
+    return type_dict
 
-    main_sub_dict["filtermod::setfilters"].unit_test_function = True
+
+def analyze_unit_test(
+    unit_test: FunctionalUnitTest,
+    sub_name_list: list[str],
+    roots_from=None,
+) -> None:
+    """
+    Edit (into unit_test.case_dir) and parse the modules needed by the
+    routines in sub_name_list, then analyze the call trees of the unit-test
+    roots: the selected routines, or `roots_from(unit_test)` if given.
+    """
+    from spel.scripts.edit_files import process_for_unit_test
+
+    logger = unit_test.logger
+    # Retrieve possible interfaces
+    dg.populate_interface_list()
+    main_sub_dict: SubDict = {}
+    mod_dict: ModDict = {}
+    # Process files by removing certain modules so that a standalone unit
+    # test can be compiled. All file information is stored in `mod_dict`
+    # and `main_sub_dict`
+    ordered_mods = process_for_unit_test(
+        case_dir=unit_test.case_dir,
+        mod_dict=mod_dict,
+        mods=[],
+        required_mods=default_mods,
+        sub_dict=main_sub_dict,
+        sub_name_list=sub_name_list,
+        overwrite=True,
+        verbose=False,
+    )
+    if not mod_dict or not ordered_mods:
+        logger.error("Error didn't find any modules related to subroutines")
+        sys.exit(1)
+
     unit_test.subroutine_dict = main_sub_dict
     unit_test.module_dict = mod_dict
-    unit_test.type_dict = type_dict
-    instance_to_user_type = unit_test.instance_to_type_map()
+    unit_test.ordered_mods = [m for m in ordered_mods if m not in DECLARATION_ONLY_MODULES]
+    unit_test.type_dict = build_type_dict(mod_dict)
+    if roots_from is None:
+        unit_test.primary_subroutines = select_subroutines(
+            main_sub_dict, sub_name_list, logger
+        )
+    else:
+        unit_test.primary_subroutines = roots_from(unit_test)
+        for sub in unit_test.primary_subroutines.values():
+            sub.unit_test_function = True
+    main_sub_dict["filtermod::setfilters"].unit_test_function = True
 
-    process_subroutines_for_unit_test(unit_test)
+    process_subroutines_for_unit_test(unit_test, keep_going=roots_from is not None)
+
+
+def finalize_unit_test(unit_test: FunctionalUnitTest, db_mode: bool) -> None:
+    """
+    Root-dependent steps after analysis: namelist guards, active variables,
+    and the generated files of the case; then pickle the unit test.
+    """
+    import os
+
+    from spel.scripts.export_objects import pickle_unit_test
+    from spel.scripts.fortran_modules import insert_header_for_unittest
+
+    logger = unit_test.logger
+    case_dir = unit_test.case_dir
+    ordered_mods = unit_test.ordered_mods
+    mod_dict = unit_test.module_dict
+    type_dict = unit_test.type_dict
+    instance_to_user_type = unit_test.instance_to_type_map()
 
     instance_dict: dict[str, DerivedType] = {}
     for type_name, dtype in unit_test.type_dict.items():
@@ -216,32 +250,15 @@ def create_unit_test(
         type_dict=unit_test.type_dict,
         inst_to_dtype_map=instance_to_user_type,
     )
-    # for sub in subroutines.values():
-    #     sub.sort_inputs_outputs()
-
-    active_set: set[str] = set()
-    for inst_name, dtype in instance_dict.items():
-        if not dtype.instances[inst_name].active:
-            continue
-        for field_var in dtype.components.values():
-            if field_var.active:
-                active_set.add(f"{inst_name}%{field_var.name}")
 
     for sub in unit_test.primary_subroutines.values():
         for key in list(sub.elmtype_access_summary.keys()):
-            c13c14 = bool("c13" in key or "c14" in key)
-            if c13c14:
+            if "c13" in key or "c14" in key:
                 del sub.elmtype_access_summary[key]
-                continue
 
     # Create a makefile for the unit test
     file_list = [get_filename_from_module(m) for m in ordered_mods]
     unit_test.generate_cmake(files=file_list)
-
-    elmvars_dict = {}
-    for dtype in type_dict.values():
-        for inst in dtype.instances.values():
-            elmvars_dict[inst.name] = inst
 
     unittest_subs = {
         sub for sub in unit_test.subroutine_dict.values() if sub.unit_test_function
@@ -261,6 +278,11 @@ def create_unit_test(
         # duplicateMod.F90
         unit_test.duplicate_clumps()
         unit_test.create_fortls()
+
+        from spel.scripts.instrument_elm import make_case_sources_accessible
+
+        for mod, names in make_case_sources_accessible(unit_test, Path(case_dir)).items():
+            logger.info(f"Made {names} public in the unit-test copy of {mod}")
 
         # Go through all needed files and include a header that defines some constants
         insert_header_for_unittest(
@@ -296,11 +318,14 @@ def create_unit_test(
     )
     pickle_unit_test(unit_test)
 
-    return unit_test
 
-
-def process_subroutines_for_unit_test(unit_test: FunctionalUnitTest):
+def process_subroutines_for_unit_test(
+    unit_test: FunctionalUnitTest, keep_going: bool = False
+):
     """
+    keep_going: a root whose call tree fails to analyze is recorded in
+        unit_test.analysis_failures and skipped, instead of aborting.
+
     Function that processes the subroutines found in each FortranModule
         1) identify any non derived-type global vars used by Subroutine
         2) collect derived-type var and subroutine call info
@@ -340,51 +365,104 @@ def process_subroutines_for_unit_test(unit_test: FunctionalUnitTest):
     else:
         # one module-scope cache shared by all routine walks
         scopes = ModuleScopes(mod_dict, sub_dict)
-        mapper = AccessMapper(sub_dict, scopes)
-        for sub_id in fut_subs:
+        failures = unit_test.analysis_failures if keep_going else None
+        mapper = AccessMapper(sub_dict, scopes, failures=failures)
+        # roots in the given order: a root already mapped (or failed) as part
+        # of an earlier root's call tree is not re-analyzed
+        order = list(unit_test.primary_subroutines) + sorted(
+            fut_subs - unit_test.primary_subroutines.keys()
+        )
+        for sub_id in order:
             sub = sub_dict[sub_id]
-            sub.collect_var_and_call_info(
-                dtype_dict=type_dict,
-                sub_dict=sub_dict,
-                mod_dict=mod_dict,
-                verbose=False,
+            if sub.record_access is not None or sub_id in unit_test.analysis_failures:
+                continue
+            try:
+                analyze_call_tree(sub, unit_test, scopes, mapper)
+            except (Exception, SystemExit) as err:
+                if not keep_going:
+                    raise
+                mapper.record_failure(sub, err)
+        if keep_going:
+            unit_test.analysis_incomplete = incomplete_analyses(
+                sub_dict, unit_test.analysis_failures
             )
-            flat_list = construct_call_tree(
-                sub=sub,
-                sub_dict=sub_dict,
-                dtype_dict=type_dict,
-                mod_dict=mod_dict,
-                nested=0,
-            )
-
-            if sub.abstract_call_tree:
-                for tree in sub.abstract_call_tree.traverse_postorder():
-                    subname = tree.node.subname
-                    sub_obj = sub_dict[subname]
-                    if sub_obj.library:
-                        continue
-                    if not sub_obj.ifs_analyzed:
-                        get_if_blocks(sub_obj)
-                    # leaf -> parent: children are walked before their callers
-                    sub_obj.walk_syntax_tree(scopes)
-                    mapper.maps(sub_obj)
 
         # roots: dummies bound to what elm_drv passes at each call site.
-        # setfilters stays a special case: not bound at elm_drv.
+        # setfilters stays a special case: not bound at elm_drv; elm_drv
+        # itself (the cache's analysis root) isn't called by anything.
         roots = [
             sub_dict[s]
             for s in fut_subs
-            if sub_dict[s].record_access is not None and sub_dict[s].name != "setfilters"
+            if sub_dict[s].record_access is not None
+            and sub_dict[s].name != "setfilters"
+            and sub_dict[s].module != DRIVER_MODULE
         ]
-        drv_access, drv_bindings = driver_callsites(roots, sub_dict, mod_dict)
-        for sub_id, access in drv_access.items():
-            sub_dict[sub_id].driver_access = access
+        _, drv_bindings, unit_test.driver_sites = driver_callsites(roots, sub_dict, mod_dict)
+        unit_test.driver_bindings = drv_bindings
         adopt_record_access(sub_dict, type_dict, fut_subs, drv_bindings)
 
         if nml_dict:
             find_nml_ifs(sub_dict, nml_dict)
 
     return
+
+
+def analyze_call_tree(
+    sub: Subroutine, unit_test: FunctionalUnitTest, scopes: ModuleScopes, mapper: AccessMapper
+) -> None:
+    """Build sub's call tree, then walk and map every routine in it (leaves first)."""
+    sub_dict = unit_test.subroutine_dict
+    sub.collect_var_and_call_info(
+        dtype_dict=unit_test.type_dict,
+        sub_dict=sub_dict,
+        mod_dict=unit_test.module_dict,
+        verbose=False,
+    )
+    construct_call_tree(
+        sub=sub,
+        sub_dict=sub_dict,
+        dtype_dict=unit_test.type_dict,
+        mod_dict=unit_test.module_dict,
+        nested=0,
+        failures=mapper.failures,
+    )
+    if not sub.abstract_call_tree:
+        return
+    for tree in sub.abstract_call_tree.traverse_postorder():
+        sub_obj = sub_dict[tree.node.subname]
+        if sub_obj.library or sub_obj.record_access is not None:
+            continue
+        if mapper.failures is not None and sub_obj.id in mapper.failures:
+            continue
+        # leaf -> parent: children are walked before their callers
+        try:
+            if not sub_obj.ifs_analyzed:
+                get_if_blocks(sub_obj)
+            sub_obj.walk_syntax_tree(scopes)
+        except (Exception, SystemExit) as err:
+            if mapper.failures is None:
+                raise
+            mapper.record_failure(sub_obj, err)
+            continue
+        mapper.maps(sub_obj)
+
+
+def incomplete_analyses(
+    sub_dict: dict[str, Subroutine], failures: dict[str, str]
+) -> dict[str, list[str]]:
+    """Mapped routines whose call tree contains a failed routine -> those routines."""
+    out: dict[str, list[str]] = {}
+    for sub in sub_dict.values():
+        if sub.record_access is None or not sub.abstract_call_tree:
+            continue
+        failed = {
+            t.node.subname
+            for t in sub.abstract_call_tree.traverse_postorder()
+            if t.node.subname in failures
+        }
+        if failed:
+            out[sub.id] = sorted(failed)
+    return out
 
 
 def adopt_record_access(

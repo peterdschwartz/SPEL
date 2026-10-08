@@ -16,6 +16,7 @@ from spel.scripts.fortran_parser.spel_ast import (
     ReadStatement,
     ReturnStatement,
     SelectCaseConstruct,
+    WhereConstruct,
 )
 from spel.scripts.fortran_parser.tests.test_Parser import parse_statements
 
@@ -67,6 +68,23 @@ def test_branch_statements_in_blocks():
     assert isinstance(s2.consequence.statements[0], CycleStatement)
     assert isinstance(s3, IfConstruct)
     assert isinstance(s3.consequence.statements[0], ReturnStatement)
+
+
+@pytest.mark.parametrize("end", ["end do loop_columns", "enddo loop_columns", "end do"])
+def test_named_do_loop(end):
+    txt = f"""
+  loop_columns: do fc = 1, num_snowc
+     if (h2osno(fc) > 0) then
+        exit loop_columns
+     endif no_water
+
+  {end}
+"""
+    loop = only_stmt(txt)
+    assert isinstance(loop, DoLoop)
+    (stmt,) = loop.body.statements
+    assert isinstance(stmt, IfConstruct)
+    assert isinstance(stmt.consequence.statements[0], ExitStatement)
 
 
 SELECT = """
@@ -252,3 +270,64 @@ def test_intrinsic_statement(txt, names):
 def test_new_keywords_as_variables(txt):
     stmt = only_stmt(f"\n  {txt}\n")
     assert isinstance(stmt, ExpressionStatement)
+
+
+def test_where_statement():
+    stmt = only_stmt("  where(tanpools<0) tanpools = 0.0_r8\n")
+    assert isinstance(stmt, WhereConstruct)
+    assert str(stmt.mask) == "(tanpools<0)"
+    (assign,) = stmt.body.statements
+    assert str(assign) == "(tanpools=0.0)"
+    assert stmt.elsewheres == []
+
+
+@pytest.mark.parametrize("end", ["end where", "endwhere"])
+def test_where_construct(end):
+    txt = f"""
+  where (sum_wts == 0.0)
+     a = 1.0
+     b = 2.0
+  elsewhere (sum_wts < 0.)
+     a = -1.0
+  elsewhere
+     a = a / sum_wts
+  {end}
+"""
+    stmt = only_stmt(txt)
+    assert isinstance(stmt, WhereConstruct)
+    assert len(stmt.body.statements) == 2
+    masks = [str(ew.mask) if ew.mask else None for ew in stmt.elsewheres]
+    assert masks == ["(sum_wts<0.0)", None]
+    assert [len(ew.body.statements) for ew in stmt.elsewheres] == [1, 1]
+
+
+def test_where_in_do_loop():
+    txt = """
+  do i = 1, n
+     where (x(:,i) > 0) x(:,i) = 0.
+     where (y > 0)
+        y = 1.
+     end where
+  end do
+"""
+    loop = only_stmt(txt)
+    assert [type(s) for s in loop.body.statements] == [WhereConstruct, WhereConstruct]
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("x = a .or. b", "(x=(a.or.b))"),
+        (
+            "included = (is_crop(c) .and. f_crop) &\n     .or. (is_soil(c) .and. f_veg)",
+            "(included=((is_crop(c).and.f_crop).or.(is_soil(c).and.f_veg)))",
+        ),
+        ("x = a .and. b .or. c .and. d", "(x=((a.and.b).or.(c.and.d)))"),
+        ("x = .not. a == b .and. c", "(x=((.not.(a==b)).and.c))"),
+        ("y = a*b**c**d", "(y=(a*(b**(c**d))))"),
+        ("s = a // b == c", "(s=((a//b)==c))"),
+    ],
+)
+def test_operator_precedence(line, expected):
+    program = parse_statements(line)
+    assert [str(s) for s in program.statements] == [expected]

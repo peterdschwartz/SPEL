@@ -95,7 +95,6 @@ def get_if_blocks(sub: Subroutine):
         tag=sub.name,
     )
     if if_statements:
-        sub.if_blocks = if_statements
         flat_ifs: list[FlatIfs] = []
         for ifnode in if_statements:
             assert isinstance(ifnode, IfConstruct)

@@ -93,6 +93,7 @@ def created_fut(tmp_path, monkeypatch):
         casename=CASE_NAME,
         keep=False,
         db_mode=False,
+        direct=True,
     )
     assert (tmp_path / f"fut_{CASE_NAME}.pkl").is_file()
     return fut

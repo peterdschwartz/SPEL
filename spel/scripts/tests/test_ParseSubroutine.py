@@ -12,6 +12,7 @@ from spel.scripts.aggregate import aggregate_dtype_vars
 from spel.scripts.analyze_subroutines import Subroutine
 from spel.scripts.config import Options, scripts_dir
 from spel.scripts.DerivedType import DerivedType
+from spel.scripts.driver_callsites import driver_callsites
 from spel.scripts.edit_files import process_for_unit_test
 from spel.scripts.fortran_modules import FortranModule
 from spel.scripts.functional_unit_test import FunctionalUnitTest
@@ -211,8 +212,8 @@ def test_sub_parse(subtests):
             fut = main_sub_dict[test_sub_name]
             drv_lines = Path(f"{test_dir}/elm_driver.F90").read_text().splitlines()
             call_ln = next(i for i, l in enumerate(drv_lines) if "call call_sub" in l)
-            access = fut.driver_access
-            assert access is not None
+            access, _, _ = driver_callsites([fut], main_sub_dict, mod_dict)
+            access = access[fut.id]
             # globals passed by elm_drv take the dummies' status at the call line
             assert {"unused_inst%field2", "patch_state_updater%dwt"} <= access.keys()
             assert "w" in access["unused_inst%field2"][0].status

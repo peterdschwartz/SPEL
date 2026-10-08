@@ -244,3 +244,91 @@ def test_run_validation_reads_namelist_from_constants(tmp_path, pre):
     assert code == 0
     assert "WARNING" not in out.getvalue()
     assert "inactive" in out.getvalue()
+
+
+# --- `spel run` validation: FUT vs ELM outputs + access analysis per file set ---
+import io
+
+from spel.scripts.relerror import find_diffs
+
+
+def _good_post(pre):
+    return post_from(
+        pre,
+        veg_es__t_veg=lambda v: v + 1,
+        veg_ef__eflx=lambda v: v + 1,
+        veg_ws__h2o=lambda v: v + 1,
+    )
+
+
+@pytest.fixture
+def case_data(tmp_path, pre):
+    case_dir, data = tmp_path / "case", tmp_path / "data"
+    case_dir.mkdir()
+    data.mkdir()
+    va.write_access_manifest(case_dir, ["mod::sub"], ACCESS)
+    post = _good_post(pre)
+    for num in ("0001", "0002"):
+        pre.to_netcdf(data / f"spel-inputs{num}.nc")
+        post.to_netcdf(data / f"spel-outputs{num}.nc")
+        post.to_netcdf(data / f"fut-outputs{num}.nc")
+    return case_dir, data, post
+
+
+def test_find_diffs_returns_number_of_differing_variables(case_data, pre):
+    _, data, post = case_data
+    out = io.StringIO()
+    assert find_diffs(str(data / "spel-outputs0001.nc"), str(data / "fut-outputs0001.nc"), ostream=out) == 0
+    post_from(post, veg_es__t_veg=lambda v: v * 2, veg_ws__h2o=lambda v: v + 3).to_netcdf(data / "x.nc")
+    assert find_diffs(str(data / "spel-outputs0001.nc"), str(data / "x.nc"), ostream=out) == 2
+    assert not out.closed
+
+
+def test_case_files_pairs_by_number(case_data):
+    _, data, _ = case_data
+    (data / "fut-outputs0002.nc").unlink()
+    (data / "spel-outputs0003.nc").write_text("no inputs -> skipped")
+    files = va.case_files(data)
+    assert [(f.num, f.fut is not None) for f in files] == [("0001", True), ("0002", False)]
+
+
+def test_validate_case_passes(case_data):
+    case_dir, data, _ = case_data
+    out = io.StringIO()
+    assert va.validate_case(case_dir, data, ostream=out) == 0
+    assert "PASS: 2 file set(s)" in out.getvalue()
+
+
+def test_validate_case_fails_on_diff_missing_output_or_violation(case_data):
+    case_dir, data, post = case_data
+    post_from(post, veg_es__t_veg=lambda v: v * 2).to_netcdf(data / "fut-outputs0001.nc")
+    (data / "fut-outputs0002.nc").unlink()
+    out = io.StringIO()
+    assert va.validate_case(case_dir, data, ostream=out) == 1
+    text = out.getvalue()
+    assert "FAIL: fut-outputs0001.nc: 1 variable(s) differ" in text
+    assert "FAIL: spel-outputs0002.nc: no fut-outputs0002.nc" in text
+    assert "static analysis" not in text
+
+    post_from(post, top_as__tbot=lambda v: v + 1).to_netcdf(data / "spel-outputs0002.nc")
+    post_from(post, top_as__tbot=lambda v: v + 1).to_netcdf(data / "fut-outputs0002.nc")
+    out = io.StringIO()
+    assert va.validate_case(case_dir, data, ostream=out) == 1
+    assert "FAIL: spel-inputs0002.nc: static analysis violations" in out.getvalue()
+
+
+def test_validate_case_without_data(tmp_path):
+    out = io.StringIO()
+    assert va.validate_case(tmp_path, tmp_path, ostream=out) == 1
+    assert "no spel-inputs/spel-outputs pairs" in out.getvalue()
+
+
+def test_constants_file_for_later_sets(tmp_path):
+    from spel.scripts.validate_access import constants_file_for
+
+    for n in ("0001", "0002", "0003"):
+        (tmp_path / f"spel-inputs{n}.nc").touch()
+    (tmp_path / "spel-constants0001.nc").touch()
+    assert constants_file_for(tmp_path / "spel-inputs0001.nc").name == "spel-constants0001.nc"
+    assert constants_file_for(tmp_path / "spel-inputs0003.nc").name == "spel-constants0001.nc"
+    assert constants_file_for(tmp_path / "fut-outputs0001.nc") is None

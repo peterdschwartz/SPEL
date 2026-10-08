@@ -10,7 +10,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable
+from typing import TYPE_CHECKING, Dict, Iterable, Optional
 
 import spel.scripts.config as cfg
 import spel.scripts.io.helper as hio
@@ -27,7 +27,12 @@ from spel.scripts.config import (
     unit_test_files,
 )
 from spel.scripts.edit_files import macros
-from spel.scripts.fortran_modules import FortranModule, get_module_name_from_file
+from spel.scripts.fortran_modules import (
+    FortranModule,
+    declaration_source,
+    get_module_name_from_file,
+    imported_from,
+)
 from spel.scripts.fortran_parser.boolen_expression import AnyOf, ConditionExpectation
 from spel.scripts.io.netcdf_io import (
     generate_constants_io_netcdf,
@@ -45,7 +50,9 @@ from spel.scripts.utilityFunctions import (
 )
 
 if TYPE_CHECKING:
+    from spel.scripts.driver_callsites import DriverSites
     from spel.scripts.DerivedType import DerivedType
+    from spel.scripts.record_access import ArgBinding
 
     TypeDict = dict[str, DerivedType]
     ModDict = dict[str, FortranModule]
@@ -87,6 +94,16 @@ class FunctionalUnitTest:
         # `spel restore` can find the right place to copy files back to even
         # if the global E3SM_SRCROOT config has since changed.
         self.e3sm_srcroot: Path = E3SM_SRCROOT
+        # elm_drv call sites of the roots (driver_callsites); for `spel instrument`
+        self.driver_sites: Optional[DriverSites] = None
+        # elm_drv's actual -> dummy bindings at the roots' call sites
+        self.driver_bindings: list[ArgBinding] = []
+        # modules of the unit test, in dependency (compile) order
+        self.ordered_mods: list[str] = []
+        # roots whose call tree failed to analyze -> error (cached elm_drv analysis)
+        self.analysis_failures: dict[str, str] = {}
+        # mapped routines whose call tree contains a failed routine
+        self.analysis_incomplete: dict[str, list[str]] = {}
 
     def print(self):
         self.logger.info(
@@ -398,6 +415,74 @@ class FunctionalUnitTest:
             variables=var_decl_to_add,
         )
 
+    @property
+    def nested_call_site(self) -> bool:
+        """The selected routines are captured below elm_drv (in their caller)."""
+        from spel.scripts.driver_callsites import DRIVER_MODULE
+
+        sites = getattr(self, "driver_sites", None)
+        return sites is not None and sites.module != DRIVER_MODULE
+
+    def _composed_calls(self, instance_to_type: InstToDTypeMap) -> MainAdditions:
+        """
+        Calls to the selected routines with the actuals elm_drv passes down
+        the call chain (driver_bindings): elm_drv's clump bounds and filters
+        become main's bounds_clump and filter(nc).
+        """
+        from spel.scripts.fortran_parser.symbols import Origin
+
+        intrinsic = {"real": "real(r8)", "integer": "integer", "logical": "logical"}
+        calls: list[str] = []
+        mods: list[str] = []
+        decls: list[str] = []
+
+        def use(line: str) -> None:
+            if line not in mods:
+                mods.append(line)
+
+        for sub in self.primary_subroutines.values():
+            bound = {}
+            for b in self.driver_bindings:
+                if b.callee == sub.id:
+                    bound.setdefault(b.dummy, b)
+            args = []
+            for dummy in sub.record_access.dummies:
+                var = sub.arguments.get(dummy)
+                b = bound.get(dummy)
+                if var is not None and var.type == "bounds_type":
+                    args.append(f"{dummy}=bounds_clump")
+                elif b is not None and b.origin in (Origin.GLOBAL, Origin.EXTERNAL):
+                    base, sep, rest = b.actual.partition("%")
+                    if base == "filter":
+                        args.append(f"{dummy}=filter(nc)%{rest}")
+                        continue
+                    args.append(f"{dummy}={b.actual}")
+                    if base in instance_to_type:
+                        inst = self.type_dict[instance_to_type[base]].instances[base]
+                        use(f"use {inst.declaration}, only : {base}\n")
+                    elif mod := next(
+                        (m for m, fm in self.module_dict.items() if base in fm.global_vars), None
+                    ):
+                        use(f"use {mod}, only : {base}\n")
+                elif var is not None and var.optional and b is None:
+                    continue
+                elif var is not None and var.dim == 0 and var.type in intrinsic:
+                    where = f"{b.actual} in {b.caller}" if b is not None else "nothing"
+                    self.logger.warning(
+                        f"{sub.id}: dummy '{dummy}' is bound to {where}, not a global; "
+                        f"main.F90 passes an uninitialized local spel_{dummy}"
+                    )
+                    decls.append(f"{intrinsic[var.type]} :: spel_{dummy}\n")
+                    args.append(f"{dummy}=spel_{dummy}")
+                else:
+                    where = f"{b.actual} ({b.origin.value} of {b.caller})" if b else "nothing"
+                    sys.exit(
+                        f"Error- {sub.id}: dummy '{dummy}' is bound to {where}; "
+                        "only globals, bounds and scalars can be passed from main.F90"
+                    )
+            calls.append(f"call {sub.name}({', '.join(args)})\n")
+        return MainAdditions(calls=calls, modules=mods, variables=decls)
+
     def prepare_main(
         self,
         instance_to_type: InstToDTypeMap | None = None,
@@ -414,13 +499,17 @@ class FunctionalUnitTest:
             for subroutine in self.primary_subroutines.values()
         ]
 
-        additions = self._find_parent_subroutine_call(instance_to_type)
-        num_filters = get_filter_members(self.type_dict["clumpfilter"])
-        adjusted_vars, adjusted_calls = adjust_call_sig(
-            additions.variables,
-            additions.calls,
-            num_filters,
-        )
+        if self.nested_call_site:
+            additions = self._composed_calls(instance_to_type)
+            adjusted_vars, adjusted_calls = additions.variables, additions.calls
+        else:
+            additions = self._find_parent_subroutine_call(instance_to_type)
+            num_filters = get_filter_members(self.type_dict["clumpfilter"])
+            adjusted_vars, adjusted_calls = adjust_call_sig(
+                additions.variables,
+                additions.calls,
+                num_filters,
+            )
         modules_to_add.extend(additions.modules)
 
         lines = insert_at_token(lines, "!#USE_START", modules_to_add)
@@ -573,7 +662,9 @@ class FunctionalUnitTest:
 
     def write_elminst_mod(self) -> None:
         """Write the reduced elm_instMod.F90 needed by this unit test."""
-        write_elminstMod(self.type_dict, self.case_dir)
+        inst_mod = self.module_dict.get("elm_instmod")
+        imported = imported_from(self.module_dict, self.ordered_mods, "elm_instmod")
+        write_elminstMod(self.type_dict, self.case_dir, inst_mod, imported)
 
     def generate_cmake(self, files: list[str]) -> None:
         generate_cmake(files, self.case_dir)
@@ -853,11 +944,75 @@ def generate_makefile(files: list[str], case_dir: Path):
         ofile.writelines(lines)
 
 
-def write_elminstMod(typedict: dict[str, DerivedType], case_dir: Path):
+def declaration_line(provider: FortranModule, name: str) -> Optional[str]:
+    """The declaration of `name` in provider's specification part (comment stripped)."""
+    entity = re.compile(rf"(^|,)\s*{re.escape(name)}\s*(\(|=|,|$)", re.IGNORECASE)
+    lines = Path(provider.filepath).read_text().splitlines()
+    for line in lines[: provider.end_of_head_ln]:
+        code = line.split("!", 1)[0].rstrip()
+        if "::" in code and entity.search(code.split("::", 1)[1].strip()):
+            return code.strip()
+    return None
+
+
+def elminst_lines(
+    typedict: dict[str, DerivedType],
+    inst_mod: FortranModule,
+    imported: Iterable[str] = (),
+) -> list[str]:
+    """
+    Source of SPEL's elm_instMod: the instances of the unit test's types
+    declared in ELM's elm_instMod, plus whatever the case's modules import
+    from it (declarations copied from ELM's, re-exports used from their module).
+    """
+    logger = get_logger("elm_instMod")
+    names = {
+        gv.name
+        for dtype in typedict.values()
+        for gv in dtype.instances.values()
+        if gv.declaration == "elm_instmod"
+    } | set(imported)
+
+    uses: dict[str, list[str]] = {}
+    decls: list[str] = []
+    for name in sorted(names):
+        source = declaration_source(inst_mod, name, typedict)
+        if source is None:
+            logger.warning(f"elm_instMod: can't provide '{name}' (type not in unit test)")
+            continue
+        module, item = source
+        if item not in uses.setdefault(module, []):
+            uses[module].append(item)
+        if name in inst_mod.global_vars:
+            decl = declaration_line(inst_mod, name)
+            if decl is None:
+                logger.warning(f"elm_instMod: no declaration found for '{name}'")
+            elif decl not in decls:
+                decls.append(decl)
+
+    spaces = " " * 2
+    out = ["module elm_instMod"]
+    out += [f"{spaces}use {m}, only : {', '.join(items)}" for m, items in uses.items()]
+    out += [f"{spaces}implicit none", f"{spaces}save", f"{spaces}public"]
+    out += [spaces + d for d in decls]
+    out.append("end module elm_instMod")
+    return out
+
+
+def write_elminstMod(
+    typedict: dict[str, DerivedType],
+    case_dir: Path,
+    inst_mod: Optional[FortranModule] = None,
+    imported: Iterable[str] = (),
+):
     """
     Writes elm_instMod to contain only variable decalarations
     needed for this Unit Test
     """
+    if inst_mod is not None:
+        text = "\n".join(elminst_lines(typedict, inst_mod, imported)) + "\n"
+        Path(case_dir, "elm_instMod.F90").write_text(text)
+        return
     file = open(f"{case_dir}/elm_instMod.F90", "w")
     spaces = " " * 2
     file.write("module elm_instMod\n")
