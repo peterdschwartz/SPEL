@@ -20,6 +20,8 @@ from spel.scripts.fortran_parser.spel_ast import (
     DataValue,
     DoLoop,
     DoWhile,
+    ElseWhere,
+    WhereConstruct,
     Else,
     ElseIf,
     EntityDecl,
@@ -76,8 +78,8 @@ from spel.scripts.logging_configs import get_logger
 from spel.scripts.types import LineTuple, LogicalLineIterator, Precedence
 
 precedences = {
-    TokenTypes.ASSIGN: Precedence.EQUALS,
-    TokenTypes.PTR: Precedence.EQUALS,
+    TokenTypes.ASSIGN: Precedence.ASSIGN,
+    TokenTypes.PTR: Precedence.ASSIGN,
     TokenTypes.PLUS: Precedence.SUM,
     TokenTypes.MINUS: Precedence.SUM,
     TokenTypes.SLASH: Precedence.PRODUCT,
@@ -85,16 +87,16 @@ precedences = {
     TokenTypes.LPAREN: Precedence.CALL,
     TokenTypes.COLON: Precedence.BOUNDS,
     TokenTypes.PERCENT: Precedence.BOUNDS,
-    TokenTypes.EXP: Precedence.PRODUCT,
+    TokenTypes.EXP: Precedence.EXP,
     TokenTypes.EQUIV: Precedence.EQUALS,
     TokenTypes.NOT_EQUIV: Precedence.EQUALS,
     TokenTypes.GT: Precedence.LESSGREATER,
     TokenTypes.GTEQ: Precedence.LESSGREATER,
     TokenTypes.LT: Precedence.LESSGREATER,
     TokenTypes.LTEQ: Precedence.LESSGREATER,
-    TokenTypes.AND: Precedence.EQUALS,
-    TokenTypes.OR: Precedence.EQUALS,
-    TokenTypes.CONCAT: Precedence.PRODUCT,
+    TokenTypes.AND: Precedence.AND,
+    TokenTypes.OR: Precedence.OR,
+    TokenTypes.CONCAT: Precedence.CONCAT,
     TokenTypes.MACRO: Precedence.PREFIX,
     TokenTypes.BANG: Precedence.PREFIX,
 }
@@ -530,6 +532,8 @@ class Parser:
                 stmt = self.parse_branch_statement()
             case Tok.IDENT if self.is_select_statement():
                 stmt = self.parse_select_case()
+            case Tok.IDENT if self.is_where_statement():
+                stmt = self.parse_where()
             case Tok.IDENT if self.is_io_or_nullify_statement("nullify"):
                 stmt = self.parse_nullify_statement()
             case Tok.IDENT if self.is_io_or_nullify_statement("read"):
@@ -669,6 +673,65 @@ class Parser:
 
     def is_select_statement(self) -> bool:
         return self.cur_token.literal == "select" and self.peekTokenIs(Tok.IDENT)
+
+    def is_where_statement(self) -> bool:
+        return self.cur_token.literal == "where" and self.peekTokenIs(Tok.LPAREN)
+
+    def at_elsewhere(self) -> bool:
+        lit = self.cur_token.literal.lower()
+        return lit == "elsewhere" or (lit == "else" and self.peek_token.literal == "where")
+
+    def at_end_where(self) -> bool:
+        lit = self.cur_token.literal.lower()
+        return lit == "endwhere" or (lit == "end" and self.peek_token.literal == "where")
+
+    @Trace.trace_decorator("parse_where")
+    def parse_where(self) -> WhereConstruct:
+        """
+        Entry: cur_token = `where`, peek = LPAREN
+        Exit: last token of the WHERE statement / `end where`
+        """
+        tok = self.cur_token
+        startln = self.lineno
+        self.next_token()
+        mask = self.parse_expression(Precedence.LOWEST)
+        self.next_token()
+        if not self.curTokenIs(Tok.NEWLINE):
+            body = BlockStatement(tok)
+            stmt = self.parse_statement()
+            if stmt is None:
+                self.fatal(f"Expected a statement after where (...) @{startln}")
+            body.statements.append(stmt)
+            return WhereConstruct(tok, mask, body)
+
+        def at_branch() -> bool:
+            return self.at_elsewhere() or self.at_end_where()
+
+        self.next_token()
+        body = self.parse_block_statement(tok, [], stop=at_branch)
+        elsewheres: list[ElseWhere] = []
+        while self.at_elsewhere():
+            ew_tok = self.cur_token
+            ew_ln = self.lineno
+            if self.cur_token.literal.lower() == "else":
+                self.next_token()  # `where`
+            ew_mask = None
+            if self.peekTokenIs(Tok.LPAREN):
+                self.next_token()
+                ew_mask = self.parse_expression(Precedence.LOWEST)
+            self.expect_peek_and_advance(Tok.NEWLINE)
+            self.next_token()
+            blk = self.parse_block_statement(ew_tok, [], stop=at_branch)
+            elsewhere = ElseWhere(ew_tok, ew_mask, blk)
+            elsewhere.lineno = ew_ln
+            elsewheres.append(elsewhere)
+        if not self.at_end_where():
+            self.fatal(f"Unterminated where construct @{startln}")
+        if self.cur_token.literal.lower() == "end":
+            self.next_token()  # `where`
+        construct = WhereConstruct(tok, mask, body, elsewheres)
+        construct.end_ln = self.lineno
+        return construct
 
     def is_case_statement(self) -> bool:
         return (
@@ -1409,7 +1472,13 @@ class Parser:
         # advance to end of statement
         self.next_token()
         block = self.parse_block_statement(tok, [Token(Tok.ENDDO, "ENDDO")])
+        self.skip_construct_name()
         return DoLoop(tok, index, start_expr, end_expr, block, step)
+
+    def skip_construct_name(self) -> None:
+        """cur_token ends a construct (`end do`): consume an `end do <name>`"""
+        if self.peekTokenIs(Tok.IDENT):
+            self.next_token()
 
     @Trace.trace_decorator("parse_do_bounds")
     def parse_do_bounds(self) -> tuple[Expression, Expression, Optional[Expression]]:
@@ -1695,7 +1764,8 @@ class Parser:
         tok = self.cur_token
         op = tok.literal
         self.next_token()
-        right_expr = self.parse_expression(Precedence.PREFIX)
+        prec = Precedence.NOT if tok.token == Tok.BANG else Precedence.PREFIX
+        right_expr = self.parse_expression(prec)
         expr = PrefixExpression(tok=tok, op=op, right=right_expr)
 
         return expr
@@ -1708,6 +1778,9 @@ class Parser:
         tok = self.cur_token
         op = self.cur_token.literal
         prec = self.cur_precedence()
+        if tok.token == Tok.EXP:
+            # ** is right-associative
+            prec = Precedence(prec.value - 1)
         self.next_token()
 
         right_expr = self.parse_expression(prec)

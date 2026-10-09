@@ -37,21 +37,29 @@ class ModuleHead:
     """
     default_private: module has a bare `private` statement
     access:          explicit accessibility, name -> is_public
+    protected:       names with the `protected` attribute
+    stmt_ln:         name -> line of the `public/private/protected :: name`
+                     statement(s) naming it (not declarations)
     generics:        generic interface names
     interface_procs: procedures declared by interface bodies (abstract or external)
     """
 
     default_private: bool = False
     access: dict[str, bool] = field(default_factory=dict)
+    protected: set[str] = field(default_factory=set)
+    stmt_ln: dict[str, list[int]] = field(default_factory=dict)
     generics: set[str] = field(default_factory=set)
     interface_procs: set[str] = field(default_factory=set)
 
     def is_public(self, name: str) -> bool:
         return self.access.get(name, not self.default_private)
 
+    def is_protected(self, name: str) -> bool:
+        return name in self.protected
+
 
 IDENT = r"[a-z_]\w*"
-regex_access_stmt = re.compile(r"^(public|private)\b\s*(?:::)?\s*(.*)$")
+regex_access_stmt = re.compile(r"^(public|private|protected)\b\s*(?:::)?\s*(.*)$")
 regex_type_start = re.compile(
     rf"^type\b(?!\s*\()\s*(?:,(?P<attrs>[^:]*))?(?:::)?\s*(?P<name>{IDENT})"
 )
@@ -61,6 +69,7 @@ regex_end_interface = re.compile(r"^end\s*interface\b")
 regex_body_start = re.compile(rf"^(?!end\b).*?\b(?:subroutine|function)\s+(?P<name>{IDENT})")
 regex_end_body = re.compile(r"^end\b")
 regex_access_attr = re.compile(r",\s*(public|private)\b")
+regex_protected_attr = re.compile(r",\s*protected\b")
 
 
 def split_top_level(text: str) -> list[str]:
@@ -128,8 +137,13 @@ def scan_module_head(lines: Iterable[LineTuple]) -> ModuleHead:
                 head.access[m.group("name")] = access.group(1) == "public"
             continue
         if m := regex_access_stmt.match(line):
-            is_public = m.group(1) == "public"
             names = entity_names(m.group(2))
+            for name in names:
+                head.stmt_ln.setdefault(name, []).append(lt.ln)
+            if m.group(1) == "protected":
+                head.protected.update(names)
+                continue
+            is_public = m.group(1) == "public"
             if not m.group(2).strip():
                 head.default_private = not is_public
             for name in names:
@@ -137,10 +151,21 @@ def scan_module_head(lines: Iterable[LineTuple]) -> ModuleHead:
             continue
         if "::" in line:
             spec, _, ents = line.partition("::")
-            if access := regex_access_attr.search(spec):
+            access = regex_access_attr.search(spec)
+            protected = regex_protected_attr.search(spec)
+            if access or protected:
                 for name in entity_names(ents):
-                    head.access[name] = access.group(1) == "public"
+                    if access:
+                        head.access[name] = access.group(1) == "public"
+                    if protected:
+                        head.protected.add(name)
     return head
+
+
+def module_head(fort_mod: FortranModule) -> ModuleHead:
+    return scan_module_head(
+        lt for lt in fort_mod.module_lines if lt.ln < fort_mod.end_of_head_ln
+    )
 
 
 @dataclass
@@ -237,9 +262,7 @@ class ModuleScopes:
 
     def head(self, mod_name: str) -> ModuleHead:
         if mod_name not in self._heads:
-            fort_mod = self.mod_dict[mod_name]
-            lines = (lt for lt in fort_mod.module_lines if lt.ln < fort_mod.end_of_head_ln)
-            self._heads[mod_name] = scan_module_head(lines)
+            self._heads[mod_name] = module_head(self.mod_dict[mod_name])
         return self._heads[mod_name]
 
     def head_uses(self, mod_name: str) -> list[UseStatement]:

@@ -140,12 +140,11 @@ def is_numeric(dtype):
 
 def find_diffs(refn: str, compfn: str, var: str = "", ostream=sys.stdout):
     """
-    Function to compare two netcdf files and report any significant diffs
+    Function to compare two netcdf files and report any significant diffs.
+    Returns the number of variables with significant diffs.
     """
     findall = True if not var else False
-    print("Reference File is:", refn)
-    print("Comparison File is:", compfn)
-    print("Findall is:", findall)
+    ostream.write(f"Reference File is: {refn}\nComparison File is: {compfn}\n")
     global NUMLOGS
     if not findall:
         NUMLOGS = 100
@@ -157,16 +156,19 @@ def find_diffs(refn: str, compfn: str, var: str = "", ostream=sys.stdout):
         var_names = [var for var in refdata.keys()]
         current_var = var_names[0]
         error_log = []
+        ndiffs = 0
         for var in progressbar(var_names, "VAR:", 40):
             dtype = refdata[var].dtype
             if is_numeric(dtype):
                 error_log, summary = rel_error(refdata, compdata, var, error_log)
+                ndiffs += summary is not None
     else:
         error_log = []
         error_log, summary = rel_error(refdata, compdata, var, error_log)
+        ndiffs = int(summary is not None)
     ostream.write(tabulate(error_log, tablefmt="psql"))
     ostream.write("\n")
-    if ostream in (sys.stdout, sys.stderr):
-        ostream.flush()
-    else:
-        ostream.close()
+    ostream.flush()
+    refdata.close()
+    compdata.close()
+    return ndiffs

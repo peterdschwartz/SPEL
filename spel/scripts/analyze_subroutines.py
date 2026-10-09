@@ -1,36 +1,28 @@
 from __future__ import annotations
 
 import logging
-import os.path
 import re
 import sys
-from collections import defaultdict
 from pathlib import Path
-from pprint import pformat, pprint
-from typing import Any, Optional
+from typing import Optional
 
-from spel.scripts.config import _bc, spel_dir
-from spel.scripts.DerivedType import DerivedType, expand_dtype, get_component
+from spel.scripts.DerivedType import DerivedType, get_component
 from spel.scripts.fortran_modules import FortranModule
 from spel.scripts.fortran_parser.environment import Environment
 from spel.scripts.fortran_parser.scope_walk import SubroutineRecord, walk_subroutine
 from spel.scripts.fortran_parser.spel_ast import (
-    Program,
-    Statement,
     SubroutineDefinitionConstruct,
 )
 from spel.scripts.fortran_parser.spel_parser import Parser
 from spel.scripts.fortran_parser.tracing import Trace
 from spel.scripts.module_resolver import ModuleResolver, ModuleScopes
-from spel.scripts.record_access import AccessDict, AccessMaps
+from spel.scripts.record_access import AccessMaps
 from spel.scripts.helper_functions import combine_many_statuses, find_child_subroutines
 from spel.scripts.logging_configs import get_logger, set_logger_level
 from spel.scripts.LoopConstructs import Loop
 from spel.scripts.process_associate import getAssociateClauseVars
 from spel.scripts.types import (
-    CallBinding,
     CallDesc,
-    CallTag,
     CallTree,
     FileInfo,
     FlatIfs,
@@ -38,13 +30,10 @@ from spel.scripts.types import (
     PropagatedAccess,
     ReadWrite,
     SubInit,
-    SubroutineCall,
 )
 from spel.scripts.utilityFunctions import (
     Variable,
     get_local_variables,
-    line_unwrapper,
-    search_in_file_section,
     split_func_line,
 )
 from spel.scripts.variable_analysis import add_global_vars
@@ -106,12 +95,7 @@ class Subroutine(object):
         # Initialize arguments and local variables
         self.arguments: dict[str, Variable] = {}
         self.local_variables: dict[str, Variable] = {}
-        self.class_method: bool = False
-        self.class_type: Optional[str] = None
 
-        # Store when the arguments/local variable declarations start and end
-        self.var_declaration_startl: int = 0
-        self.var_declaration_endl: int = 0
 
         # Compiler preprocessor flags
         self.cpp_startline: int | None = init_obj.cpp_start
@@ -124,7 +108,6 @@ class Subroutine(object):
 
         # Process the Associate Clause
         self.associate_vars: dict[str, str] = {}
-        self.reverse_associate_map: dict[str, str] = {}
         self.ptr_vars: dict[str, list[str]] = {}
 
         self.associate_start: int = -1
@@ -139,7 +122,6 @@ class Subroutine(object):
         self.sub_lines: list[LineTuple] = []
 
         self.logger: logging.Logger = get_logger(f"{self.module}::{self.name}")
-        self.if_blocks: list[Statement] = []
         self.flat_ifs: list[FlatIfs] = []
         self.ifs_analyzed: bool = False
         self.syntax_tree: Optional[SubroutineDefinitionConstruct] = None
@@ -148,9 +130,6 @@ class Subroutine(object):
         self.record: Optional[SubroutineRecord] = None
         # access maps derived from self.record (record_access.AccessMapper)
         self.record_access: Optional[AccessMaps] = None
-        # unit-test roots: global accesses at the elm_drv call sites
-        # (driver_callsites.driver_callsites); None if not called by elm_drv
-        self.driver_access: Optional[AccessDict] = None
 
         if not lib_func:
             full_lines = self.get_sub_lines(init_obj.mod_lines, full=True)
@@ -163,9 +142,6 @@ class Subroutine(object):
             self.associate_vars, jstart, jend = getAssociateClauseVars(self)
             self.associate_start = jstart
             self.associate_end = jend
-            self.reverse_associate_map: dict[str, str] = {
-                val: key for key, val in self.associate_vars.items()
-            }
 
             self.dummy_args_list = self._find_dummy_args()
             get_local_variables(self)
@@ -200,10 +176,8 @@ class Subroutine(object):
 
         self.propagated_access_by_ln: dict[str, list[PropagatedAccess]] = {}
 
-        self.subroutine_call: list[SubroutineCall] = []
         self.child_subroutines: dict[str, Subroutine] = {}
         self.sub_call_desc: dict[int, CallDesc] = {}
-        self.call_bindings: dict[CallTag, list[CallBinding]] = {}
 
         self.loops: list[Loop] = []
 
@@ -214,12 +188,9 @@ class Subroutine(object):
 
         # Flag that denotes subroutines that were user requested
         self.unit_test_function: bool = False
-        self.acc_status: bool = False
-        self.analyzed_child_subroutines: bool = False
         self.preprocessed: bool = False
 
         self.environment: Optional[Environment] = None
-        self.inherits_from: str = init_obj.parent
 
         if not self.library:
             self.get_arg_intent()
@@ -688,317 +659,6 @@ class Subroutine(object):
             )
         return
 
-    def print_variable_access(self, all=False):
-        import pprint
-
-        def _sort_by_ln(access_dict: dict[str, list[ReadWrite]]):
-            by_ln = defaultdict(list)
-            for v, rws in access_dict.items():
-                for rw in rws:
-                    by_ln[rw.ln + 1].append((v, rw.status))
-            return by_ln
-
-        self.logger.info(f"Variable Access for {self.module}::{self.name}")
-        if self.elmtype_access_by_ln:
-            self.logger.info("Derived Types")
-            self.logger.info(pprint.pformat(_sort_by_ln(self.elmtype_access_by_ln)))
-        if self.arg_access_by_ln:
-            self.logger.info("Arguments")
-            self.logger.info(pprint.pformat(_sort_by_ln(self.arg_access_by_ln)))
-        if self.local_vars_access_by_ln and all:
-            self.logger.info("Local Variables")
-            self.logger.info(pprint.pformat(_sort_by_ln(self.local_vars_access_by_ln)))
-        if self.propagated_access_by_ln:
-            self.logger.info("Propagated from Parent")
-            self.logger.info(pprint.pformat(self.propagated_access_by_ln))
-
-    def generate_update_directives(self, elmvars_dict, verify_vars):
-        """
-        This function will create .F90 routine to execute the
-        update directives to check the results of the subroutine
-        """
-        ofile = open(
-            f"{spel_dir}scripts/script-output/update_vars_{self.name}.F90", "w"
-        )
-
-        spaces = " " * 2
-        ofile.write("subroutine update_vars_{}(gpu,desc)\n".format(self.name))
-
-        for dtype in verify_vars.keys():
-            mod = elmvars_dict[dtype].declaration
-            ofile.write(spaces + f"use {mod}, only : {dtype}\n")
-
-        ofile.write(spaces + "implicit none\n")
-        ofile.write(spaces + "integer, intent(in) :: gpu\n")
-        ofile.write(spaces + "character(len=*), optional, intent(in) :: desc\n")
-        ofile.write(spaces + "character(len=256) :: fn\n")
-        ofile.write(spaces + "if(gpu) then\n")
-        ofile.write(spaces + spaces + f'fn="gpu_{self.name}"\n')
-        ofile.write(spaces + "else\n")
-        ofile.write(spaces + spaces + f"fn='cpu_{self.name}'\n")
-        ofile.write(spaces + "end if\n")
-        ofile.write(spaces + "if(present(desc)) then\n")
-        ofile.write(spaces + spaces + "fn = trim(fn) // desc\n")
-        ofile.write(spaces + "end if\n")
-        ofile.write(spaces + 'fn = trim(fn) // ".txt"\n')
-        ofile.write(spaces + 'print *, "Verfication File is :",fn\n')
-        ofile.write(spaces + "open(UNIT=10, STATUS='REPLACE', FILE=fn)\n")
-
-        # First insert OpenACC update directives to transfer results from GPU-CPU
-        ofile.write(spaces + "if(gpu) then\n")
-        acc = "!$acc "
-
-        for v, comp_list in verify_vars.items():
-            ofile.write(spaces + acc + "update self(&\n")
-            i = 0
-            for c in comp_list:
-                i += 1
-                if i == len(comp_list):
-                    name = f"{v}%{c}"
-                    c13c14 = bool("c13" in name or "c14" in name)
-                    if c13c14:
-                        ofile.write(spaces + acc + ")\n")
-                    else:
-                        ofile.write(spaces + acc + f"{name} )\n")
-                else:
-                    name = f"{v}%{c}"
-                    c13c14 = bool("c13" in name or "c14" in name)
-                    if c13c14:
-                        continue
-                    ofile.write(spaces + acc + f"{name}, &\n")
-
-        ofile.write(spaces + "end if\n")
-        ofile.write(spaces + "!! CPU print statements !!\n")
-        # generate cpu print statements
-        for v, comp_list in verify_vars.items():
-            for c in comp_list:
-                name = f"{v}%{c}"
-                c13c14 = bool("c13" in name or "c14" in name)
-                if c13c14:
-                    continue
-                ofile.write(spaces + f"write(10,*) '{name}',shape({name})\n")
-                ofile.write(spaces + f"write(10,*) {name}\n")
-
-        ofile.write(spaces + "close(10)\n")
-        ofile.write("end subroutine ")
-        ofile.close()
-        return
-
-    def generate_unstructured_data_regions(self, remove=True) -> None:
-        """
-        Function generates appropriate enter and exit data
-        directives for the local variables of this Subroutine.
-
-        First step is to remove any existing directives
-        Next, create new directives from local variable list
-        Compare new and old directives and overwrite if they are different
-        """
-        # Open File:
-        if os.path.exists(spel_dir + "modified-files/" + self.filepath):
-            print("Modified file found")
-            print(
-                _bc.BOLD
-                + _bc.WARNING
-                + f"Opening file "
-                + spel_dir
-                + "modified-files/"
-                + self.filepath
-                + _bc.ENDC
-            )
-            ifile = open(spel_dir + "modified-files/" + self.filepath, "r")
-        else:
-            print(_bc.BOLD + _bc.WARNING + f"Opening file{self.filepath}" + _bc.ENDC)
-            ifile = open(self.filepath, "r")
-
-        lines = ifile.readlines()
-
-        ifile.close()
-
-        regex_enter_data = re.compile(r"^\s*\!\$acc enter data", re.IGNORECASE)
-        regex_exit_data = re.compile(r"^\s*\!\$acc exit data", re.IGNORECASE)
-
-        lstart = self.startline - 1
-        lend = self.endline
-        old_enter_directives = []
-        old_exit_directives = []
-        if remove:
-            ln = lstart
-            while ln < lend:
-                line = lines[ln]
-                match_enter_data = regex_enter_data.search(line)
-                match_exit_data = regex_exit_data.search(line)
-                if match_enter_data:
-                    directive_start = ln
-                    old_enter_directives.append(line)  # start of enter data directive
-                    line = line.rstrip("\n")
-                    line = line.strip()
-                    while line.endswith("&"):
-                        ln += 1
-                        line = lines[ln]
-                        old_enter_directives.append(line)  # end of enter data directive
-                        line = line.rstrip("\n")
-                        line = line.strip()
-                    directive_end = ln
-                    del lines[directive_start : directive_end + 1]
-                    num_lines_removed = directive_end - directive_start + 1
-                    lend -= num_lines_removed
-                    ln -= num_lines_removed
-                    print(f"Removed {num_lines_removed} enter data lines")
-                if match_exit_data:
-                    directive_start = ln  # start of exit data directive
-                    old_exit_directives.append(line)
-                    line = line.rstrip("\n")
-                    line = line.strip()
-                    while line.endswith("&"):
-                        ln += 1
-                        line = lines[ln]
-                        old_exit_directives.append(line)
-                        line = line.rstrip("\n")
-                        line = line.strip()
-                    directive_end = ln  # end of exit data directive
-                    del lines[directive_start : directive_end + 1]
-                    num_lines_removed = directive_end - directive_start + 1
-                    lend -= num_lines_removed
-                    ln -= num_lines_removed
-                    print(f"Removed {num_lines_removed} exit data lines")
-                ln += 1
-
-        # Create New directives
-        vars = []  # list to hold all vars needed to be on the device
-        arrays_dict = self.local_variables["arrays"]
-        for k, v in arrays_dict.items():
-            varname = v.name
-            dim = v.dim
-            li_ = [":"] * dim
-            dim_str = ",".join(li_)
-            dim_str = "(" + dim_str + ")"
-            print(f"adding {varname}{dim_str} to directives")
-            vars.append(f"{varname}{dim_str}")
-
-        # Only add scalars to if they are a reduction variables
-        # Only denoting that by if it has "sum" in the name
-        for v in self.local_variables["scalars"]:
-            varname = v.name
-            for loop in self.loops:
-                if loop.subcall.name == self.name:
-                    if varname in loop.reduce_vars and varname not in vars:
-                        print(f"Adding scalar {varname} to directives")
-                        vars.append(varname)
-
-        num_vars = len(vars)
-        if num_vars == 0:
-            print(f"No Local variables to make transfer to device, returning")
-            return None
-        else:
-            print(f"Generating create directives for {num_vars} variables")
-
-        # Get appropriate indentation for the new directives:
-        padding = ""
-        first_line = 0
-
-        for ln in range(lstart, lend):
-            line = lines[ln]
-            # Before ignoring comments, check if it's an OpenACC directive
-            m_acc = re.search(r"\s*(\!\$acc routine seq)", line)
-            if m_acc:
-                sys.exit("Error: Trying to add data directives to an OpenACC routine")
-
-            m_acc = re.search(
-                r"\s*(\!\$acc)\s+(parallel|enter|update)", line, re.IGNORECASE
-            )
-            if m_acc and first_line == 0:
-                first_line = ln
-
-            l = line.split("!")[0]
-            l = l.strip()
-            if not l:
-                continue
-
-            m_use = re.search(
-                r"^(implicit|use|integer|real|character|logical|type\()", line.lstrip()
-            )
-            if m_use and not padding:
-                padding = " " * (len(line) - len(line.lstrip()))
-            elif padding and not m_use and first_line == 0:
-                first_line = ln
-
-            if ln == lend - 1 and not padding:
-                sys.exit("Error: Couldn't get spacing")
-
-        new_directives = []
-
-        for v in vars[0 : num_vars - 1]:
-            new_directives.append(padding + f"!$acc {v}, &\n")
-        new_directives.append(padding + f"!$acc {vars[num_vars-1]})\n\n")
-
-        new_enter_data = [padding + "!$acc enter data create(&\n"]
-        new_enter_data.extend(new_directives)
-        #
-        new_exit_data = [padding + "!$acc exit data delete(&\n"]
-        new_exit_data.extend(new_directives)
-
-        if (
-            new_enter_data != old_enter_directives
-            or new_exit_data != old_exit_directives
-        ):
-            # Insert the enter data directives
-            if self.associate_end != 0:
-                # insert new directives just after last associate statement:
-                for l in reversed(new_enter_data):
-                    lines.insert(self.associate_end + 1, l)
-            else:  # use first_line found above
-                for l in reversed(new_enter_data):
-                    lines.insert(first_line, l)
-            lend += len(new_enter_data)
-            print(
-                _bc.BOLD + _bc.WARNING + f"New Subroutine Ending is {lend}" + _bc.ENDC
-            )
-            # Inster the exit data directives
-            if self.associate_end != 0:
-                end_associate_ln = 0
-                regex_end = re.compile(r"^(end associate)", re.IGNORECASE)
-                for ln in range(lend, lstart, -1):
-                    m_end = regex_end.search(lines[ln].lstrip())
-                    if m_end:
-                        end_associate_ln = ln
-                        break
-                for l in reversed(new_exit_data):
-                    lines.insert(end_associate_ln, l)
-            else:
-                for l in reversed(new_exit_data):
-                    lines.insert(lend - 1, l)
-            lend += len(new_exit_data)
-            print(
-                _bc.BOLD + _bc.WARNING + f"New Subroutine Ending is {lend}" + _bc.ENDC
-            )
-
-            # Overwrite File:
-            if "modified-files" in self.filepath:
-                print(
-                    _bc.BOLD
-                    + _bc.WARNING
-                    + f"Writing to file {self.filepath}"
-                    + _bc.ENDC
-                )
-                ofile = open(self.filepath, "w")
-            else:
-                print(
-                    _bc.BOLD
-                    + _bc.WARNING
-                    + "Writing to file "
-                    + spel_dir
-                    + "modified-files/"
-                    + self.filepath
-                    + _bc.ENDC
-                )
-                ofile = open(spel_dir + "modified-files/" + self.filepath, "w")
-
-            ofile.writelines(lines)
-            ofile.close()
-        else:
-            print(_bc.BOLD + _bc.WARNING + "NO CHANGE" + _bc.ENDC)
-        return None
-
     def _get_ptr_targets(self, pot_ptr: str) -> list[str]:
         return self.ptr_vars.get(pot_ptr, [pot_ptr])
 
@@ -1036,36 +696,6 @@ class Subroutine(object):
             if len(guarded_accesses) == len(accesses):
                 exclusive[elm_field] = set(guarded_accesses)
         return exclusive
-
-    def sort_inputs_outputs(self):
-        inputs: set[str] = set()
-        outputs: set[str] = set()
-        boths: set[str] = set()
-        inputs.update(
-            {var for var, rw in self.elmtype_access_summary.items() if rw.status == "r"}
-        )
-        outputs.update(
-            {var for var, rw in self.elmtype_access_summary.items() if rw.status == "w"}
-        )
-        boths.update(
-            {
-                var
-                for var, rw in self.elmtype_access_summary.items()
-                if rw.status == "rw"
-            }
-        )
-        print("Inputs only:")
-        for var in sorted(list(inputs)):
-            print(var)
-        print("=" * 20)
-        print("Outputs only:")
-        for var in sorted(list(outputs)):
-            print(var)
-        print("=" * 20)
-        print("Read/Write")
-        for var in sorted(list(boths)):
-            print(var)
-        return
 
 
 def link_internal_subprograms(sub_dict: dict[str, Subroutine]) -> None:

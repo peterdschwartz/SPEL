@@ -38,6 +38,7 @@ from spel.scripts.fortran_parser.spel_ast import (
     DataStatement,
     DoLoop,
     DoWhile,
+    WhereConstruct,
     ExitStatement,
     Expression,
     ExpressionStatement,
@@ -408,6 +409,13 @@ class _Walker:
             case DoWhile():
                 self.walk_expr(stmt.condition, ln)
                 self.walk_block(stmt.body)
+            case WhereConstruct():
+                self.walk_expr(stmt.mask, ln)
+                self.walk_block(stmt.body)
+                for ew in stmt.elsewheres:
+                    if ew.mask is not None:
+                        self.walk_expr(ew.mask, ew.lineno)
+                    self.walk_block(ew.body)
             case IfConstruct():
                 self.walk_expr(stmt.condition, ln)
                 self.walk_block(stmt.consequence)
@@ -549,7 +557,12 @@ class _Walker:
             obj = Identifier(stmt.function.function.token, passed_object)
             object_path = self.walk_designator(obj, "arg", ln, context="arg")
         else:
-            sym = self.scope.resolve(name, context=f"call @{ln}")
+            # an undeclared CALL target is an external procedure with an
+            # implicit interface (e.g. LAPACK's dgbsv); `implicit none`
+            # does not apply to it
+            sym = self.scope.lookup(name) or Symbol(
+                name, SymbolKind.EXTERNAL, Origin.EXTERNAL
+            )
             if sym.kind not in (
                 SymbolKind.PROCEDURE,
                 SymbolKind.INTRINSIC,

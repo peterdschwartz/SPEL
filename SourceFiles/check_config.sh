@@ -42,6 +42,4 @@ else
 fi
 
 
-cd $BUILD_DIR
-make
-cd -
+make -C "$BUILD_DIR"

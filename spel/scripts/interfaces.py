@@ -220,7 +220,7 @@ def get_interface_procedures(iname: str) -> list[str]:
 
 
 def _find_interface_procedures(iname: str) -> list[str]:
-    cmd = f'grep -rin --exclude-dir={ELM_SRC}/external_models/ -E "^[[:space:]]+(interface {iname})" {ELM_SRC}*'
+    cmd = f'grep -rin --exclude-dir=external_models -E "^[[:space:]]+(interface {iname})" {ELM_SRC}*'
     output = sp.getoutput(cmd)
 
     # Get file and line number for interface

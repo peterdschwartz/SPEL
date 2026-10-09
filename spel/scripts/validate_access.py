@@ -356,12 +356,20 @@ def format_report(report: AccessReport) -> str:
 
 
 def constants_file_for(inputs_fn: Path) -> Optional[Path]:
-    """spel-inputsNNNN.nc -> sibling spel-constantsNNNN.nc, if it exists"""
+    """
+    spel-inputsNNNN.nc -> sibling spel-constantsNNNN.nc, else the latest
+    earlier spel-constants file (constants are captured once, on the first set)
+    """
     inputs_fn = Path(inputs_fn)
     if "spel-inputs" not in inputs_fn.name:
         return None
     candidate = inputs_fn.with_name(inputs_fn.name.replace("spel-inputs", "spel-constants"))
-    return candidate if candidate.exists() else None
+    if candidate.exists():
+        return candidate
+    earlier = [
+        f for f in inputs_fn.parent.glob("spel-constants*.nc") if f.name < candidate.name
+    ]
+    return max(earlier, default=None)
 
 
 def run_validation(
@@ -402,3 +410,63 @@ def case_dir_for(case: str) -> Path:
 
     path = Path(case)
     return path if path.is_dir() else Path(unittests_dir) / case
+
+
+regex_capture_file = re.compile(r"^spel-outputs(\d+)\.nc$")
+
+
+@dataclass
+class CaseFiles:
+    num: str
+    inputs: Path  # ELM pre-call state
+    ref: Path  # ELM post-call state
+    fut: Optional[Path]  # unit-test post-call state (None if missing)
+
+
+def case_files(data_dir: Path) -> list[CaseFiles]:
+    """spel-outputsNNNN.nc with the matching spel-inputs / fut-outputs files."""
+    found = []
+    for ref in sorted(Path(data_dir).glob("spel-outputs*.nc")):
+        m = regex_capture_file.match(ref.name)
+        if not m:
+            continue
+        num = m.group(1)
+        inputs = ref.with_name(f"spel-inputs{num}.nc")
+        if not inputs.exists():
+            continue
+        fut = ref.with_name(f"fut-outputs{num}.nc")
+        found.append(CaseFiles(num, inputs, ref, fut if fut.exists() else None))
+    return found
+
+
+def validate_case(case_dir: Path, data_dir: Path, ostream=None) -> int:
+    """
+    After `spel run`: for every captured file set
+      * bit-for-bit: unit-test outputs (fut-outputs) vs ELM's (spel-outputs)
+      * static analysis: ELM's inputs vs outputs against spel_access.json
+    Returns 1 if anything failed (diffs, changed inputs, missing outputs), else 0.
+    """
+    from spel.scripts.relerror import find_diffs
+
+    ostream = ostream or sys.stdout
+    files = case_files(data_dir)
+    if not files:
+        ostream.write(f"FAIL: no spel-inputs/spel-outputs pairs in {data_dir}\n")
+        return 1
+    failures: list[str] = []
+    for f in files:
+        ostream.write(f"\n=== {f.ref.name} ===\n")
+        if f.fut is None:
+            failures.append(f"{f.ref.name}: no fut-outputs{f.num}.nc")
+        elif ndiffs := find_diffs(refn=str(f.ref), compfn=str(f.fut), ostream=ostream):
+            failures.append(f"{f.fut.name}: {ndiffs} variable(s) differ from {f.ref.name}")
+        if run_validation(f.inputs, f.ref, case_dir, ostream=ostream):
+            failures.append(f"{f.inputs.name}: static analysis violations")
+    ostream.write("\n")
+    for msg in failures:
+        ostream.write(f"FAIL: {msg}\n")
+    if not failures:
+        ostream.write(f"PASS: {len(files)} file set(s) bit-for-bit, access analysis consistent\n")
+    if ostream in (sys.stdout, sys.stderr):
+        ostream.flush()
+    return 1 if failures else 0

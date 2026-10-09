@@ -470,7 +470,9 @@ def create_nc_def(
             )
 
         if var.dim > 0 or nc_type == "nf90_char":
-            var_lines.append(f"{tabs}dim_names(1:{var.dim}) = " f"{dim_names_str}\n")
+            # character scalars have one dimension: the string length
+            ndim = 1 if nc_type == "nf90_char" else var.dim
+            var_lines.append(f"{tabs}dim_names(1:{ndim}) = " f"{dim_names_str}\n")
 
         var_lines.append(f"{tabs}{stmt}")
 
@@ -813,6 +815,26 @@ def generate_nc_io():
 def gen_spel_type_routines() -> str:
     tabs = hio.indent(Tab.reset)
     return textwrap.dedent(f"""
+    subroutine spel_io_init(path,read_io,max_tpf)
+    {tabs}! Initialize io_constants/io_inputs/io_outputs (no-op if already done).
+    {tabs}! Reading (offline unit test): outputs go to 'fut-outputs'.
+    {tabs}! Writing (instrumented ELM):  outputs go to 'spel-outputs'.
+    {tabs}character(len=*), intent(in) :: path
+    {tabs}logical, intent(in) :: read_io
+    {tabs}integer, intent(in), optional :: max_tpf
+    {tabs}integer :: tpf
+    {tabs}if(io_constants%created) return
+    {tabs}tpf = 720
+    {tabs}if(present(max_tpf)) tpf = max_tpf
+    {tabs}call io_constants%init(base_fn=trim(path)//'spel-constants',max_tpf=tpf,read_io=read_io)
+    {tabs}call io_inputs%init(base_fn=trim(path)//'spel-inputs',max_tpf=tpf,read_io=read_io)
+    {tabs}if(read_io) then
+    {tabs}{tabs}call io_outputs%init(base_fn=trim(path)//'fut-outputs',max_tpf=tpf,read_io=.false.)
+    {tabs}else
+    {tabs}{tabs}call io_outputs%init(base_fn=trim(path)//'spel-outputs',max_tpf=tpf,read_io=.false.)
+    {tabs}end if
+    end subroutine spel_io_init
+
     subroutine init(this,base_fn,max_tpf,read_io)
     {tabs}class(spel_io_type), intent(inout) :: this
     {tabs}character(len=*), intent(in) :: base_fn
@@ -950,7 +972,9 @@ def gen_read_str() -> str:
     {tabs}   allocate(character(strlen) :: buf); 
     {tabs}   call check(nf90_get_var(ncid, var_id, buf))
     {tabs}   var = ""
-    {tabs}   do i=1, strlen 
+    {tabs}   ! netCDF pads with NULs, which trim() keeps; stop at the first one
+    {tabs}   do i=1, min(strlen, len(var))
+    {tabs}      if (buf(i:i) == achar(0)) exit
     {tabs}      var(i:i) = buf(i:i)
     {tabs}   end do
     {tabs}end subroutine

@@ -12,7 +12,10 @@ database_csv =  database_app / "app/management/commands/csv/"
 presets = database_app / "app/management/comands/presets/"
 unittests_dir = spel_dir / "unit-tests/"
 spel_mods_dir = spel_dir / "SourceFiles/"
-spel_output_dir = spel_dir / "script-output/"
+# Scratch dir for generated files; `spel validate` gives each parallel
+# `spel create` its own (create wipes *.F90 here).
+spel_output_dir = Path(os.environ.get("SPEL_OUTPUT_DIR", spel_dir / "script-output"))
+spel_output_dir.mkdir(parents=True, exist_ok=True)
 input_data_dir = unittests_dir / "input-data/"
 
 # Name of the file (written into each unit-test case directory) that records
@@ -39,6 +42,15 @@ E3SM_SRCROOT = Path(
 # path for modules shared by components (eg, shr_kind_mod)
 SHR_SRC = E3SM_SRCROOT / "share/util/"
 ELM_SRC = E3SM_SRCROOT / "components/elm/src/"  # elm source directory
+
+# Script that creates/builds/runs the CIME case used to capture reference data
+# (`spel create --instrument --run-case`, `spel instrument --run-case`).
+# Override with SPEL_CASEGEN (env or .spel.env).
+CASEGEN_SCRIPT = Path(
+    os.environ.get(
+        "SPEL_CASEGEN", str(E3SM_SRCROOT.parent / "e3sm-scripts/uELM_casegen.sh")
+    )
+).expanduser()
 
 # List to hold physical property data types that are
 # necessary for domain decomposition, but may not be

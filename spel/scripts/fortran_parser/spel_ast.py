@@ -730,6 +730,58 @@ class DoWhile(Statement):
         }
 
 
+class ElseWhere(Statement):
+    """`elsewhere [(mask)]` branch of a WhereConstruct"""
+
+    def __init__(self, tok: Token, mask: Optional[Expression], body: BlockStatement):
+        self.token = tok
+        self.mask = mask
+        self.body = body
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return super().token_literal()
+
+    def __str__(self):
+        mask = f" {self.mask}" if self.mask is not None else ""
+        return f"elsewhere{mask} {{\n {self.body}}}"
+
+
+class WhereConstruct(Statement):
+    """
+    where (mask) ... [elsewhere [(mask)] ...]... end where
+    A WHERE statement (`where (mask) assignment`) has a one-statement body.
+    """
+
+    def __init__(
+        self,
+        tok: Token,
+        mask: Expression,
+        body: BlockStatement,
+        elsewheres: Optional[list[ElseWhere]] = None,
+    ):
+        self.token = tok
+        self.mask = mask
+        self.body = body
+        self.elsewheres: list[ElseWhere] = elsewheres or []
+        self.end_ln: int = -1
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return super().token_literal()
+
+    def __str__(self):
+        branches = "".join(f"\n{ew}" for ew in self.elsewheres)
+        return f"where {self.mask} {{\n {self.body}}}{branches}"
+
+    def to_dict(self):
+        return {"Node": "WhereConstruct", "Val": str(self)}
+
+
 class MacroBranch(Statement):
     """`#elif <condition>` or `#else` (condition None) branch of a MacroIf"""
 

@@ -208,18 +208,33 @@ class DerivedType(object):
             line for line in filter(lambda x: regex_field.search(x.line), alloc_lines)
         ]
 
+        regex_var_and_bounds = re.compile(rf"%\s*({fields_str})\s*(\(.+?\))")
         for lpair in var_lines:
-            line = lpair.line.strip()
-            regex_var_and_bounds = re.compile(rf"({fields_str})\s*(\(.+?\))")
+            line = lpair.line.split(";")[0].strip()
             for match in regex_var_and_bounds.finditer(line):
                 varname = match.group(1)
-                bounds = match.group(2)
-                self.components[varname].bounds = bounds[1:-1]
+                bounds = match.group(2)[1:-1]
+                # other types in the module may allocate a same-named field
+                if rank(bounds) == self.components[varname].dim:
+                    self.components[varname].bounds = bounds
 
         for var in self.components.values():
             if not var.bounds and var.dim > 0:
                 var.bounds = var.generate_dim_names()
         return
+
+
+def rank(bounds: str) -> int:
+    """Number of top-level comma separated dimensions in `bounds`."""
+    depth, n = 0, 1
+    for ch in bounds:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            n += 1
+    return n
 
 
 def get_component(

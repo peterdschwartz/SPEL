@@ -13,7 +13,7 @@ use cudafor
 #endif
 use timeInfoMod
 use elm_initializeMod
-use nc_io, only: nc_read_timeslices, io_constants, io_inputs, io_outputs
+use nc_io, only: nc_read_timeslices, spel_io_init, io_constants, io_inputs, io_outputs
 !#USE_START
 
 !=======================================!
@@ -58,9 +58,7 @@ END IF
 
 block 
    !#INPUT_PATH
-   call io_constants%init(base_fn=trim(input_path)//'spel-constants',max_tpf=720,read_io=.true.)
-   call io_inputs%init(base_fn=trim(input_path)//'spel-inputs',max_tpf=720,read_io=.true.)
-   call io_outputs%init(base_fn=trim(input_path)//'fut-outputs',max_tpf=720,read_io=.false.)
+   call spel_io_init(input_path, read_io=.true.)
 end block
 
 call elm_init(nsets, pproc_input, dtime_mod, year_curr, bounds_proc)

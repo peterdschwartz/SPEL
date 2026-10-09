@@ -1,6 +1,7 @@
 import json
 import os
 import pickle
+import shutil
 import sys
 from copy import deepcopy
 from itertools import chain
@@ -37,16 +38,36 @@ def _fut_objects(fut: FunctionalUnitTest):
     )
 
 
-def pickle_unit_test(fut: FunctionalUnitTest) -> None:
-    """Function to serialize an FunctionalUnitTest"""
-    output_path = Path(scripts_dir) / f"fut_{fut.case_name}.pkl"
+CASE_PICKLE = "fut.pkl"
 
+
+def pickle_unit_test(fut: FunctionalUnitTest) -> None:
+    """
+    Serialize a FunctionalUnitTest to spel/scripts/fut_<case>.pkl (export,
+    database) and <case_dir>/fut.pkl (`spel instrument`, survives other creates).
+    """
+    output_path = Path(scripts_dir) / f"fut_{fut.case_name}.pkl"
+    # Case copy first: a concurrent `spel create` may clear scripts_dir/*.pkl
+    if Path(fut.case_dir).is_dir():
+        dump_unit_test(fut, Path(fut.case_dir) / CASE_PICKLE)
+        shutil.copyfile(Path(fut.case_dir) / CASE_PICKLE, output_path)
+    else:
+        dump_unit_test(fut, output_path)
+
+
+def dump_unit_test(fut: FunctionalUnitTest, output_path: Path) -> None:
+    """Pickle `fut` with source paths relative to E3SM_SRCROOT (see _load_pickle)."""
     objects = list(_fut_objects(fut))
     original_paths = [obj.filepath for obj in objects]
 
     try:
         for obj in objects:
-            obj.filepath = obj.filepath.relative_to(E3SM_SRCROOT)
+            path = Path(obj.filepath)
+            # paths outside the source tree (e.g. libraries) stay absolute;
+            # _load_pickle's `E3SM_SRCROOT / path` leaves them unchanged.
+            if path.is_relative_to(E3SM_SRCROOT):
+                path = path.relative_to(E3SM_SRCROOT)
+            obj.filepath = path
 
         with output_path.open("wb") as dbfile:
             pickle.dump(fut, dbfile)
@@ -59,8 +80,15 @@ def unpickle_unit_test(casename: str) -> FunctionalUnitTest:
     """
     Function to load SPEL's output from pickled files.
     """
+    return _load_pickle(Path(scripts_dir) / f"fut_{casename}.pkl")
 
-    input_path = Path(scripts_dir) / f"fut_{casename}.pkl"
+
+def unpickle_case(case_dir: Path) -> FunctionalUnitTest:
+    """Load the FunctionalUnitTest `spel create` stored in a case directory."""
+    return _load_pickle(Path(case_dir) / CASE_PICKLE)
+
+
+def _load_pickle(input_path: Path) -> FunctionalUnitTest:
 
     with input_path.open("rb") as dbfile:
         fut: FunctionalUnitTest = pickle.load(dbfile)

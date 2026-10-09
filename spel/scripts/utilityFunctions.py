@@ -388,7 +388,7 @@ def get_interface_list():
            Unit Test creation
     """
 
-    cmd = f'grep -rin --exclude-dir={ELM_SRC}/external_models/ -E "^[[:space:]]+(interface)" {ELM_SRC}/*'
+    cmd = f'grep -rin --exclude-dir=external_models -E "^[[:space:]]+(interface)" {ELM_SRC}/*'
     output = sp.getoutput(cmd)
     output = output.split("\n")
     interface_list = []

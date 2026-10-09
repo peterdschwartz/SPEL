@@ -1,5 +1,6 @@
 import argparse
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -18,12 +19,81 @@ def create(args):
     from spel.scripts.UnitTestforELM import create_unit_test
 
     with profile_ctx(enabled=True, section="create") as pr:
-        create_unit_test(
+        unit_test = create_unit_test(
             sub_names=args.subs,
             casename=args.case,
             keep=args.keep,
             db_mode=args.db_mode,
+            reanalyze=args.reanalyze,
         )
+    if (args.instrument or args.run_case) and not args.db_mode:
+        from spel.scripts.instrument_elm import instrument_case
+
+        instrument_case(
+            str(unit_test.case_dir),
+            freq=args.freq,
+            run=args.run_case,
+            case_args=shlex.split(args.case_args),
+        )
+        if args.run_case:
+            _run_and_validate(unit_test.case_dir)
+
+
+def analyze(args):
+    from spel.scripts.analysis_cache import build_analysis
+
+    with profile_ctx(enabled=False, section="analyze"):
+        build_analysis()
+
+
+def _run_and_validate(case_dir) -> None:
+    """After --run-case collected ELM's data: `spel run` the unit test + validate."""
+    from spel.scripts.run_fut import run_unit_test
+
+    if code := run_unit_test(case_dir):
+        raise SystemExit(code)
+
+
+def instrument(args):
+    from spel.scripts.instrument_elm import instrument_case, uninstrument_elm
+
+    if args.undo:
+        from spel.scripts.config import E3SM_SRCROOT
+
+        for path in uninstrument_elm(E3SM_SRCROOT):
+            print(f"Removed SPEL capture calls from {path}")
+        return
+    report = instrument_case(
+        args.case,
+        freq=args.freq,
+        run=args.run_case,
+        case_args=shlex.split(args.case_args),
+        dry_run=args.dry_run,
+    )
+    if args.run_case and not args.dry_run:
+        _run_and_validate(report.case_dir)
+
+
+def validate(args):
+    from spel.scripts.validate import parse_request, validate as run_validate
+
+    try:
+        request = parse_request(args.subs, args.list_file)
+    except (ValueError, OSError) as err:
+        raise SystemExit(f"spel validate: error: {err}")
+    report = run_validate(
+        request,
+        jobs=args.jobs,
+        freq=args.freq,
+        case_args=shlex.split(args.case_args),
+        run_name=args.run_name,
+        reanalyze=args.reanalyze,
+        skip_create=args.skip_create,
+        keep_instrumentation=args.keep_instrumentation,
+        dry_run=args.dry_run,
+    )
+    if not report.ok and not args.dry_run:
+        raise SystemExit(1)
 
 
 def export(args):
@@ -40,8 +110,9 @@ def diff(args):
         raise SystemExit("spel diff: give --test and/or --inputs")
     if args.inputs and not args.case:
         raise SystemExit("spel diff: --inputs requires --case")
-    if args.test:
-        find_diffs(refn=args.ref, compfn=args.test, var=args.var)
+    code = 0
+    if args.test and find_diffs(refn=args.ref, compfn=args.test, var=args.var):
+        code = 1
     if args.inputs:
         # the reference is the post-call state of the model itself
         code = run_validation(
@@ -49,10 +120,9 @@ def diff(args):
             outputs_fn=args.ref,
             case_dir=case_dir_for(args.case),
             constants_fn=args.constants,
-        )
-        if code:
-            raise SystemExit(code)
-    return
+        ) or code
+    if code:
+        raise SystemExit(code)
 
 
 def sample_training(args):
@@ -76,17 +146,18 @@ def _train(args):
 
 
 def run(args):
+    from spel.scripts.run_fut import run_unit_test
+
     if args.case:
-        unit_test = f"{SPEL_ROOT}/unit-tests/{args.case}"
+        case_dir = Path(f"{SPEL_ROOT}/unit-tests/{args.case}")
     else:
         # assume cwd
-        unit_test = "."
-
-    # Run config check
-    subprocess.run(["./check_config.sh"], check=True, cwd=unit_test)
-
-    # Run the test executable with extra args
-    subprocess.run(["./build/elmtest", *args.exe_args], check=True, cwd=unit_test)
+        case_dir = Path.cwd()
+    # REMAINDER swallows options given after the case name
+    exe_args = [a for a in args.exe_args if a != "--no-diff"]
+    validate = not args.no_diff and "--no-diff" not in args.exe_args
+    if code := run_unit_test(case_dir, exe_args, validate=validate):
+        raise SystemExit(code)
 
 
 def repl(args):
@@ -161,6 +232,29 @@ def config(args):
     """))
 
 
+def add_capture_args(parser: argparse.ArgumentParser, standalone: bool) -> None:
+    if not standalone:
+        parser.add_argument(
+            "--instrument",
+            action="store_true",
+            help="Instrument ELM's call site and copy the IO modules into elm/src/main",
+        )
+    parser.add_argument(
+        "--run-case",
+        action="store_true",
+        help="Create/build/run the CIME case (casegen script) and copy spel-*.nc "
+        "into unit-tests/input-data/<case>" + ("" if standalone else " (implies --instrument)"),
+    )
+    parser.add_argument(
+        "--freq", type=int, default=9, help="Capture every N model steps (default: 9)"
+    )
+    parser.add_argument(
+        "--case-args",
+        default="",
+        help="Extra casegen script options, e.g. \"--stop-n 10 --stop-option ndays --keep\"",
+    )
+
+
 def main():
     desc = (
         "spel create: "
@@ -205,7 +299,81 @@ def main():
         action="store_true",
         help="Don't make Unit Test",
     )
+    create_parser.add_argument(
+        "--reanalyze",
+        action="store_true",
+        help="Rebuild the cached elm_drv analysis first (e.g. after switching "
+        "E3SM/SPEL branches or editing ELM); otherwise it is reused",
+    )
+    add_capture_args(create_parser, standalone=False)
     create_parser.set_defaults(func=create)
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="(Re)build the cached elm_drv analysis that `spel create` extracts from",
+    )
+    analyze_parser.set_defaults(func=analyze)
+
+    # Parser for 'spel instrument'
+    instrument_parser = subparsers.add_parser(
+        "instrument",
+        help="Instrument ELM to dump reference data for a unit-test case",
+    )
+    instrument_parser.add_argument(
+        "case", nargs="?", default="fut",
+        help="unit-test case (name or path); uses the analysis `spel create` saved in <case>/fut.pkl",
+    )
+    instrument_parser.add_argument(
+        "--dry-run", action="store_true", help="Report what would change"
+    )
+    instrument_parser.add_argument(
+        "--undo", action="store_true", help="Remove SPEL capture calls from ELM"
+    )
+    add_capture_args(instrument_parser, standalone=True)
+    instrument_parser.set_defaults(func=instrument)
+
+    validate_parser = subparsers.add_parser(
+        "validate",
+        help="Create unit tests for many routines, capture their reference data "
+        "with one instrumented ELM run, then run and validate them all",
+    )
+    validate_parser.add_argument(
+        "-s", nargs="+", dest="subs", default=[],
+        help="routines to test, one case each (named after the routine)",
+    )
+    validate_parser.add_argument(
+        "--list", dest="list_file", type=Path,
+        help="file with one case per line: `case: sub1 sub2` or `sub` (# comments)",
+    )
+    validate_parser.add_argument(
+        "-j", "--jobs", type=int, default=4,
+        help="parallel `spel create`/`spel run` processes (default: 4)",
+    )
+    validate_parser.add_argument(
+        "--run-name", default="spel-validate", help="CIME case name (default: spel-validate)"
+    )
+    validate_parser.add_argument(
+        "--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first"
+    )
+    validate_parser.add_argument(
+        "--skip-create", action="store_true", help="reuse existing unit-test cases"
+    )
+    validate_parser.add_argument(
+        "--keep-instrumentation", action="store_true",
+        help="leave the capture calls and IO modules in ELM after the run",
+    )
+    validate_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="create the cases and report the instrumentation, but don't change ELM",
+    )
+    validate_parser.add_argument(
+        "--freq", type=int, default=9, help="Capture every N model steps (default: 9)"
+    )
+    validate_parser.add_argument(
+        "--case-args", default="",
+        help="Extra casegen script options, e.g. \"--stop-n 10 --stop-option ndays\"",
+    )
+    validate_parser.set_defaults(func=validate)
 
     # Parser for 'spel export'
     export_parser = subparsers.add_parser("export", help="Run the export command")
@@ -265,7 +433,15 @@ def main():
     diff_parser.set_defaults(func=diff)
 
     # Parser for 'spel run'
-    run_parser = subparsers.add_parser("run", help="compile and run FUT")
+    run_parser = subparsers.add_parser(
+        "run",
+        help="compile and run FUT, then diff against ELM's outputs and validate the access analysis",
+    )
+    run_parser.add_argument(
+        "--no-diff",
+        action="store_true",
+        help="skip the bit-for-bit diff and access validation",
+    )
     run_parser.add_argument("case", nargs="?", help="Unit test executable name")
     # run_parser.add_argument("-c", required=False, dest="case", help="FUT name")
     run_parser.add_argument(
@@ -353,7 +529,14 @@ def main():
     restore_parser.set_defaults(func=restore)
 
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except Exception as err:
+        from spel.scripts.instrument_elm import InstrumentError
+
+        if isinstance(err, InstrumentError):
+            parser.exit(1, f"spel {args.command}: error: {err}\n")
+        raise
 
 
 if __name__ == "__main__":

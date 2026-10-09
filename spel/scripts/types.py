@@ -55,6 +55,9 @@ class RoutineFrame:
     name: str
     contains_ln: Optional[int] = None
     cpp_contains_ln: Optional[int] = None
+    # locals of an unavailable type, banned only until the routine ends
+    bad_locals: set[str] = field(default_factory=set)
+    dummy_args: set[str] = field(default_factory=set)
 
 
 class ArgUsage(Enum):
@@ -979,14 +982,21 @@ class NameList:
 
 class Precedence(Enum):
     _ = 0
+    # Fortran operator precedence, lowest to highest
     LOWEST = 1
-    EQUALS = 2
-    LESSGREATER = 3
-    SUM = 4
-    PRODUCT = 5
-    PREFIX = 6
-    BOUNDS = 7
-    CALL = 8
+    ASSIGN = 2
+    OR = 3
+    AND = 4
+    NOT = 5
+    EQUALS = 6
+    LESSGREATER = 7
+    CONCAT = 8
+    SUM = 9
+    PRODUCT = 10
+    EXP = 11
+    PREFIX = 12
+    BOUNDS = 13
+    CALL = 14
 
 
 @dataclass

@@ -234,24 +234,42 @@ class AccessMapper:
         self,
         sub_dict: dict[str, Subroutine],
         scopes: Optional[ModuleScopes] = None,
+        failures: Optional[dict[str, str]] = None,
     ):
+        """
+        failures: if given, a routine that fails to walk/map is recorded there
+        (and maps to None, like an unknown callee) instead of raising.
+        """
         self.sub_dict = sub_dict
         self.scopes = scopes
+        self.failures = failures
         self._in_progress: set[str] = set()
 
     def maps(self, sub: Subroutine) -> Optional[AccessMaps]:
-        """None while `sub` is being mapped (recursive call)."""
+        """None while `sub` is being mapped (recursive call), or if it failed."""
         if sub.record_access is not None:
             return sub.record_access
         if sub.id in self._in_progress:
+            return None
+        if self.failures is not None and sub.id in self.failures:
             return None
         self._in_progress.add(sub.id)
         try:
             rec = sub.walk_syntax_tree(self.scopes)
             sub.record_access = self._build(sub, rec)
+        except (Exception, SystemExit) as err:
+            if self.failures is None:
+                raise
+            self.record_failure(sub, err)
         finally:
             self._in_progress.discard(sub.id)
         return sub.record_access
+
+    def record_failure(self, sub: Subroutine, err: BaseException) -> None:
+        assert self.failures is not None
+        self.failures[sub.id] = f"{type(err).__name__}: {err}"
+        sub.record_access = None
+        sub.logger.error(f"Analysis failed for {sub.id}: {self.failures[sub.id]}")
 
     def _build(self, sub: Subroutine, rec: SubroutineRecord) -> AccessMaps:
         lines = {lt.ln: lt for lt in sub.sub_lines}
