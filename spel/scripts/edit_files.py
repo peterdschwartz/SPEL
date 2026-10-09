@@ -269,9 +269,6 @@ def set_in_subroutine(state: ParseState, logger: Logger):
     start_ln = state.curr_line.ln
 
     subname = full_line.split()[1].split("(")[0].strip()
-    if "_oacc" in subname:
-        logger.info(f"{func_name} skipping {subname}")
-        return
 
     cpp_ln = ct if state.cpp_file else None
     sub_start: Optional[SubStart] = SubStart(
