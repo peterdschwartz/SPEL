@@ -4,7 +4,6 @@ use shr_kind_mod, only: r8 => shr_kind_r8
 use UpdateParamsAccMod, only: update_params_acc
 use elm_varctl
 use filterMod
-!!use decompMod, only: get_clump_bounds_gpu, gpu_clumps, gpu_procinfo, init_proc_clump_info
 use decompMod, only: get_proc_bounds, get_clump_bounds, procinfo, clumps
 use ReadWriteMod, only : write_elmtypes, read_elmtypes
 use decompMod, only: bounds_type
@@ -68,7 +67,6 @@ call elm_init(nsets, pproc_input, dtime_mod, year_curr, bounds_proc)
 declin = -0.4030289369547867
 
 #ifdef _OPENACC
-   call init_proc_clump_info()
    call update_params_acc()
 
    !Note: copy/paste enter data directives here for FUT.

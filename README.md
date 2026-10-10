@@ -297,8 +297,27 @@ spel run canflux 4 2        # 4 clump sets, 2 sites per clump
 cd unit-tests/canflux && spel run
 ```
 
-Compiler, debug, and GPU settings live in the case's `check_config.sh`; it detects a mismatch
-with the existing `CMakeCache.txt` and offers to reconfigure.
+Compiler, debug, and OpenACC settings live in the case's `check_config.sh` (`compiler`, `debug`,
+`acc`); it detects a mismatch with the existing `CMakeCache.txt` and offers to reconfigure. The
+environment variables `SPEL_FC`, `SPEL_DBG` and `SPEL_ACC` override them without editing the script.
+
+`acc` sets the generated CMake's `ACC` cache option:
+
+| `ACC` | Flags | Notes |
+|-------|-------|-------|
+| `OFF` (default) | none | `!$acc` directives are comments |
+| `MULTICORE` | nvfortran: `-acc=multicore -Minfo=accel` | compute regions run on host threads; set the count with `ACC_NUM_CORES` (default: all cores). gfortran only gets `-fopenacc -foffload=disable` and a warning: GCC has no multicore target, so regions run on one thread |
+| `GPU` | nvfortran: `-acc=gpu -gpu=deepcopy -Minfo=accel -cuda` | needs nvfortran (`-DGPU=ON` still works as an alias) |
+
+```bash
+# nvfortran needs its own netcdf-fortran build (.mod files are compiler specific) on
+# PKG_CONFIG_PATH and ahead of any gfortran build on LD_LIBRARY_PATH
+SPEL_FC=nvfortran SPEL_ACC=MULTICORE SPEL_DBG=OFF spel run canflux
+ACC_NUM_CORES=4 ./build/elmtest   # rerun with 4 threads
+```
+
+Comparing `ACC=OFF` and `ACC=MULTICORE` outputs (including `ACC_NUM_CORES=1` vs all cores) catches
+missing `private`/`reduction` clauses and races without a GPU.
 
 ### `spel diff`
 
