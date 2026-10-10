@@ -53,7 +53,7 @@ ELM_SRC = E3SM_SRCROOT / "components/elm/src/"  # elm source directory
 # Override with SPEL_CASEGEN (env or .spel.env).
 CASEGEN_SCRIPT = Path(
     os.environ.get(
-        "SPEL_CASEGEN", str(E3SM_SRCROOT.parent / "e3sm-scripts/uELM_casegen.sh")
+        "SPEL_CASEGEN", str(spel_dir / "e3sm_casegen.sh")
     )
 ).expanduser()
 

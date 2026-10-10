@@ -217,7 +217,7 @@ spel instrument --undo
 ```
 
 `--run-case` calls the casegen script (`$SPEL_CASEGEN`, default
-`<E3SM_SRCROOT>/../e3sm-scripts/uELM_casegen.sh`) with `--case <case> --srcroot ... --build --submit`
+`e3sm_casegen.sh` in the SPEL repo) with `--case <case> --srcroot ... --build --submit`
 plus `--case-args`. The script must print `CASEDIR=<path>`. The `<tag>.spel-*.nc` files in the case's
 RUNDIR are then copied to `unit-tests/input-data/<case>` as `spel-*.nc`. **This overwrites any existing reference data there.**
 Finally the unit test is built, run, and validated as by [`spel run`](#spel-run); a failed validation
