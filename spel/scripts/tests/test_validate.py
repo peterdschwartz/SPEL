@@ -124,8 +124,10 @@ def test_validate_flow(env):
     assert not report.ok
     data = ut / "input-data/a"
     assert sorted(p.name for p in data.iterdir()) == [
-        "lnd_in", "spel-constants0001.nc", "spel-inputs0001.nc", "spel-outputs0001.nc"
+        "lnd_in", "spel-constants0001.nc", "spel-inputs0001.nc", "spel-outputs0001.nc",
+        "spel_reference.json",
     ]
+    assert "e3sm_srcroot" in json.loads((data / "spel_reference.json").read_text())
     saved = json.loads((ut / v.REPORT_FILE).read_text())
     assert saved["cases"]["b"]["status"] == v.NOT_CALLED
     assert saved["lnd_in"].endswith("lnd_in")

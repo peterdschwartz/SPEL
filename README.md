@@ -40,17 +40,42 @@ This installs the `spel` console script (`[project.scripts]` → `spel.cli:main`
 
 ### Pointing SPEL at E3SM
 
-SPEL needs to know where your E3SM clone lives. Edit `spel/scripts/config.py`:
+SPEL needs to know where your E3SM clone lives. The default comes from `SPEL_E3SM_SRCROOT`
+(environment or the untracked `.spel.env`), falling back to a `dev_E3SM` checkout next to the
+SPEL repo. Set it with:
 
-```python
-E3SM_SRCROOT = spel_dir / "../E3SM"   # relative to the SPEL repo root
+```bash
+spel config --set-srcroot /path/to/E3SM
 ```
 
-Everything else (`ELM_SRC`, `SHR_SRC`) is derived from it. Verify with:
+Every command also takes `--srcroot DIR`, which overrides it for that one command (child processes
+such as `spel validate`'s `spel create`s inherit it). Everything else (`ELM_SRC`, `SHR_SRC`, the
+analysis cache) is derived from it. Verify with:
 
 ```bash
 spel config
 ```
+
+### Comparing a development branch against a reference branch
+
+Each E3SM checkout gets its own `elm_drv` analysis cache, so two checkouts can be used side by
+side without `--reanalyze`. Use the same case name (`-c`) for both:
+
+```bash
+# 1. reference data from the reference checkout (instruments it, runs ELM, then runs/validates the test)
+spel create -s canopyfluxes -c canflux --run-case --srcroot ~/E3SM
+# 2. the same unit test generated from the development checkout
+spel create -s canopyfluxes -c canflux --srcroot ~/dev_E3SM
+# 3. build/run it on the reference data and diff against the reference outputs
+spel run canflux
+```
+
+Step 2 regenerates `unit-tests/canflux/` but leaves `unit-tests/input-data/canflux/` (the
+reference data) alone. `spel run` prints which checkout generated the unit test and which one
+produced the data (recorded in `input-data/<case>/spel_reference.json`), and notes when they
+differ. Then the diffs are the answer differences between the branches. The access check uses the
+development branch's analysis. The development unit test can only read the reference data if both
+branches use the same variables (derived-type components) as inputs.
 
 ### Directory layout
 
@@ -92,7 +117,8 @@ All commands are subcommands of `spel`. Run `spel <command> --help` for the auth
 ### `spel analyze`
 
 Parses and analyzes the whole call tree under `elm_driver::elm_drv` once, and caches it in
-`unit-tests/.spel-cache/elm_drv/`:
+`unit-tests/.spel-cache/<srcroot name>-<hash>/elm_drv/` (one cache per E3SM checkout; `spel config`
+lists them):
 
 - `analysis.pkl` — the pickled analysis (every module, subroutine, type, access map, call tree)
 - `src/` — the edited ELM sources
@@ -137,6 +163,7 @@ spel create -s <subroutine> [<subroutine> ...] [-c <casename>] [-u] [--db]
 | `-u` | no | off | Re-use the existing case directory instead of wiping and re-preprocessing it |
 | `--db` | no | off | Database mode: run the analysis and pickle it, but **do not** emit Fortran unit-test files |
 | `--reanalyze` | no | off | Rebuild the cached `elm_drv` analysis first (same as `spel analyze`) |
+| `--srcroot DIR` | no | `SPEL_E3SM_SRCROOT` | E3SM checkout to analyze/generate from (and to instrument/run with `--run-case`); any command accepts it |
 | `--instrument` | no | off | Afterwards run [`spel instrument`](#spel-instrument) for the case |
 | `--run-case` | no | off | Also create/build/run the CIME case, collect its `spel-*.nc`, then [`spel run`](#spel-run) the unit test (implies `--instrument`) |
 | `--freq`, `--case-args` | no | `9`, `""` | See [`spel instrument`](#spel-instrument) |
@@ -305,13 +332,18 @@ call bindings, and propagated access.
 
 ### `spel config`
 
-Prints the resolved source roots so you can confirm your `config.py` edit took effect.
+Prints the resolved source roots and analysis cache, and lists the cache of every checkout.
 
 ```bash
-spel config
+spel config                      # or: spel config --srcroot /other/E3SM
 # E3SM SRCROOT: /path/to/E3SM
 # ELM SRC     : /path/to/E3SM/components/elm/src
 # SHR SRC     : /path/to/E3SM/share/util
+# Cache       : .../unit-tests/.spel-cache/E3SM-2e665a5f/elm_drv
+# ...
+# elm_drv analysis caches:
+#   /path/to/E3SM  master@34d78535b7  built 2026-10-10T17:40:12  -> E3SM-2e665a5f
+spel config --set-srcroot /path/to/E3SM   # persist the default in .spel.env
 ```
 
 ### `spel upload`

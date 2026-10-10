@@ -10,7 +10,10 @@ the requested routines and redoes the root-dependent steps (bindings to
 elm_drv's actuals, active variables, generated files), unless the user asks
 for a re-analysis (e.g. after switching E3SM or SPEL branches).
 
-    <unittests_dir>/.spel-cache/elm_drv/
+Each E3SM checkout (E3SM_SRCROOT, `--srcroot`) has its own cache, so a
+reference checkout and a development checkout can be used side by side:
+
+    <unittests_dir>/.spel-cache/<srcroot name>-<hash of its path>/elm_drv/
         analysis.pkl   FunctionalUnitTest of the whole elm_drv analysis
         meta.json      SPEL / E3SM commits it was built from
         src/           edited module sources
@@ -18,6 +21,7 @@ for a re-analysis (e.g. after switching E3SM or SPEL branches).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -62,8 +66,54 @@ DRIVER_ID = f"{DRIVER_MODULE}::{DRIVER_ROUTINE}"
 SPEL_ROOT = Path(__file__).resolve().parents[2]
 
 
-def cache_dir() -> Path:
-    return Path(unittests_dir) / ".spel-cache" / DRIVER_ROUTINE
+def cache_root() -> Path:
+    return Path(unittests_dir) / ".spel-cache"
+
+
+def cache_key(srcroot: Path) -> str:
+    """Readable and unique per checkout: <dir name>-<8 hex digits of its path>."""
+    root = Path(srcroot).expanduser().resolve()
+    return f"{root.name}-{hashlib.sha1(str(root).encode()).hexdigest()[:8]}"
+
+
+def cache_dir(srcroot: Optional[Path] = None) -> Path:
+    return cache_root() / cache_key(srcroot or E3SM_SRCROOT) / DRIVER_ROUTINE
+
+
+def legacy_cache_dir() -> Path:
+    """Where the single, srcroot-independent cache used to live."""
+    return cache_root() / DRIVER_ROUTINE
+
+
+def migrate_legacy_cache(logger: Optional[logging.Logger] = None) -> bool:
+    """Move a pre-per-srcroot cache to cache_dir() if it was built from E3SM_SRCROOT."""
+    old, new = legacy_cache_dir(), cache_dir()
+    meta_path = old / META_FILE
+    if new.exists() or not meta_path.is_file():
+        return False
+    try:
+        saved = json.loads(meta_path.read_text()).get("e3sm_srcroot")
+    except (OSError, ValueError):
+        return False
+    if saved is None or Path(saved).resolve() != Path(E3SM_SRCROOT).resolve():
+        return False
+    new.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(old), str(new))
+    if logger:
+        logger.info(f"Moved the elm_drv analysis cache of {E3SM_SRCROOT} to {new}")
+    return True
+
+
+def list_caches() -> list[tuple[Path, dict]]:
+    """(cache dir, meta.json contents) of every per-srcroot cache."""
+    out = []
+    for meta_path in sorted(cache_root().glob(f"*/{DRIVER_ROUTINE}/{META_FILE}")):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            meta = {}
+        out.append((meta_path.parent, meta))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -173,7 +223,7 @@ def build_analysis(logger: Optional[logging.Logger] = None) -> Path:
     src = out / SRC_DIR
     src.mkdir(parents=True)
 
-    logger.info(f"Analyzing {DRIVER_ID} (cache: {out})")
+    logger.info(f"Analyzing {DRIVER_ID} in {E3SM_SRCROOT} (cache: {out})")
     unit_test = FunctionalUnitTest(casedir=src, cfg=cfg.options, logger=logger)
     analyze_unit_test(unit_test, [DRIVER_ID], roots_from=driver_roots)
     if unit_test.subroutine_dict[DRIVER_ID].record_access is None:
@@ -206,6 +256,7 @@ def load_analysis(
     from spel.scripts.export_objects import _load_pickle
 
     logger = logger or get_logger("SPEL", level=logging.INFO)
+    migrate_legacy_cache(logger)
     path = cache_dir() / ANALYSIS_PICKLE
     if reanalyze or not path.is_file():
         build_analysis(logger)

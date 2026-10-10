@@ -22,6 +22,11 @@ input_data_dir = unittests_dir / "input-data/"
 # which E3SM_SRCROOT was used to generate that case. Read by `spel restore`.
 CASE_META_FILENAME = "spel_meta.json"
 
+# Written next to the captured reference data (unit-tests/input-data/<case>)
+# recording the E3SM checkout that produced it, so `spel run` can tell when a
+# unit test generated from one checkout is checked against another's data.
+REFERENCE_META_FILENAME = "spel_reference.json"
+
 # Per-developer overrides (currently just E3SM_SRCROOT) live in this file
 # instead of being hardcoded here, so that pointing SPEL at a different E3SM
 # checkout never shows up as a git diff on this tracked config.py.

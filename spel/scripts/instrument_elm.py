@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -822,6 +823,21 @@ def collect_outputs(rundir: Path, dest: Path, prefix: str = "") -> list[Path]:
     return copied
 
 
+def write_reference_meta(dest: Path, case_name: str) -> Path:
+    """Record which E3SM checkout produced the reference data in dest."""
+    from spel.scripts.analysis_cache import current_meta
+    from spel.scripts.config import REFERENCE_META_FILENAME
+
+    meta = {
+        "case_name": case_name,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+    } | current_meta()
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / REFERENCE_META_FILENAME
+    path.write_text(json.dumps(meta, indent=2) + "\n")
+    return path
+
+
 def instrument_case(
     case: str,
     freq: int = DEFAULT_FREQ,
@@ -855,5 +871,6 @@ def instrument_case(
     copied = collect_outputs(rundir, Path(input_data_dir) / fut.case_name, prefix)
     if not copied:
         raise InstrumentError(f"No {prefix}spel-*.nc files were written to {rundir}")
+    write_reference_meta(copied[0].parent, fut.case_name)
     print(f"Copied {len(copied)} files from {rundir} to {copied[0].parent}")
     return report

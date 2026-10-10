@@ -439,6 +439,43 @@ def case_files(data_dir: Path) -> list[CaseFiles]:
     return found
 
 
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def provenance(case_dir: Path, data_dir: Path) -> list[str]:
+    """
+    Which E3SM checkout the unit test was generated from and which one
+    produced the reference data (they differ when a development branch is
+    checked against a reference branch's data).
+    """
+    from spel.scripts.config import CASE_META_FILENAME, REFERENCE_META_FILENAME
+
+    test_root = _read_json(Path(case_dir) / CASE_META_FILENAME).get("e3sm_srcroot")
+    ref = _read_json(Path(data_dir) / REFERENCE_META_FILENAME)
+    lines = [f"Unit test generated from: {test_root or '(not recorded)'}"]
+    if ref:
+        e3sm = ref.get("e3sm") or {}
+        commit = (e3sm.get("commit") or "?")[:10]
+        lines.append(
+            f"Reference data from:      {ref.get('e3sm_srcroot')} "
+            f"({e3sm.get('branch')}@{commit}, captured {ref.get('captured_at')})"
+        )
+        if test_root and ref.get("e3sm_srcroot") and (
+            Path(test_root).resolve() != Path(ref["e3sm_srcroot"]).resolve()
+        ):
+            lines.append(
+                "NOTE: different E3SM checkouts -- diffs are differences between "
+                "the two branches, and the access check uses this unit test's analysis"
+            )
+    else:
+        lines.append(f"Reference data from:      {data_dir} (origin not recorded)")
+    return lines
+
+
 def validate_case(case_dir: Path, data_dir: Path, ostream=None) -> int:
     """
     After `spel run`: for every captured file set
@@ -449,6 +486,8 @@ def validate_case(case_dir: Path, data_dir: Path, ostream=None) -> int:
     from spel.scripts.relerror import find_diffs
 
     ostream = ostream or sys.stdout
+    for line in provenance(case_dir, data_dir):
+        ostream.write(line + "\n")
     files = case_files(data_dir)
     if not files:
         ostream.write(f"FAIL: no spel-inputs/spel-outputs pairs in {data_dir}\n")

@@ -38,6 +38,7 @@ from spel.scripts.instrument_elm import (
     resubmit_case,
     run_case,
     uninstrument_elm,
+    write_reference_meta,
 )
 
 REPORT_FILE = "validate-report.json"
@@ -306,6 +307,8 @@ def validate(
             for old in dest.glob("spel-*.nc"):
                 old.unlink()
             copied = collect_outputs(rundir, dest, CaptureNames(rep.tag).file_prefix)
+            if copied:
+                write_reference_meta(dest, case)
             r = report.cases[case]
             r.files = len(copied)
             if lnd_in.is_file():
