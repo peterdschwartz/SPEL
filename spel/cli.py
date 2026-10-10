@@ -61,13 +61,12 @@ def _run_and_validate(case_dir) -> None:
 
 
 def instrument(args):
-    from spel.scripts.instrument_elm import instrument_case, uninstrument_elm
+    from spel.scripts.instrument_elm import instrument_case, undo_instrumentation
 
     if args.undo:
         from spel.scripts.config import E3SM_SRCROOT
 
-        for path in uninstrument_elm(E3SM_SRCROOT):
-            print(f"Removed SPEL capture calls from {path}")
+        undo_instrumentation(E3SM_SRCROOT)
         return
     report = instrument_case(
         args.case,
@@ -355,7 +354,7 @@ def main():
         "--dry-run", action="store_true", help="Report what would change"
     )
     instrument_parser.add_argument(
-        "--undo", action="store_true", help="Remove SPEL capture calls from ELM"
+        "--undo", action="store_true", help="Remove SPEL capture calls from ELM and revert its public/unprotected edits"
     )
     add_capture_args(instrument_parser, standalone=True)
     instrument_parser.set_defaults(func=instrument)

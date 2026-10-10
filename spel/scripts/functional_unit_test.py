@@ -98,6 +98,7 @@ class FunctionalUnitTest:
         self.driver_sites: Optional[DriverSites] = None
         # elm_drv's actual -> dummy bindings at the roots' call sites
         self.driver_bindings: list[ArgBinding] = []
+        self.filter_builder_calls: list[str] = []
         # modules of the unit test, in dependency (compile) order
         self.ordered_mods: list[str] = []
         # roots whose call tree failed to analyze -> error (cached elm_drv analysis)
@@ -483,6 +484,28 @@ class FunctionalUnitTest:
             calls.append(f"call {sub.name}({', '.join(args)})\n")
         return MainAdditions(calls=calls, modules=mods, variables=decls)
 
+    def _filter_builder_calls(
+        self, instance_to_type: InstToDTypeMap
+    ) -> tuple[list[str], list[str]]:
+        """
+        elm_drv's calls to the filterMod routines that set filter members the
+        selected routines use (see analysis_cache.filter_builders), verbatim:
+        main.F90 also names its clump bounds `bounds_clump` and the filters
+        `filter`. Returns the calls and their use statements.
+        """
+        calls: list[str] = []
+        mods: list[str] = []
+        for text in getattr(self, "filter_builder_calls", []):
+            name = re.match(r"\s*call\s+(\w+)", text, re.IGNORECASE).group(1)
+            calls.append(f"{text}\n")
+            mods.append(f"use filterMod, only : {name}\n")
+            for base in dict.fromkeys(re.findall(r"\b(\w+)\s*%", text)):
+                if base in instance_to_type:
+                    inst = self.type_dict[instance_to_type[base]].instances[base]
+                    inst.active = True
+                    mods.append(f"use {inst.declaration}, only : {base}\n")
+        return calls, mods
+
     def prepare_main(
         self,
         instance_to_type: InstToDTypeMap | None = None,
@@ -511,6 +534,14 @@ class FunctionalUnitTest:
                 num_filters,
             )
         modules_to_add.extend(additions.modules)
+
+        builder_calls, builder_mods = self._filter_builder_calls(instance_to_type)
+        # insert_at_token(reversed(...)) below emits the calls last-to-first,
+        # so the builders, which must run first, go at the end
+        adjusted_calls = [
+            c if c.endswith("\n") else f"{c}\n" for c in list(adjusted_calls) + builder_calls
+        ]
+        modules_to_add.extend(m for m in builder_mods if m not in modules_to_add)
 
         lines = insert_at_token(lines, "!#USE_START", modules_to_add)
         lines = insert_at_token(lines, "!#VAR_DECL", adjusted_vars)

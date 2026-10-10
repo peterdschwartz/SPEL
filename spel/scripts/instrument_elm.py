@@ -49,6 +49,10 @@ SHARED_IO_MODULES = ("nc_io.F90", "nc_allocMod.F90")
 # Per-case modules; renamed <Module>_<tag> in ELM.
 CASE_IO_MODULES = ("ReadWriteMod.F90", "FUTConstantsMod.F90")
 MANIFEST = "spel_instrument.json"
+# Original text of every line the accessibility edits changed (relative to
+# srcroot, 0-based line of the uninstrumented file), so `--undo` can revert
+# them. Lives next to the copied IO modules in components/elm/src/main.
+ACCESS_LEDGER = ".spel-access-edits.json"
 DEFAULT_FREQ = 9
 DEFAULT_MAX_TPF = 720
 
@@ -265,6 +269,86 @@ def _remove_from_access_stmt(lines: list[str], start: int, name: str) -> bool:
             lines[i] = new + line[len(code) :]
         return True
     return False
+
+
+def access_ledger_path(srcroot: Path) -> Path:
+    return Path(srcroot) / "components/elm/src/main" / ACCESS_LEDGER
+
+
+def load_access_ledger(srcroot: Path) -> dict[str, list[dict]]:
+    path = access_ledger_path(srcroot)
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except ValueError as err:
+        raise InstrumentError(f"Corrupt access ledger {path}: {err}")
+
+
+def write_access_ledger(srcroot: Path, ledger: dict[str, list[dict]]) -> None:
+    path = access_ledger_path(srcroot)
+    if ledger:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
+    elif path.exists():
+        path.unlink()
+
+
+def record_access_edits(
+    ledger: dict[str, list[dict]], rel: str, before: list[str], after: list[str]
+) -> None:
+    """Add the lines that differ between `before` and `after` to `ledger[rel]`.
+    A line already recorded keeps its first original text."""
+    if len(before) != len(after):
+        raise InstrumentError(f"Accessibility edit changed the line count of {rel}")
+    entries = {e["ln"]: e for e in ledger.get(rel, [])}
+    for ln, (old, new) in enumerate(zip(before, after)):
+        if old == new:
+            continue
+        if ln in entries:
+            entries[ln]["edited"] = new
+        else:
+            entries[ln] = {"ln": ln, "original": old, "edited": new}
+    if entries:
+        ledger[rel] = [entries[ln] for ln in sorted(entries)]
+
+
+def revert_access_edits(srcroot: Path) -> tuple[list[Path], dict[str, list[dict]]]:
+    """
+    Restore the lines recorded in the access ledger. A recorded line is put
+    back only if the file still holds the edited text (at its line, or at a
+    unique line if the file shifted); anything else is left in place and
+    returned as unresolved (it stays in the ledger).
+    """
+    srcroot = Path(srcroot)
+    ledger = load_access_ledger(srcroot)
+    restored: list[Path] = []
+    unresolved: dict[str, list[dict]] = {}
+    for rel, entries in sorted(ledger.items()):
+        path = srcroot / rel
+        if not path.is_file():
+            unresolved[rel] = entries
+            continue
+        lines = path.read_text().splitlines(keepends=True)
+        code_lns = [i for i, ln in enumerate(lines) if not ln.rstrip().endswith(MARKER)]
+        code = [lines[i] for i in code_lns]
+        changed = False
+        for e in entries:
+            ln = e["ln"]
+            if not (ln < len(code) and code[ln] == e["edited"]):
+                hits = [i for i, t in enumerate(code) if t == e["edited"]]
+                if len(hits) != 1:
+                    unresolved.setdefault(rel, []).append(e)
+                    continue
+                ln = hits[0]
+            code[ln] = e["original"]
+            lines[code_lns[ln]] = e["original"]
+            changed = True
+        if changed:
+            path.write_text("".join(lines))
+            restored.append(path)
+    write_access_ledger(srcroot, unresolved)
+    return restored, unresolved
 
 
 def make_accessible(
@@ -634,6 +718,13 @@ def instrument_cases(
         if changed:
             edits[mod_path] = src
             result.made_public.setdefault(mod_path, []).extend(changed)
+    access_ledger = load_access_ledger(srcroot)
+    for mod_path in result.made_public:
+        before = strip_instrumentation(
+            texts.get(mod_path) or mod_path.read_text().splitlines(keepends=True)
+        )
+        rel = str(mod_path.resolve().relative_to(srcroot.resolve()))
+        record_access_edits(access_ledger, rel, before, edits[mod_path])
     by_file: dict[Path, list] = {}
     for fut, names in accepted:
         by_file.setdefault(srcroot / fut.driver_sites.path, []).append((fut.driver_sites, names))
@@ -667,6 +758,7 @@ def instrument_cases(
     result.removed = remove_io_modules(dest)
     for edit_path, edit_lines in edits.items():
         edit_path.write_text("".join(edit_lines))
+    write_access_ledger(srcroot, access_ledger)
     if accepted:
         for f in sorted(SHARED_IO_MODULES):
             shutil.copy2(_io_source(Path(accepted[0][0].case_dir), f, mods_dir), dest / f)
@@ -700,11 +792,14 @@ def instrument_elm(
 
 def uninstrument_elm(srcroot: Path) -> list[Path]:
     """
-    Remove inserted capture lines and the copied IO modules (accessibility
-    changes are kept). Returns the restored source files.
+    Remove inserted capture lines and the copied IO modules, and revert the
+    accessibility edits recorded in the access ledger. Returns the restored
+    source files. Ledger entries that couldn't be reverted (the edited line
+    changed since) stay in the ledger; see `load_access_ledger`.
     """
-    restored = []
-    for path in elm_source_files(Path(srcroot)):
+    srcroot = Path(srcroot)
+    restored, _ = revert_access_edits(srcroot)
+    for path in elm_source_files(srcroot):
         text = path.read_text(errors="replace")
         if MARKER not in text:
             continue
@@ -713,7 +808,19 @@ def uninstrument_elm(srcroot: Path) -> list[Path]:
         if stripped != lines:
             path.write_text("".join(stripped))
             restored.append(path)
-    remove_io_modules(Path(srcroot) / "components/elm/src/main")
+    remove_io_modules(srcroot / "components/elm/src/main")
+    return sorted(set(restored))
+
+
+def undo_instrumentation(srcroot: Path) -> list[Path]:
+    """`uninstrument_elm` and report what was restored / left behind."""
+    restored = uninstrument_elm(srcroot)
+    for path in restored:
+        print(f"Restored {path} (SPEL capture calls / accessibility edits)")
+    for rel, entries in load_access_ledger(srcroot).items():
+        lns = ", ".join(str(e["ln"] + 1) for e in entries)
+        print(f"Warning: couldn't revert accessibility edits in {rel} (lines {lns}); "
+              f"they changed since `spel instrument`. See {access_ledger_path(srcroot)}")
     return restored
 
 

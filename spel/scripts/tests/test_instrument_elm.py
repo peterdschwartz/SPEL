@@ -363,10 +363,44 @@ def test_instrument_elm_end_to_end(fake_tree):
     assert ie.instrument_elm(fut, src, freq=3).made_public == {}
     assert {p: p.read_text() for p in src.rglob("*.F90")} == snapshot
 
+    bgp = src / "components/elm/src/biogeophys"
+    ledger = ie.load_access_ledger(src)
+    assert set(ledger) == {
+        "components/elm/src/biogeophys/SoilMoistStressMod.F90",
+        "components/elm/src/biogeophys/PhotosynthesisMod.F90",
+    }
+
     (main / "SpelCaptureMod.F90").write_text("stale")  # pre-tagging layout
-    assert ie.uninstrument_elm(src) == [main / "elm_driver.F90"]
+    assert ie.uninstrument_elm(src) == sorted([
+        main / "elm_driver.F90",
+        bgp / "SoilMoistStressMod.F90",
+        bgp / "PhotosynthesisMod.F90",
+    ])
     assert (main / "elm_driver.F90").read_text() == DRIVER
+    assert (bgp / "SoilMoistStressMod.F90").read_text() == PRIV_MOD
+    assert (bgp / "PhotosynthesisMod.F90").read_text() == PROT_MOD
     assert sorted(p.name for p in main.iterdir()) == ["elm_driver.F90"]
+    assert ie.uninstrument_elm(src) == []
+
+
+def test_undo_survives_shifted_lines_and_keeps_drifted_edits(fake_tree):
+    src, _, fut = fake_tree
+    ie.instrument_elm(fut, src)
+    bgp = src / "components/elm/src/biogeophys"
+    soil, photo = bgp / "SoilMoistStressMod.F90", bgp / "PhotosynthesisMod.F90"
+    # Developer adds a line at the top of one file and rewrites an edited
+    # line of the other after instrumenting
+    soil.write_text("! new comment\n" + soil.read_text())
+    entry = ie.load_access_ledger(src)["components/elm/src/biogeophys/PhotosynthesisMod.F90"][0]
+    lines = photo.read_text().splitlines(keepends=True)
+    lines[entry["ln"]] = "  ! rewritten by hand\n"
+    photo.write_text("".join(lines))
+
+    ie.uninstrument_elm(src)
+    assert soil.read_text() == "! new comment\n" + PRIV_MOD
+    left = ie.load_access_ledger(src)
+    assert list(left) == ["components/elm/src/biogeophys/PhotosynthesisMod.F90"]
+    assert left[list(left)[0]][0]["original"] == entry["original"]
 
 
 def test_instrument_elm_requires_elm_drv_call_site(fake_tree):

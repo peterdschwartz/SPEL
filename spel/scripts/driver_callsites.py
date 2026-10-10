@@ -233,6 +233,21 @@ def driver_callsites(
     return access, dmaps.bindings, sites
 
 
+def call_statement(sites: DriverSites, call: DriverCall) -> str:
+    """The (unwrapped) `call` statement of `call` in the routine of `sites`."""
+    fort_mod, lines = load_module(sites.module)
+    raw = Path(fort_mod.filepath).resolve().read_text(errors="replace").splitlines()
+    markers = [i for i, line in enumerate(raw) if line.rstrip().endswith(MARKER)]
+    for lt in routine_lines(lines, sites.routine):
+        if (
+            lt.ln - bisect_left(markers, lt.ln) == call.ln
+            and not raw[lt.ln].rstrip().endswith(MARKER)
+            and re.match(r"^\s*call\b", lt.line, re.IGNORECASE)
+        ):
+            return lt.line.strip()
+    raise SemanticError(f"no call statement for {call.callee} at line {call.ln + 1} of {sites.path}")
+
+
 def bounds_actual(root: Subroutine, bindings: list[ArgBinding], ln: int) -> Optional[str]:
     """Actual passed for root's bounds_type dummy at the call on line `ln`."""
     for b in bindings:

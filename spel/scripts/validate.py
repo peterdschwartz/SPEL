@@ -37,7 +37,7 @@ from spel.scripts.instrument_elm import (
     load_case,
     resubmit_case,
     run_case,
-    uninstrument_elm,
+    undo_instrumentation,
     write_reference_meta,
 )
 
@@ -294,8 +294,7 @@ def validate(
     finally:
         # 5. leave the E3SM tree clean
         if not keep_instrumentation:
-            for path in uninstrument_elm(E3SM_SRCROOT):
-                print(f"Removed SPEL capture calls from {path}")
+            undo_instrumentation(E3SM_SRCROOT)
 
     if rundir is not None:
         report.rundir = str(rundir)

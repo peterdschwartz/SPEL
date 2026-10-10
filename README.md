@@ -205,6 +205,10 @@ several cases can be instrumented for one build (see [`spel validate`](#spel-val
 3. Makes the module variables/types the IO modules use public and drops `protected`, editing only
    the declaration and `private`/`protected` statement lines recorded during `create`. `spel create`
    makes the same edit in the unit-test copies of those modules, so ELM needs no hand edits.
+   The original lines are recorded in `components/elm/src/main/.spel-access-edits.json` and
+   `--undo` (also run by `spel validate`) puts them back. A line you've changed since
+   `instrument` is left alone and reported. Edits made before this ledger existed must be
+   reverted with git.
 4. Copies `nc_io` and `nc_allocMod`, the case's `ReadWriteMod` and `FUTConstantsMod` renamed
    `ReadWriteMod_<tag>`/`FUTConstantsMod_<tag>`, and `SpelCapture_<tag>` to
    `components/elm/src/main`. IO modules from earlier instrumentations are deleted first.

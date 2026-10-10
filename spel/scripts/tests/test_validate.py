@@ -102,7 +102,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(v, "instrument_cases", instrument_cases)
     monkeypatch.setattr(v, "load_case", lambda case: SimpleNamespace(case_name=case))
     monkeypatch.setattr(v, "run_case", run_case)
-    monkeypatch.setattr(v, "uninstrument_elm", uninstrument)
+    monkeypatch.setattr(v, "undo_instrumentation", uninstrument)
     monkeypatch.setattr(v, "run_cases", run_cases)
     return ut, calls
 
