@@ -10,7 +10,12 @@ same code works with any OpenACC compiler.
                                 the device pointer inside the device struct.
   spel_acc_update_device()    : after the host reads a time step's inputs.
   spel_acc_update_host()      : before the host writes a time step's outputs.
-  spel_acc_update_filters()   : after the host builds the per-step filters.
+  spel_acc_update_filters()   : after the filters are built. If the case's filterMod
+                                builds them on the host, copies them to the device.
+                                If it builds them in OpenACC compute regions (the
+                                counts come back to the host through reductions),
+                                copies the counts to the device and the index arrays
+                                to the host instead, so both copies agree.
 
 The member set matches ReadWriteMod: active, non-alias members of active instances,
 with the same namelist guards.
@@ -29,7 +34,8 @@ if TYPE_CHECKING:
     from spel.scripts.utilityFunctions import Variable
 
 MOD_NAME = "SpelAccDataMod"
-FILTER_INSTANCE = "filter"
+FILTER_INSTANCES = ("filter", "filter_inactive_and_active")
+FILTER_MODULE_FILE = "filterMod.F90"
 
 
 def _members(unit_test: FunctionalUnitTest):
@@ -70,7 +76,7 @@ def _use_lines(unit_test: FunctionalUnitTest, active_instances) -> list[str]:
         if var.type == "bounds_type":
             continue
         stmts.add(f"{tabs}use {var.declaration}, only : {var.name}\n")
-    stmts.add(f"{tabs}use filterMod, only : {FILTER_INSTANCE}\n")
+    stmts.add(f"{tabs}use filterMod, only : {', '.join(FILTER_INSTANCES)}\n")
     # namelist guards compare strings with spel_streq (see Expectation.to_fortran)
     stmts.add(f"{tabs}use nc_io, only : spel_streq\n")
     guard_vars = [
@@ -86,7 +92,7 @@ def _use_lines(unit_test: FunctionalUnitTest, active_instances) -> list[str]:
 
 def _member_block(inst, member, var, directive, guards, unit_test, tabs) -> list[str]:
     ref = f"{inst}%{member}"
-    if var.dim > 0:
+    if var.dim > 0 or var.ptrscalar:
         lines = [
             f"{tabs}if (associated({ref})) then\n",
             f"{tabs}   !$acc {directive}({ref})\n",
@@ -107,6 +113,16 @@ def _filter_arrays(unit_test: FunctionalUnitTest) -> tuple[list[str], list[str]]
         name = fv.name.split("%")[-1]
         (arrays if fv.dim > 0 else scalars).append(name)
     return sorted(arrays), sorted(scalars)
+
+
+def filters_built_on_device(case_dir: Path) -> bool:
+    """Whether the case's filterMod builds the filters in OpenACC compute regions."""
+    path = Path(case_dir) / FILTER_MODULE_FILE
+    if not path.exists():
+        return False
+    return bool(
+        re.search(r"^\s*!\$acc\s+(parallel|kernels)\b", path.read_text(), re.I | re.M)
+    )
 
 
 def generate_acc_data_module(unit_test: FunctionalUnitTest) -> None:
@@ -142,20 +158,22 @@ def generate_acc_data_module(unit_test: FunctionalUnitTest) -> None:
         else:
             lines.append(f"{t2}!$acc enter data copyin({inst})\n")
         for member, var in fields:
-            if var.dim > 0:
+            if var.dim > 0 or var.ptrscalar:
                 lines.extend(
                     _member_block(inst, member, var, "enter data copyin", None, unit_test, t2)
                 )
-    if farrays or fscalars:
-        lines.append(f"{t2}! {FILTER_INSTANCE}\n")
-        lines.append(f"{t2}!$acc enter data copyin({FILTER_INSTANCE})\n")
-        lines.append(f"{t2}do i = 1, size({FILTER_INSTANCE})\n")
+    for finst in FILTER_INSTANCES if farrays or fscalars else ():
+        lines.append(f"{t2}! {finst}\n")
+        lines.append(f"{t2}if (allocated({finst})) then\n")
+        lines.append(f"{t2}   !$acc enter data copyin({finst})\n")
+        lines.append(f"{t2}   do i = 1, size({finst})\n")
         for name in farrays:
-            ref = f"{FILTER_INSTANCE}(i)%{name}"
-            lines.append(f"{t2}   if (associated({ref})) then\n")
-            lines.append(f"{t2}      !$acc enter data copyin({ref})\n")
-            lines.append(f"{t2}   end if\n")
-        lines.append(f"{t2}end do\n")
+            ref = f"{finst}(i)%{name}"
+            lines.append(f"{t2}      if (associated({ref})) then\n")
+            lines.append(f"{t2}         !$acc enter data copyin({ref})\n")
+            lines.append(f"{t2}      end if\n")
+        lines.append(f"{t2}   end do\n")
+        lines.append(f"{t2}end if\n")
     lines.append("#endif\n")
     lines.append(f"{tabs}end subroutine spel_acc_enter_data\n\n")
 
@@ -173,18 +191,28 @@ def generate_acc_data_module(unit_test: FunctionalUnitTest) -> None:
         lines.append(f"{tabs}end subroutine {sub}\n\n")
 
     # --- filters
+    on_device = filters_built_on_device(unit_test.case_dir)
+    array_update = "update self" if on_device else "update device"
     lines.append(f"{tabs}subroutine spel_acc_update_filters()\n")
     lines.append(f"{t2}integer :: i\n")
     lines.append("#ifdef _OPENACC\n")
-    lines.append(f"{t2}do i = 1, size({FILTER_INSTANCE})\n")
-    for name in fscalars:
-        lines.append(f"{t2}   !$acc update device({FILTER_INSTANCE}(i)%{name})\n")
-    for name in farrays:
-        ref = f"{FILTER_INSTANCE}(i)%{name}"
-        lines.append(f"{t2}   if (associated({ref})) then\n")
-        lines.append(f"{t2}      !$acc update device({ref})\n")
-        lines.append(f"{t2}   end if\n")
-    lines.append(f"{t2}end do\n")
+    if on_device:
+        lines.append(
+            f"{t2}! filterMod builds the filters on the device: the counts are on the\n"
+            f"{t2}! host (reductions) and the index arrays on the device\n"
+        )
+    for finst in FILTER_INSTANCES:
+        lines.append(f"{t2}if (allocated({finst})) then\n")
+        lines.append(f"{t2}   do i = 1, size({finst})\n")
+        for name in fscalars:
+            lines.append(f"{t2}      !$acc update device({finst}(i)%{name})\n")
+        for name in farrays:
+            ref = f"{finst}(i)%{name}"
+            lines.append(f"{t2}      if (associated({ref})) then\n")
+            lines.append(f"{t2}         !$acc {array_update}({ref})\n")
+            lines.append(f"{t2}      end if\n")
+        lines.append(f"{t2}   end do\n")
+        lines.append(f"{t2}end if\n")
     lines.append("#endif\n")
     lines.append(f"{tabs}end subroutine spel_acc_update_filters\n\n")
 

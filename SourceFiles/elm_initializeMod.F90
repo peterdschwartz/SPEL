@@ -67,7 +67,10 @@ contains
       call init_clumps(bounds)
       call get_clump_bounds(1, bounds_clump)
       call allocFilters()
+#ifndef _OPENACC
+      ! OpenACC builds set the filters in main, once the data is on the device
       call setFilters(bounds_clump, icemask_grc)
+#endif
 
       !#LAKECON
 

@@ -635,7 +635,10 @@ def create_nc_read(
         var_lines: list[str] = []
 
         if var.ptrscalar:
-            var_lines.append(f"{tabs}allocate({var.name})\n")
+            # read every time step: keep the target (and its device copy)
+            var_lines.append(
+                f"{tabs}if (.not. associated({var.name})) allocate({var.name})\n"
+            )
 
         if var.type == "character":
             stmt = (

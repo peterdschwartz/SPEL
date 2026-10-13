@@ -690,8 +690,19 @@ class FunctionalUnitTest:
             ]
         )
 
-        pointer_vars = ensure_acc_declares(variables.values(), self.case_dir)
+        pointer_vars, alloc_vars = ensure_acc_declares(variables.values(), self.case_dir)
         body_tabs = hio.indent(hio.Tab.shift)
+        # `declare create` only allocates device memory for allocate statements
+        # that name the variable; nc_alloc allocates through a dummy argument,
+        # so create the device copy here (a no-op if it's already present).
+        for name in sorted(alloc_vars):
+            lines.extend(
+                [
+                    f"{body_tabs}if (allocated({name})) then\n",
+                    f"{body_tabs}   !$acc enter data create({name})\n",
+                    f"{body_tabs}end if\n",
+                ]
+            )
         lines.extend(
             acc_update_device_lines(
                 [v for v in variables.values() if v.name not in pointer_vars], body_tabs
@@ -2118,11 +2129,12 @@ def create_fortls(case_dir: Path):
     return
 
 
-def ensure_acc_declares(variables, case_dir: Path) -> set[str]:
+def ensure_acc_declares(variables, case_dir: Path) -> tuple[set[str], set[str]]:
     """
     Add ``!$acc declare create`` to the case copies of the modules declaring
     ``variables`` so that ``update device`` and ``acc routine`` references work.
-    Returns the names of module pointer variables, which cannot be declared.
+    Returns the names of module pointer variables, which cannot be declared,
+    and of allocatable module variables.
     """
     mod_files: dict[str, Path] = {}
     for path in Path(case_dir).glob("*.F90"):
@@ -2135,12 +2147,21 @@ def ensure_acc_declares(variables, case_dir: Path) -> set[str]:
 
     to_declare: dict[Path, list[str]] = {}
     pointer_vars: set[str] = set()
+    alloc_vars: set[str] = set()
     for var in variables:
         path = mod_files.get(var.declaration.lower())
         if path is None:
             continue
         text = path.read_text()
         name = re.escape(var.name)
+        decl = re.search(
+            rf"^\s*(?!.*\bparameter\b)([^!\n]*)::[^!\n]*\b{name}\b",
+            text,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        attrs = decl.group(1) if decl else ""
+        if re.search(r"\ballocatable\b", attrs, re.IGNORECASE):
+            alloc_vars.add(var.name)
         declared = re.search(
             rf"^\s*!\$acc\s+declare\s+\w+\s*\([^)]*\b{name}\b",
             text,
@@ -2148,12 +2169,7 @@ def ensure_acc_declares(variables, case_dir: Path) -> set[str]:
         )
         if declared:
             continue
-        decl = re.search(
-            rf"^\s*(?!.*\bparameter\b)([^!\n]*)::[^!\n]*\b{name}\b",
-            text,
-            re.IGNORECASE | re.MULTILINE,
-        )
-        if decl and re.search(r"\bpointer\b", decl.group(1), re.IGNORECASE):
+        if re.search(r"\bpointer\b", attrs, re.IGNORECASE):
             pointer_vars.add(var.name)
         else:
             to_declare.setdefault(path, []).append(var.name)
@@ -2178,4 +2194,4 @@ def ensure_acc_declares(variables, case_dir: Path) -> set[str]:
         new.extend(f"  !$acc declare create({n})\n" for n in sorted(names))
         lines[idx:idx] = new
         path.write_text("".join(lines))
-    return pointer_vars
+    return pointer_vars, alloc_vars

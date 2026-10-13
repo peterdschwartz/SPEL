@@ -67,7 +67,15 @@ declin = -0.4030289369547867
    !#ACC_COPYIN
 
    call get_proc_bounds(bounds_proc)
-   ! Calculate filters on device
+   call get_clump_bounds(1, bounds_clump)
+   !$acc enter data copyin(bounds_clump)
+
+   ! Set the filters now that the data they read is on the device (filterMod
+   ! may build them in compute regions), then sync the host and device copies
+   allocate (icemask_dummy_arr(bounds_clump%begg:bounds_clump%endg))
+   icemask_dummy_arr(:) = 0._r8
+   call setFilters(bounds_clump, icemask_dummy_arr)
+   call spel_acc_update_filters()
 #endif
 !$acc enter data copyin( doalb, declinp1, declin )
 !$acc update device(dtime_mod, dayspyr_mod, &
@@ -102,6 +110,7 @@ block
        if (io_inputs%end_run .or. step > max_step) exit
 
        call get_clump_bounds(nc,bounds_clump)
+       !$acc update device(bounds_clump)
 
       !#CALL_SUB
 
