@@ -201,10 +201,13 @@ def generate_elmtypes_io_netcdf(unit_test: FunctionalUnitTest) -> None:
         [
             f"{tabs}implicit none\n",
             f"{tabs}public :: read_elmtypes, write_elmtypes, define_vars\n",
+            f"{tabs}public :: spel_inbuf_to_device\n",
             f"{tabs}logical, parameter :: verbose = .false.\n",
-            "contains\n",
         ]
     )
+    lines.extend(create_inbuf_decls(dtype_vars))
+    lines.append("contains\n")
+    lines.extend(create_inbuf_to_device(dtype_vars))
 
     lines.extend(
         create_nc_define_vars(
@@ -429,6 +432,8 @@ def create_netcdf_io_routine(
             f"{tabs}character(len=256) :: new_fn\n",
         ]
     )
+    if mode == hio.IOMode.read:
+        lines.append(f"{tabs}integer :: it\n")
     lines.append(f"{tabs}new_fn = trim(io_inst%get_fn())\n")
 
     if mode == hio.IOMode.write:
@@ -453,12 +458,10 @@ def create_netcdf_io_routine(
             f"{tabs}if(io_inst%dt_in_file == 99999) io_inst%dt_in_file = nc_read_timeslices(new_fn)\n"
         )
         lines.append(f"{tabs}timestep = io_inst%timestep\n")
-        lines.append(f"{tabs}ncid = nc_create_or_open_file(trim(new_fn), {mode_str})\n")
-        sub_lines = create_nc_read(vars, time, guards=guards)
+        lines.extend(create_nc_read_buffered(vars, guards=guards, mode_str=mode_str))
     else:
-        sub_lines = create_nc_write(vars, time=time, guards=guards)
-    lines.extend(sub_lines)
-    lines.append(f"{tabs}call check(nf90_close(ncid))\n")
+        lines.extend(create_nc_write(vars, time=time, guards=guards))
+        lines.append(f"{tabs}call check(nf90_close(ncid))\n")
     tabs = hio.indent(hio.Tab.unshift)
     lines.append(f"{tabs}end subroutine {sub_name}\n")
 
@@ -694,6 +697,117 @@ def create_nc_read(
     return lines
 
 
+def _inbuf_vars(vars: dict[str, Variable]) -> list[Variable]:
+    """Time-step inputs held in read buffers (ib_<n> is the n-th entry)."""
+    scalars = [v for v in vars.values() if v.dim == 0 and v.type != "character"]
+    arrays = [v for v in vars.values() if v.dim > 0]
+    return scalars + arrays
+
+
+def create_inbuf_decls(vars: dict[str, Variable]) -> list[str]:
+    """Module variables of ReadWriteMod for the buffered input reads."""
+    tabs = hio.indent(hio.Tab.reset)
+    inbuf = _inbuf_vars(vars)
+    lines = [
+        f"{tabs}! Input buffers: ib_<n>(<set-1 shape>, chunk) holds timesteps\n",
+        f"{tabs}! inbuf_t0..inbuf_t0+inbuf_nt-1 of the current input file\n",
+        f"{tabs}integer :: inbuf_t0 = 0, inbuf_nt = 0, inbuf_chunk = 0\n",
+        f"{tabs}integer :: ib_sd({max(len(inbuf), 1)}) = 0, ib_nfile({max(len(inbuf), 1)}) = 0\n",
+    ]
+    for n, var in enumerate(inbuf, start=1):
+        ftype = "real(8)" if var.type == "real" else "integer"
+        dims = ",".join([":"] * (var.dim + 1))
+        lines.append(f"{tabs}{ftype}, allocatable :: ib_{n}({dims}) ! {var.name}\n")
+    return lines
+
+
+def create_inbuf_to_device(vars: dict[str, Variable]) -> list[str]:
+    tabs = hio.indent(hio.Tab.reset)
+    lines = [
+        f"{tabs}subroutine spel_inbuf_to_device()\n",
+        f"{tabs}{tabs}! Copy the input buffers to the device; later loads update them\n",
+        f"{tabs}{tabs}! there and read_elmtypes copies the inputs on the device\n",
+        "#ifdef _OPENACC\n",
+    ]
+    for n, _ in enumerate(_inbuf_vars(vars), start=1):
+        lines.extend(
+            [
+                f"{tabs}{tabs}if (allocated(ib_{n})) then\n",
+                f"{tabs}{tabs}   !$acc enter data copyin(ib_{n})\n",
+                f"{tabs}{tabs}end if\n",
+            ]
+        )
+    lines.extend(
+        [
+            f"{tabs}{tabs}spel_buf_on_device = .true.\n",
+            "#endif\n",
+            f"{tabs}end subroutine spel_inbuf_to_device\n",
+        ]
+    )
+    return lines
+
+
+def create_nc_read_buffered(
+    vars: dict[str, Variable],
+    guards: GuardMap,
+    mode_str: str,
+) -> list[str]:
+    """
+    Body of read_elmtypes: load the next chunk of timesteps into the input
+    buffers when the current one is used up (or a new file starts), then copy
+    this timestep's slice into the variables.
+    """
+    tabs = hio.indent()
+    t2 = tabs + "  "
+    index = {id(v): n for n, v in enumerate(_inbuf_vars(vars), start=1)}
+    scalars = [v for v in vars.values() if v.dim == 0]
+    arrays = [v for v in vars.values() if v.dim > 0]
+
+    load: list[str] = []
+    copy: list[str] = []
+    for var in scalars + arrays:
+        varname = var.name.replace("%", "__")
+        var_load: list[str] = []
+        if var.type == "character":
+            var_load.append(
+                f"{t2}call nc_read_var(ncid, '{varname}', '{var.name}_str', {var.name})\n"
+            )
+            load.extend(guard_fortran_lines(var_load, guards.get(var.name), t2))
+            continue
+        n = index[id(var)]
+        if var.dim == 0 and var.ptrscalar:
+            var_load.append(f"{t2}if (.not. associated({var.name})) allocate({var.name})\n")
+        if var.dim > 0:
+            var_load.append(
+                f'{t2}call nc_alloc(ncid, "{varname}", {var.dim}, {var.name})\n'
+            )
+        var_load.append(
+            f"{t2}call nc_buf_load(ncid, '{varname}', shape({var.name}), ib_{n}, "
+            f"inbuf_t0, inbuf_nt, inbuf_chunk, ib_sd({n}), ib_nfile({n}))\n"
+        )
+        load.extend(guard_fortran_lines(var_load, guards.get(var.name), t2))
+        copy.extend(
+            guard_fortran_lines(
+                [f"{tabs}call nc_buf_copy({var.name}, ib_{n}, it, ib_sd({n}), ib_nfile({n}))\n"],
+                guards.get(var.name),
+                tabs,
+            )
+        )
+
+    return [
+        f"{tabs}if (io_inst%new_file .or. timestep < inbuf_t0 .or. timestep >= inbuf_t0 + inbuf_nt) then\n",
+        f"{t2}if (inbuf_chunk == 0) inbuf_chunk = nc_buf_chunk(io_inst%dt_in_file)\n",
+        f"{t2}inbuf_t0 = timestep\n",
+        f"{t2}inbuf_nt = min(inbuf_chunk, io_inst%dt_in_file - timestep + 1)\n",
+        f"{t2}ncid = nc_create_or_open_file(trim(new_fn), {mode_str})\n",
+        *load,
+        f"{t2}call check(nf90_close(ncid))\n",
+        f"{tabs}end if\n",
+        f"{tabs}it = timestep - inbuf_t0 + 1\n",
+        *copy,
+    ]
+
+
 def get_dim_names(var: Variable, time: bool) -> str:
     if var.dim == 0 and var.type != "character":
         return "['']"  # empty list
@@ -762,6 +876,9 @@ def generate_nc_io():
     {tabs}use netcdf
     {tabs}use iso_fortran_env
     {tabs}use iso_c_binding
+    #ifdef _OPENACC
+    {tabs}use openacc, only: acc_is_present
+    #endif
     {tabs}implicit none
 
     {tabs}public
@@ -790,6 +907,9 @@ def generate_nc_io():
     {tabs}! subgrid dimension are allocated nsets times larger along it, reads
     {tabs}! replicate the file data into every set and writes emit set 1 only.
     {tabs}integer, public :: spel_nsets = 1
+    {tabs}! Set once the input buffers are on the device (spel_inbuf_to_device):
+    {tabs}! buffer loads then update the device and copies run on the device.
+    {tabs}logical, public :: spel_buf_on_device = .false.
     """)
     lines.append(header)
     lines.append(f"{tabs}interface nc_write_var_array\n")
@@ -830,6 +950,17 @@ def generate_nc_io():
     lines.append(f"{tabs}module procedure nc_select_set1_r8, nc_select_set1_int\n")
     tabs = hio.indent(hio.Tab.unshift)
     lines.append(f"{tabs}end interface\n")
+    for iface, kinds in (
+        ("nc_buf_load", ("double", "integer")),
+        ("nc_buf_copy", ("double", "integer", "logical")),
+    ):
+        lines.append(f"{tabs}interface {iface}\n")
+        tabs = hio.indent(hio.Tab.shift)
+        for t in kinds:
+            for ndim in range(0, INBUF_DIMS + 1):
+                lines.append(f"{tabs}module procedure {iface}_{t}_{ndim}\n")
+        tabs = hio.indent(hio.Tab.unshift)
+        lines.append(f"{tabs}end interface\n")
     lines.append(f"{tabs}public :: nc_read_timeslices\n")
 
     lines.append("contains\n")
@@ -862,6 +993,7 @@ def generate_nc_io():
     lines.append(gen_nc_write_logical())
 
     lines.append(gen_nc_read_timeslices())
+    lines.append(gen_inbuf_helpers())
 
     lines.append("end module nc_io\n")
 
@@ -1108,6 +1240,175 @@ def gen_nsets_helpers() -> str:
     end subroutine nc_put_bounds_att
     """)
         + select_set1
+    )
+
+
+INBUF_DIMS = 3
+
+
+def gen_inbuf_helpers() -> str:
+    """
+    Fortran helpers for the buffered time-step input reads (read_elmtypes).
+
+    nc_buf_load reads timesteps t0..t0+nt-1 of one file variable into a
+    buffer shaped like set 1 with time as the last dimension. Once
+    spel_buf_on_device is set (spel_inbuf_to_device) the buffers live on the
+    device as well and every load updates the device copy.
+
+    nc_buf_copy copies time slice `it` of a buffer into the variable,
+    replicating it into the spel_nsets sets along the subgrid dimension sd.
+    The copy runs in an OpenACC compute region when the variable is present
+    on the device, so the inputs never pass through the host.
+    """
+    lines = [
+        textwrap.dedent("""
+        integer function nc_buf_chunk(dt_in_file) result(chunk)
+           ! Timesteps per input buffer: the whole file unless SPEL_IO_CHUNK caps it
+           integer, intent(in) :: dt_in_file
+           character(len=32) :: env
+           integer :: stat, n
+           chunk = dt_in_file
+           call get_environment_variable('SPEL_IO_CHUNK', env, status=stat)
+           if (stat == 0) then
+              read (env, *, iostat=stat) n
+              if (stat == 0 .and. n > 0) chunk = min(n, dt_in_file)
+           end if
+           print *, 'SPEL input buffer: ', chunk, ' timesteps per read'
+        end function nc_buf_chunk
+        """)
+    ]
+
+    for t, ftype in (("double", "real(8)"), ("integer", "integer")):
+        for dim in range(0, INBUF_DIMS + 1):
+            lines.append(_gen_buf_load(dim, t, ftype))
+            lines.append(_gen_buf_copy(dim, t, ftype, ftype))
+    for dim in range(0, INBUF_DIMS + 1):
+        lines.append(_gen_buf_copy(dim, "logical", "logical", "integer"))
+    return "".join(lines)
+
+
+def _gen_buf_load(dim: int, t: str, ftype: str) -> str:
+    name = f"nc_buf_load_{t}_{dim}"
+    buf_dims = make_dim_str(dim + 1, lambda i: ":")
+    alloc_shape = ", ".join([f"fshape({i + 1})" for i in range(dim)] + ["chunk"])
+    upd_sect = ", ".join([":"] * dim + ["1:nt"])
+    if dim > 0:
+        start = f"[{', '.join(['1'] * dim)}, t0]"
+        count = "[fshape, nt]"
+        subgrid = textwrap.indent(textwrap.dedent(f"""\
+           call nc_file_subgrid(ncid, var_id, {dim}, sd, nfile)
+           fshape = vshape
+           if (sd > 0) then
+              if (vshape(sd) /= spel_nsets*nfile) then
+                 sd = 0
+              else
+                 fshape(sd) = nfile
+              end if
+           end if
+        """), "   ")
+        shape_check = "any(shape(buf) /= [fshape, chunk])"
+    else:
+        start, count = "[t0]", "[nt]"
+        subgrid = "   sd = 0; nfile = 0\n"
+        shape_check = "size(buf) /= chunk"
+    fshape_decl = f"   integer :: fshape({dim})\n" if dim > 0 else ""
+    first = ", ".join([":"] * dim + ["1"])
+    each = ", ".join([":"] * dim + ["t"])
+    return (
+        f"\nsubroutine {name}(ncid, varname, vshape, buf, t0, nt, chunk, sd, nfile)\n"
+        "   integer, intent(in) :: ncid, vshape(:), t0, nt, chunk\n"
+        "   character(len=*), intent(in) :: varname\n"
+        f"   {ftype}, allocatable, intent(inout) :: buf({buf_dims})\n"
+        "   integer, intent(inout) :: sd, nfile\n"
+        "   integer :: var_id, nd, t\n"
+        f"{fshape_decl}"
+        "   call check(nf90_inq_varid(ncid, trim(varname), var_id))\n"
+        f"{subgrid}"
+        "   if (allocated(buf)) then\n"
+        f"      if ({shape_check}) then\n"
+        "         print *, 'nc_buf_load: input shape changed for ', trim(varname)\n"
+        "         error stop\n"
+        "      end if\n"
+        "   else\n"
+        f"      allocate (buf({alloc_shape}))\n"
+        "      if (spel_buf_on_device) then\n"
+        "         !$acc enter data create(buf)\n"
+        "      end if\n"
+        "   end if\n"
+        "   call check(nf90_inquire_variable(ncid, var_id, ndims=nd))\n"
+        f"   if (nd > {dim}) then\n"
+        f"      call check(nf90_get_var(ncid, var_id, buf, start={start}, count={count}))\n"
+        "   else\n"
+        "      ! no time dimension in the file (e.g. scalars): same value every step\n"
+        f"      call check(nf90_get_var(ncid, var_id, buf({first})))\n"
+        "      do t = 2, nt\n"
+        f"         buf({each}) = buf({first})\n"
+        "      end do\n"
+        "   end if\n"
+        "   if (spel_buf_on_device) then\n"
+        f"      !$acc update device(buf({upd_sect}))\n"
+        "   end if\n"
+        f"end subroutine {name}\n"
+    )
+
+
+def _gen_buf_copy(dim: int, t: str, var_type: str, buf_type: str) -> str:
+    name = f"nc_buf_copy_{t}_{dim}"
+    conv = " == 1" if t == "logical" else ""
+    head = (
+        f"\nsubroutine {name}(var, buf, it, sd, nfile)\n"
+        f"   {var_type}, intent(inout) :: var{'(' + make_dim_str(dim, lambda i: ':') + ')' if dim else ''}\n"
+        f"   {buf_type}, intent(in) :: buf({make_dim_str(dim + 1, lambda i: ':')})\n"
+        "   integer, intent(in) :: it, sd, nfile\n"
+    )
+    if dim == 0:
+        return (
+            head
+            + f"   var = buf(it){conv}\n"
+            + "#ifdef _OPENACC\n"
+            + "   if (spel_buf_on_device) then\n"
+            + "      if (acc_is_present(var, storage_size(var)/8)) then\n"
+            + "         !$acc update device(var)\n"
+            + "      end if\n"
+            + "   end if\n"
+            + "#endif\n"
+            + f"end subroutine {name}\n"
+        )
+
+    idx = list(range(1, dim + 1))
+    loop_vars = ", ".join(f"i{i}" for i in idx)
+    lhs = ", ".join(f"i{i} + merge(o, 0, sd == {i})" for i in idx)
+    rhs = f"buf({loop_vars}, it){conv}"
+
+    def nest(directive: str) -> str:
+        s = directive
+        s += "      do k = 1, nk\n"
+        for i in reversed(idx):
+            s += f"      do i{i} = 1, size(buf, {i})\n"
+        s += "         o = (k-1)*nfile\n"
+        s += f"         var({lhs}) = {rhs}\n"
+        s += "      end do\n" * (dim + 1)
+        return s
+
+    return (
+        head
+        + f"   integer :: k, nk, o, {loop_vars}\n"
+        + "   logical :: dev\n"
+        + "   nk = 1\n"
+        + "   if (sd > 0) nk = spel_nsets\n"
+        + "   dev = .false.\n"
+        + "#ifdef _OPENACC\n"
+        + "   if (spel_buf_on_device) dev = acc_is_present(var)\n"
+        + "#endif\n"
+        + "   if (dev) then\n"
+        + nest(
+            f"      !$acc parallel loop gang vector collapse({dim + 1}) "
+            "private(o) present(var, buf)\n"
+        )
+        + "   else\n"
+        + nest("")
+        + "   end if\n"
+        + f"end subroutine {name}\n"
     )
 
 

@@ -8,7 +8,9 @@ same code works with any OpenACC compiler.
                                 `!$acc declare`, enter data copyin otherwise),
                                 then copies in each associated member, which attaches
                                 the device pointer inside the device struct.
-  spel_acc_update_device()    : after the host reads a time step's inputs.
+  spel_acc_update_device()    : copies every member to the device. The time-step
+                                inputs no longer need it: read_elmtypes copies them
+                                from device-resident buffers (nc_buf_copy).
   spel_acc_update_host()      : before the host writes a time step's outputs.
   spel_acc_update_filters()   : after the filters are built. If the case's filterMod
                                 builds them on the host, copies them to the device.

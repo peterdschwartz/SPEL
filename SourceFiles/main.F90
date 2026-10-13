@@ -5,7 +5,7 @@ use UpdateParamsAccMod, only: update_params_acc
 use elm_varctl
 use filterMod
 use decompMod, only: get_proc_bounds, get_clump_bounds, procinfo, clumps
-use ReadWriteMod, only : write_elmtypes, read_elmtypes
+use ReadWriteMod, only : write_elmtypes, read_elmtypes, spel_inbuf_to_device
 use decompMod, only: bounds_type
 #ifdef _CUDA
 use cudafor
@@ -76,6 +76,10 @@ declin = -0.4030289369547867
    icemask_dummy_arr(:) = 0._r8
    call setFilters(bounds_clump, icemask_dummy_arr)
    call spel_acc_update_filters()
+
+   ! Keep the time-step input buffers on the device; read_elmtypes then
+   ! copies each step's inputs on the device
+   call spel_inbuf_to_device()
 #endif
 !$acc enter data copyin( doalb, declinp1, declin )
 !$acc update device(dtime_mod, dayspyr_mod, &
@@ -101,11 +105,10 @@ block
        if (step .ne. 0) then
           !#IO_READ
 
-          ! read_elmtypes leaves bounds_clump at one set's bounds
+          ! read_elmtypes leaves bounds_clump at one set's bounds. The inputs
+          ! are copied from the (device) input buffers, so no host->device
+          ! update is needed; duplicate_sets also offsets on the device.
           if (.not. io_inputs%end_run) call duplicate_sets(nsets, bounds_clump)
-          if (.not. io_inputs%end_run) then
-             !#ACC_UPDATE_DEVICE
-          end if
        end if
        if (io_inputs%end_run .or. step > max_step) exit
 

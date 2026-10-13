@@ -297,6 +297,13 @@ every site at once. With `nsets > 1`, the netCDF reads replicate each subgrid-di
 only, so `fut-outputs*.nc` stay comparable with `spel-outputs*.nc`. A
 `WARNING (spel_nsets)` line means a copy produced results that differ from the first copy.
 
+Time-step inputs are read in chunks: `read_elmtypes` loads a whole input file (720 timesteps by
+default) per variable into set-1-shaped buffers, then each step copies its slice into the
+variables, replicating it into the `nsets` copies. In OpenACC builds the buffers live on the
+device, so the copy (and the `duplicateMod` index offsets) run there and the inputs never
+pass through the host. Set `SPEL_IO_CHUNK=<n>` at run time to read at most `n` timesteps at
+once when host or device memory is tight.
+
 ```bash
 spel run canflux            # one copy of the sites
 spel run canflux 8          # 8 copies of the sites, all in one clump

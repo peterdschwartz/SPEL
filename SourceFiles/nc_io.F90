@@ -3,6 +3,9 @@ module nc_io
   use netcdf
   use iso_fortran_env
   use iso_c_binding
+#ifdef _OPENACC
+  use openacc, only: acc_is_present
+#endif
   implicit none
 
   public
@@ -31,6 +34,9 @@ module nc_io
   ! subgrid dimension are allocated nsets times larger along it, reads
   ! replicate the file data into every set and writes emit set 1 only.
   integer, public :: spel_nsets = 1
+  ! Set once the input buffers are on the device (spel_inbuf_to_device):
+  ! buffer loads then update the device and copies run on the device.
+  logical, public :: spel_buf_on_device = .false.
   interface nc_write_var_array
     module procedure nc_write_double
     module procedure nc_write_integer
@@ -59,6 +65,30 @@ module nc_io
   end interface
   interface nc_select_set1
     module procedure nc_select_set1_r8, nc_select_set1_int
+  end interface
+  interface nc_buf_load
+    module procedure nc_buf_load_double_0
+    module procedure nc_buf_load_double_1
+    module procedure nc_buf_load_double_2
+    module procedure nc_buf_load_double_3
+    module procedure nc_buf_load_integer_0
+    module procedure nc_buf_load_integer_1
+    module procedure nc_buf_load_integer_2
+    module procedure nc_buf_load_integer_3
+  end interface
+  interface nc_buf_copy
+    module procedure nc_buf_copy_double_0
+    module procedure nc_buf_copy_double_1
+    module procedure nc_buf_copy_double_2
+    module procedure nc_buf_copy_double_3
+    module procedure nc_buf_copy_integer_0
+    module procedure nc_buf_copy_integer_1
+    module procedure nc_buf_copy_integer_2
+    module procedure nc_buf_copy_integer_3
+    module procedure nc_buf_copy_logical_0
+    module procedure nc_buf_copy_logical_1
+    module procedure nc_buf_copy_logical_2
+    module procedure nc_buf_copy_logical_3
   end interface
   public :: nc_read_timeslices
 contains
@@ -1038,4 +1068,692 @@ integer function nc_read_timeslices(fn) result(time_len)
     call check(nf90_close(ncid))
 
 end function nc_read_timeslices
+
+integer function nc_buf_chunk(dt_in_file) result(chunk)
+   ! Timesteps per input buffer: the whole file unless SPEL_IO_CHUNK caps it
+   integer, intent(in) :: dt_in_file
+   character(len=32) :: env
+   integer :: stat, n
+   chunk = dt_in_file
+   call get_environment_variable('SPEL_IO_CHUNK', env, status=stat)
+   if (stat == 0) then
+      read (env, *, iostat=stat) n
+      if (stat == 0 .and. n > 0) chunk = min(n, dt_in_file)
+   end if
+   print *, 'SPEL input buffer: ', chunk, ' timesteps per read'
+end function nc_buf_chunk
+
+subroutine nc_buf_load_double_0(ncid, varname, vshape, buf, t0, nt, chunk, sd, nfile)
+   integer, intent(in) :: ncid, vshape(:), t0, nt, chunk
+   character(len=*), intent(in) :: varname
+   real(8), allocatable, intent(inout) :: buf(:)
+   integer, intent(inout) :: sd, nfile
+   integer :: var_id, nd, t
+   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   sd = 0; nfile = 0
+   if (allocated(buf)) then
+      if (size(buf) /= chunk) then
+         print *, 'nc_buf_load: input shape changed for ', trim(varname)
+         error stop
+      end if
+   else
+      allocate (buf(chunk))
+      if (spel_buf_on_device) then
+         !$acc enter data create(buf)
+      end if
+   end if
+   call check(nf90_inquire_variable(ncid, var_id, ndims=nd))
+   if (nd > 0) then
+      call check(nf90_get_var(ncid, var_id, buf, start=[t0], count=[nt]))
+   else
+      ! no time dimension in the file (e.g. scalars): same value every step
+      call check(nf90_get_var(ncid, var_id, buf(1)))
+      do t = 2, nt
+         buf(t) = buf(1)
+      end do
+   end if
+   if (spel_buf_on_device) then
+      !$acc update device(buf(1:nt))
+   end if
+end subroutine nc_buf_load_double_0
+
+subroutine nc_buf_copy_double_0(var, buf, it, sd, nfile)
+   real(8), intent(inout) :: var
+   real(8), intent(in) :: buf(:)
+   integer, intent(in) :: it, sd, nfile
+   var = buf(it)
+#ifdef _OPENACC
+   if (spel_buf_on_device) then
+      if (acc_is_present(var, storage_size(var)/8)) then
+         !$acc update device(var)
+      end if
+   end if
+#endif
+end subroutine nc_buf_copy_double_0
+
+subroutine nc_buf_load_double_1(ncid, varname, vshape, buf, t0, nt, chunk, sd, nfile)
+   integer, intent(in) :: ncid, vshape(:), t0, nt, chunk
+   character(len=*), intent(in) :: varname
+   real(8), allocatable, intent(inout) :: buf(:,:)
+   integer, intent(inout) :: sd, nfile
+   integer :: var_id, nd, t
+   integer :: fshape(1)
+   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call nc_file_subgrid(ncid, var_id, 1, sd, nfile)
+   fshape = vshape
+   if (sd > 0) then
+      if (vshape(sd) /= spel_nsets*nfile) then
+         sd = 0
+      else
+         fshape(sd) = nfile
+      end if
+   end if
+   if (allocated(buf)) then
+      if (any(shape(buf) /= [fshape, chunk])) then
+         print *, 'nc_buf_load: input shape changed for ', trim(varname)
+         error stop
+      end if
+   else
+      allocate (buf(fshape(1), chunk))
+      if (spel_buf_on_device) then
+         !$acc enter data create(buf)
+      end if
+   end if
+   call check(nf90_inquire_variable(ncid, var_id, ndims=nd))
+   if (nd > 1) then
+      call check(nf90_get_var(ncid, var_id, buf, start=[1, t0], count=[fshape, nt]))
+   else
+      ! no time dimension in the file (e.g. scalars): same value every step
+      call check(nf90_get_var(ncid, var_id, buf(:, 1)))
+      do t = 2, nt
+         buf(:, t) = buf(:, 1)
+      end do
+   end if
+   if (spel_buf_on_device) then
+      !$acc update device(buf(:, 1:nt))
+   end if
+end subroutine nc_buf_load_double_1
+
+subroutine nc_buf_copy_double_1(var, buf, it, sd, nfile)
+   real(8), intent(inout) :: var(:)
+   real(8), intent(in) :: buf(:,:)
+   integer, intent(in) :: it, sd, nfile
+   integer :: k, nk, o, i1
+   logical :: dev
+   nk = 1
+   if (sd > 0) nk = spel_nsets
+   dev = .false.
+#ifdef _OPENACC
+   if (spel_buf_on_device) dev = acc_is_present(var)
+#endif
+   if (dev) then
+      !$acc parallel loop gang vector collapse(2) private(o) present(var, buf)
+      do k = 1, nk
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1)) = buf(i1, it)
+      end do
+      end do
+   else
+      do k = 1, nk
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1)) = buf(i1, it)
+      end do
+      end do
+   end if
+end subroutine nc_buf_copy_double_1
+
+subroutine nc_buf_load_double_2(ncid, varname, vshape, buf, t0, nt, chunk, sd, nfile)
+   integer, intent(in) :: ncid, vshape(:), t0, nt, chunk
+   character(len=*), intent(in) :: varname
+   real(8), allocatable, intent(inout) :: buf(:,:,:)
+   integer, intent(inout) :: sd, nfile
+   integer :: var_id, nd, t
+   integer :: fshape(2)
+   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call nc_file_subgrid(ncid, var_id, 2, sd, nfile)
+   fshape = vshape
+   if (sd > 0) then
+      if (vshape(sd) /= spel_nsets*nfile) then
+         sd = 0
+      else
+         fshape(sd) = nfile
+      end if
+   end if
+   if (allocated(buf)) then
+      if (any(shape(buf) /= [fshape, chunk])) then
+         print *, 'nc_buf_load: input shape changed for ', trim(varname)
+         error stop
+      end if
+   else
+      allocate (buf(fshape(1), fshape(2), chunk))
+      if (spel_buf_on_device) then
+         !$acc enter data create(buf)
+      end if
+   end if
+   call check(nf90_inquire_variable(ncid, var_id, ndims=nd))
+   if (nd > 2) then
+      call check(nf90_get_var(ncid, var_id, buf, start=[1, 1, t0], count=[fshape, nt]))
+   else
+      ! no time dimension in the file (e.g. scalars): same value every step
+      call check(nf90_get_var(ncid, var_id, buf(:, :, 1)))
+      do t = 2, nt
+         buf(:, :, t) = buf(:, :, 1)
+      end do
+   end if
+   if (spel_buf_on_device) then
+      !$acc update device(buf(:, :, 1:nt))
+   end if
+end subroutine nc_buf_load_double_2
+
+subroutine nc_buf_copy_double_2(var, buf, it, sd, nfile)
+   real(8), intent(inout) :: var(:,:)
+   real(8), intent(in) :: buf(:,:,:)
+   integer, intent(in) :: it, sd, nfile
+   integer :: k, nk, o, i1, i2
+   logical :: dev
+   nk = 1
+   if (sd > 0) nk = spel_nsets
+   dev = .false.
+#ifdef _OPENACC
+   if (spel_buf_on_device) dev = acc_is_present(var)
+#endif
+   if (dev) then
+      !$acc parallel loop gang vector collapse(3) private(o) present(var, buf)
+      do k = 1, nk
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2)) = buf(i1, i2, it)
+      end do
+      end do
+      end do
+   else
+      do k = 1, nk
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2)) = buf(i1, i2, it)
+      end do
+      end do
+      end do
+   end if
+end subroutine nc_buf_copy_double_2
+
+subroutine nc_buf_load_double_3(ncid, varname, vshape, buf, t0, nt, chunk, sd, nfile)
+   integer, intent(in) :: ncid, vshape(:), t0, nt, chunk
+   character(len=*), intent(in) :: varname
+   real(8), allocatable, intent(inout) :: buf(:,:,:,:)
+   integer, intent(inout) :: sd, nfile
+   integer :: var_id, nd, t
+   integer :: fshape(3)
+   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call nc_file_subgrid(ncid, var_id, 3, sd, nfile)
+   fshape = vshape
+   if (sd > 0) then
+      if (vshape(sd) /= spel_nsets*nfile) then
+         sd = 0
+      else
+         fshape(sd) = nfile
+      end if
+   end if
+   if (allocated(buf)) then
+      if (any(shape(buf) /= [fshape, chunk])) then
+         print *, 'nc_buf_load: input shape changed for ', trim(varname)
+         error stop
+      end if
+   else
+      allocate (buf(fshape(1), fshape(2), fshape(3), chunk))
+      if (spel_buf_on_device) then
+         !$acc enter data create(buf)
+      end if
+   end if
+   call check(nf90_inquire_variable(ncid, var_id, ndims=nd))
+   if (nd > 3) then
+      call check(nf90_get_var(ncid, var_id, buf, start=[1, 1, 1, t0], count=[fshape, nt]))
+   else
+      ! no time dimension in the file (e.g. scalars): same value every step
+      call check(nf90_get_var(ncid, var_id, buf(:, :, :, 1)))
+      do t = 2, nt
+         buf(:, :, :, t) = buf(:, :, :, 1)
+      end do
+   end if
+   if (spel_buf_on_device) then
+      !$acc update device(buf(:, :, :, 1:nt))
+   end if
+end subroutine nc_buf_load_double_3
+
+subroutine nc_buf_copy_double_3(var, buf, it, sd, nfile)
+   real(8), intent(inout) :: var(:,:,:)
+   real(8), intent(in) :: buf(:,:,:,:)
+   integer, intent(in) :: it, sd, nfile
+   integer :: k, nk, o, i1, i2, i3
+   logical :: dev
+   nk = 1
+   if (sd > 0) nk = spel_nsets
+   dev = .false.
+#ifdef _OPENACC
+   if (spel_buf_on_device) dev = acc_is_present(var)
+#endif
+   if (dev) then
+      !$acc parallel loop gang vector collapse(4) private(o) present(var, buf)
+      do k = 1, nk
+      do i3 = 1, size(buf, 3)
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2), i3 + merge(o, 0, sd == 3)) = buf(i1, i2, i3, it)
+      end do
+      end do
+      end do
+      end do
+   else
+      do k = 1, nk
+      do i3 = 1, size(buf, 3)
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2), i3 + merge(o, 0, sd == 3)) = buf(i1, i2, i3, it)
+      end do
+      end do
+      end do
+      end do
+   end if
+end subroutine nc_buf_copy_double_3
+
+subroutine nc_buf_load_integer_0(ncid, varname, vshape, buf, t0, nt, chunk, sd, nfile)
+   integer, intent(in) :: ncid, vshape(:), t0, nt, chunk
+   character(len=*), intent(in) :: varname
+   integer, allocatable, intent(inout) :: buf(:)
+   integer, intent(inout) :: sd, nfile
+   integer :: var_id, nd, t
+   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   sd = 0; nfile = 0
+   if (allocated(buf)) then
+      if (size(buf) /= chunk) then
+         print *, 'nc_buf_load: input shape changed for ', trim(varname)
+         error stop
+      end if
+   else
+      allocate (buf(chunk))
+      if (spel_buf_on_device) then
+         !$acc enter data create(buf)
+      end if
+   end if
+   call check(nf90_inquire_variable(ncid, var_id, ndims=nd))
+   if (nd > 0) then
+      call check(nf90_get_var(ncid, var_id, buf, start=[t0], count=[nt]))
+   else
+      ! no time dimension in the file (e.g. scalars): same value every step
+      call check(nf90_get_var(ncid, var_id, buf(1)))
+      do t = 2, nt
+         buf(t) = buf(1)
+      end do
+   end if
+   if (spel_buf_on_device) then
+      !$acc update device(buf(1:nt))
+   end if
+end subroutine nc_buf_load_integer_0
+
+subroutine nc_buf_copy_integer_0(var, buf, it, sd, nfile)
+   integer, intent(inout) :: var
+   integer, intent(in) :: buf(:)
+   integer, intent(in) :: it, sd, nfile
+   var = buf(it)
+#ifdef _OPENACC
+   if (spel_buf_on_device) then
+      if (acc_is_present(var, storage_size(var)/8)) then
+         !$acc update device(var)
+      end if
+   end if
+#endif
+end subroutine nc_buf_copy_integer_0
+
+subroutine nc_buf_load_integer_1(ncid, varname, vshape, buf, t0, nt, chunk, sd, nfile)
+   integer, intent(in) :: ncid, vshape(:), t0, nt, chunk
+   character(len=*), intent(in) :: varname
+   integer, allocatable, intent(inout) :: buf(:,:)
+   integer, intent(inout) :: sd, nfile
+   integer :: var_id, nd, t
+   integer :: fshape(1)
+   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call nc_file_subgrid(ncid, var_id, 1, sd, nfile)
+   fshape = vshape
+   if (sd > 0) then
+      if (vshape(sd) /= spel_nsets*nfile) then
+         sd = 0
+      else
+         fshape(sd) = nfile
+      end if
+   end if
+   if (allocated(buf)) then
+      if (any(shape(buf) /= [fshape, chunk])) then
+         print *, 'nc_buf_load: input shape changed for ', trim(varname)
+         error stop
+      end if
+   else
+      allocate (buf(fshape(1), chunk))
+      if (spel_buf_on_device) then
+         !$acc enter data create(buf)
+      end if
+   end if
+   call check(nf90_inquire_variable(ncid, var_id, ndims=nd))
+   if (nd > 1) then
+      call check(nf90_get_var(ncid, var_id, buf, start=[1, t0], count=[fshape, nt]))
+   else
+      ! no time dimension in the file (e.g. scalars): same value every step
+      call check(nf90_get_var(ncid, var_id, buf(:, 1)))
+      do t = 2, nt
+         buf(:, t) = buf(:, 1)
+      end do
+   end if
+   if (spel_buf_on_device) then
+      !$acc update device(buf(:, 1:nt))
+   end if
+end subroutine nc_buf_load_integer_1
+
+subroutine nc_buf_copy_integer_1(var, buf, it, sd, nfile)
+   integer, intent(inout) :: var(:)
+   integer, intent(in) :: buf(:,:)
+   integer, intent(in) :: it, sd, nfile
+   integer :: k, nk, o, i1
+   logical :: dev
+   nk = 1
+   if (sd > 0) nk = spel_nsets
+   dev = .false.
+#ifdef _OPENACC
+   if (spel_buf_on_device) dev = acc_is_present(var)
+#endif
+   if (dev) then
+      !$acc parallel loop gang vector collapse(2) private(o) present(var, buf)
+      do k = 1, nk
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1)) = buf(i1, it)
+      end do
+      end do
+   else
+      do k = 1, nk
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1)) = buf(i1, it)
+      end do
+      end do
+   end if
+end subroutine nc_buf_copy_integer_1
+
+subroutine nc_buf_load_integer_2(ncid, varname, vshape, buf, t0, nt, chunk, sd, nfile)
+   integer, intent(in) :: ncid, vshape(:), t0, nt, chunk
+   character(len=*), intent(in) :: varname
+   integer, allocatable, intent(inout) :: buf(:,:,:)
+   integer, intent(inout) :: sd, nfile
+   integer :: var_id, nd, t
+   integer :: fshape(2)
+   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call nc_file_subgrid(ncid, var_id, 2, sd, nfile)
+   fshape = vshape
+   if (sd > 0) then
+      if (vshape(sd) /= spel_nsets*nfile) then
+         sd = 0
+      else
+         fshape(sd) = nfile
+      end if
+   end if
+   if (allocated(buf)) then
+      if (any(shape(buf) /= [fshape, chunk])) then
+         print *, 'nc_buf_load: input shape changed for ', trim(varname)
+         error stop
+      end if
+   else
+      allocate (buf(fshape(1), fshape(2), chunk))
+      if (spel_buf_on_device) then
+         !$acc enter data create(buf)
+      end if
+   end if
+   call check(nf90_inquire_variable(ncid, var_id, ndims=nd))
+   if (nd > 2) then
+      call check(nf90_get_var(ncid, var_id, buf, start=[1, 1, t0], count=[fshape, nt]))
+   else
+      ! no time dimension in the file (e.g. scalars): same value every step
+      call check(nf90_get_var(ncid, var_id, buf(:, :, 1)))
+      do t = 2, nt
+         buf(:, :, t) = buf(:, :, 1)
+      end do
+   end if
+   if (spel_buf_on_device) then
+      !$acc update device(buf(:, :, 1:nt))
+   end if
+end subroutine nc_buf_load_integer_2
+
+subroutine nc_buf_copy_integer_2(var, buf, it, sd, nfile)
+   integer, intent(inout) :: var(:,:)
+   integer, intent(in) :: buf(:,:,:)
+   integer, intent(in) :: it, sd, nfile
+   integer :: k, nk, o, i1, i2
+   logical :: dev
+   nk = 1
+   if (sd > 0) nk = spel_nsets
+   dev = .false.
+#ifdef _OPENACC
+   if (spel_buf_on_device) dev = acc_is_present(var)
+#endif
+   if (dev) then
+      !$acc parallel loop gang vector collapse(3) private(o) present(var, buf)
+      do k = 1, nk
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2)) = buf(i1, i2, it)
+      end do
+      end do
+      end do
+   else
+      do k = 1, nk
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2)) = buf(i1, i2, it)
+      end do
+      end do
+      end do
+   end if
+end subroutine nc_buf_copy_integer_2
+
+subroutine nc_buf_load_integer_3(ncid, varname, vshape, buf, t0, nt, chunk, sd, nfile)
+   integer, intent(in) :: ncid, vshape(:), t0, nt, chunk
+   character(len=*), intent(in) :: varname
+   integer, allocatable, intent(inout) :: buf(:,:,:,:)
+   integer, intent(inout) :: sd, nfile
+   integer :: var_id, nd, t
+   integer :: fshape(3)
+   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call nc_file_subgrid(ncid, var_id, 3, sd, nfile)
+   fshape = vshape
+   if (sd > 0) then
+      if (vshape(sd) /= spel_nsets*nfile) then
+         sd = 0
+      else
+         fshape(sd) = nfile
+      end if
+   end if
+   if (allocated(buf)) then
+      if (any(shape(buf) /= [fshape, chunk])) then
+         print *, 'nc_buf_load: input shape changed for ', trim(varname)
+         error stop
+      end if
+   else
+      allocate (buf(fshape(1), fshape(2), fshape(3), chunk))
+      if (spel_buf_on_device) then
+         !$acc enter data create(buf)
+      end if
+   end if
+   call check(nf90_inquire_variable(ncid, var_id, ndims=nd))
+   if (nd > 3) then
+      call check(nf90_get_var(ncid, var_id, buf, start=[1, 1, 1, t0], count=[fshape, nt]))
+   else
+      ! no time dimension in the file (e.g. scalars): same value every step
+      call check(nf90_get_var(ncid, var_id, buf(:, :, :, 1)))
+      do t = 2, nt
+         buf(:, :, :, t) = buf(:, :, :, 1)
+      end do
+   end if
+   if (spel_buf_on_device) then
+      !$acc update device(buf(:, :, :, 1:nt))
+   end if
+end subroutine nc_buf_load_integer_3
+
+subroutine nc_buf_copy_integer_3(var, buf, it, sd, nfile)
+   integer, intent(inout) :: var(:,:,:)
+   integer, intent(in) :: buf(:,:,:,:)
+   integer, intent(in) :: it, sd, nfile
+   integer :: k, nk, o, i1, i2, i3
+   logical :: dev
+   nk = 1
+   if (sd > 0) nk = spel_nsets
+   dev = .false.
+#ifdef _OPENACC
+   if (spel_buf_on_device) dev = acc_is_present(var)
+#endif
+   if (dev) then
+      !$acc parallel loop gang vector collapse(4) private(o) present(var, buf)
+      do k = 1, nk
+      do i3 = 1, size(buf, 3)
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2), i3 + merge(o, 0, sd == 3)) = buf(i1, i2, i3, it)
+      end do
+      end do
+      end do
+      end do
+   else
+      do k = 1, nk
+      do i3 = 1, size(buf, 3)
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2), i3 + merge(o, 0, sd == 3)) = buf(i1, i2, i3, it)
+      end do
+      end do
+      end do
+      end do
+   end if
+end subroutine nc_buf_copy_integer_3
+
+subroutine nc_buf_copy_logical_0(var, buf, it, sd, nfile)
+   logical, intent(inout) :: var
+   integer, intent(in) :: buf(:)
+   integer, intent(in) :: it, sd, nfile
+   var = buf(it) == 1
+#ifdef _OPENACC
+   if (spel_buf_on_device) then
+      if (acc_is_present(var, storage_size(var)/8)) then
+         !$acc update device(var)
+      end if
+   end if
+#endif
+end subroutine nc_buf_copy_logical_0
+
+subroutine nc_buf_copy_logical_1(var, buf, it, sd, nfile)
+   logical, intent(inout) :: var(:)
+   integer, intent(in) :: buf(:,:)
+   integer, intent(in) :: it, sd, nfile
+   integer :: k, nk, o, i1
+   logical :: dev
+   nk = 1
+   if (sd > 0) nk = spel_nsets
+   dev = .false.
+#ifdef _OPENACC
+   if (spel_buf_on_device) dev = acc_is_present(var)
+#endif
+   if (dev) then
+      !$acc parallel loop gang vector collapse(2) private(o) present(var, buf)
+      do k = 1, nk
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1)) = buf(i1, it) == 1
+      end do
+      end do
+   else
+      do k = 1, nk
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1)) = buf(i1, it) == 1
+      end do
+      end do
+   end if
+end subroutine nc_buf_copy_logical_1
+
+subroutine nc_buf_copy_logical_2(var, buf, it, sd, nfile)
+   logical, intent(inout) :: var(:,:)
+   integer, intent(in) :: buf(:,:,:)
+   integer, intent(in) :: it, sd, nfile
+   integer :: k, nk, o, i1, i2
+   logical :: dev
+   nk = 1
+   if (sd > 0) nk = spel_nsets
+   dev = .false.
+#ifdef _OPENACC
+   if (spel_buf_on_device) dev = acc_is_present(var)
+#endif
+   if (dev) then
+      !$acc parallel loop gang vector collapse(3) private(o) present(var, buf)
+      do k = 1, nk
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2)) = buf(i1, i2, it) == 1
+      end do
+      end do
+      end do
+   else
+      do k = 1, nk
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2)) = buf(i1, i2, it) == 1
+      end do
+      end do
+      end do
+   end if
+end subroutine nc_buf_copy_logical_2
+
+subroutine nc_buf_copy_logical_3(var, buf, it, sd, nfile)
+   logical, intent(inout) :: var(:,:,:)
+   integer, intent(in) :: buf(:,:,:,:)
+   integer, intent(in) :: it, sd, nfile
+   integer :: k, nk, o, i1, i2, i3
+   logical :: dev
+   nk = 1
+   if (sd > 0) nk = spel_nsets
+   dev = .false.
+#ifdef _OPENACC
+   if (spel_buf_on_device) dev = acc_is_present(var)
+#endif
+   if (dev) then
+      !$acc parallel loop gang vector collapse(4) private(o) present(var, buf)
+      do k = 1, nk
+      do i3 = 1, size(buf, 3)
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2), i3 + merge(o, 0, sd == 3)) = buf(i1, i2, i3, it) == 1
+      end do
+      end do
+      end do
+      end do
+   else
+      do k = 1, nk
+      do i3 = 1, size(buf, 3)
+      do i2 = 1, size(buf, 2)
+      do i1 = 1, size(buf, 1)
+         o = (k-1)*nfile
+         var(i1 + merge(o, 0, sd == 1), i2 + merge(o, 0, sd == 2), i3 + merge(o, 0, sd == 3)) = buf(i1, i2, i3, it) == 1
+      end do
+      end do
+      end do
+      end do
+   end if
+end subroutine nc_buf_copy_logical_3
 end module nc_io
