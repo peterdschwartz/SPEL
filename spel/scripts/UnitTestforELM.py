@@ -298,6 +298,7 @@ def finalize_unit_test(unit_test: FunctionalUnitTest, db_mode: bool) -> None:
             f"cp {spel_output_dir}/duplicateMod.F90 {case_dir}",
             f"cp {spel_mods_dir}/nc_io.F90 {case_dir}",
             f"cp {spel_mods_dir}/nc_allocMod.F90 {case_dir}",
+            f"cp {spel_mods_dir}/spel_profMod.F90 {case_dir}",
             f"cp {spel_mods_dir}/unittest_defs.h {case_dir}",
             f"cp {spel_mods_dir}/decompInitMod.F90 {case_dir}",
             f"cp {spel_mods_dir}/check_config.sh {case_dir}",

@@ -14,6 +14,7 @@ use timeInfoMod
 use elm_initializeMod
 use duplicateMod, only: duplicate_sets
 use nc_io, only: nc_read_timeslices, spel_io_init, io_constants, io_inputs, io_outputs
+use spel_profMod, only: spel_prof_push, spel_prof_pop, spel_env_flag, spel_env_int
 !#USE_START
 
 !=======================================!
@@ -32,6 +33,10 @@ integer :: time_len
 real(r8) :: declin, declinp1
 real :: startt, stopt
 real(r8), allocatable :: icemask_dummy_arr(:)
+! SPEL_PROFILE=1 skips the output (device->host copy and write_elmtypes);
+! SPEL_MAX_STEPS=N runs at most N time steps
+logical :: spel_profile
+integer :: max_step
 !#VAR_DECL
 
 !========================== Initialize/Allocate variables =======================!
@@ -48,6 +53,12 @@ IF (COMMAND_ARGUMENT_COUNT() > 1) THEN
    WRITE (*, *) 'WARNING: extra command-line arguments ignored (only nsets is used)'
 END IF
 WRITE (*, *) 'nsets = ', nsets
+spel_profile = spel_env_flag('SPEL_PROFILE')
+max_step = spel_env_int('SPEL_MAX_STEPS', 1001) - 1
+if (spel_profile) WRITE (*, *) 'SPEL_PROFILE: outputs disabled'
+if (max_step /= 1000) WRITE (*, *) 'SPEL_MAX_STEPS: running ', max_step + 1, ' steps'
+
+call spel_prof_push('spel_init')
 
 block 
    !#INPUT_PATH
@@ -85,6 +96,7 @@ declin = -0.4030289369547867
 !$acc update device(dtime_mod, dayspyr_mod, &
 !$acc    year_curr, mon_curr, day_curr, secs_curr, nstep_mod, thiscalday_mod &
 !$acc  , nextsw_cday_mod, end_cd_mod, doalb )
+call spel_prof_pop() ! spel_init
 
 
 #ifdef _OPENACC
@@ -99,30 +111,51 @@ nc = 1
 
 block
     integer :: step = 0
-    integer :: max_step = 1000
+    call spel_prof_push('spel_timesteps')
     do while (.true.)
 
+       call spel_prof_push('step')
        if (step .ne. 0) then
+          call spel_prof_push('read_inputs')
           !#IO_READ
+          call spel_prof_pop()
 
           ! read_elmtypes leaves bounds_clump at one set's bounds. The inputs
           ! are copied from the (device) input buffers, so no host->device
           ! update is needed; duplicate_sets also offsets on the device.
-          if (.not. io_inputs%end_run) call duplicate_sets(nsets, bounds_clump)
+          if (.not. io_inputs%end_run) then
+             call spel_prof_push('duplicate_sets')
+             call duplicate_sets(nsets, bounds_clump)
+             call spel_prof_pop()
+          end if
        end if
-       if (io_inputs%end_run .or. step > max_step) exit
+       if (io_inputs%end_run .or. step > max_step) then
+          call spel_prof_pop() ! step
+          exit
+       end if
 
        call get_clump_bounds(nc,bounds_clump)
        !$acc update device(bounds_clump)
 
+      call spel_prof_push('compute')
       !#CALL_SUB
+      call spel_prof_pop()
 
-       !#ACC_UPDATE_HOST
+       if (.not. spel_profile) then
+          call spel_prof_push('update_host')
+          !#ACC_UPDATE_HOST
+          call spel_prof_pop()
 
-       !#IO_WRITE
+          call spel_prof_push('write_outputs')
+          !#IO_WRITE
+          call spel_prof_pop()
+       end if
 
+       call spel_prof_pop() ! step
        step = step + 1
     end do
+    !$acc wait
+    call spel_prof_pop() ! spel_timesteps
 end block
 
 print *, "Finished: Read ", io_inputs%filenum-1, " files"

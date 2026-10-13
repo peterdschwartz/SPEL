@@ -558,7 +558,9 @@ class FunctionalUnitTest:
 
         lines = insert_at_token(lines, "!#USE_START", modules_to_add)
         lines = insert_at_token(lines, "!#VAR_DECL", adjusted_vars)
-        lines = insert_at_token(lines, "!#CALL_SUB", reversed(adjusted_calls))
+        lines = insert_at_token(
+            lines, "!#CALL_SUB", with_prof_ranges(list(reversed(adjusted_calls)))
+        )
         lines = insert_at_token(
             lines,
             "!#INPUT_PATH",
@@ -848,6 +850,7 @@ def generate_cmake(files: list[str], case_dir: Path):
     project(ELM-UnitTest LANGUAGES Fortran)
 
     option(DBG "Enable Debug mode" OFF)
+    option(NVTX "NVTX ranges for Nsight profiling (nvfortran only)" ON)
     set(ACC "OFF" CACHE STRING "OpenACC target: OFF, MULTICORE (host threads) or GPU")
     set_property(CACHE ACC PROPERTY STRINGS OFF MULTICORE GPU)
     option(GPU "Same as -DACC=GPU (kept for old check_config.sh scripts)" OFF)
@@ -922,6 +925,11 @@ def generate_cmake(files: list[str], case_dir: Path):
 
 
     target_compile_definitions({exe_name} PRIVATE {" ".join(macros)})
+    if (NVTX AND CMAKE_Fortran_COMPILER_ID MATCHES "^(NVHPC|PGI)$")
+        message(STATUS "NVTX ranges enabled (spel_profMod)")
+        target_compile_definitions({exe_name} PRIVATE SPEL_NVTX)
+        target_link_options({exe_name} PRIVATE -cudalib=nvtx)
+    endif()
     message(STATUS "Final Fortran flags: ${{CMAKE_Fortran_FLAGS}}")
 
     # Add test
@@ -1122,6 +1130,20 @@ def write_elminstMod(
 
     file.write("end module elm_instMod\n")
     file.close()
+
+
+def with_prof_ranges(calls: list[str]) -> list[str]:
+    """Wrap each `call name(...)` in spel_profMod (NVTX) push/pop ranges named `name`."""
+    out: list[str] = []
+    for c in calls:
+        m = re.match(r"\s*call\s+(\w+)", c, re.IGNORECASE)
+        if m is None:
+            out.append(c)
+            continue
+        out.extend(
+            [f"call spel_prof_push('{m.group(1)}')\n", c, "call spel_prof_pop()\n"]
+        )
+    return out
 
 
 def insert_at_token(lines: list[str], token: str, lines_to_add: Iterable[str]):

@@ -173,6 +173,24 @@ def run(args):
         raise SystemExit(code)
 
 
+def profile(args):
+    import shlex
+
+    from spel.scripts.run_fut import profile_unit_test
+
+    case_dir = Path(f"{SPEL_ROOT}/unit-tests/{args.case}") if args.case else Path.cwd()
+    exe_args = [args.nsets] if args.nsets else []
+    profile_unit_test(
+        case_dir,
+        exe_args,
+        tool=args.tool,
+        steps=args.steps,
+        output=Path(args.output) if args.output else None,
+        stats=args.stats,
+        tool_args=shlex.split(args.tool_args),
+    )
+
+
 def repl(args):
     from IPython.terminal.embed import InteractiveShellEmbed
 
@@ -477,6 +495,31 @@ def main():
         help="Arguments for the unit test executable",
     )
     run_parser.set_defaults(func=run)
+
+    profile_parser = subparsers.add_parser(
+        "profile",
+        help="build and run FUT without outputs (SPEL_PROFILE=1) under Nsight Systems/Compute",
+    )
+    profile_parser.add_argument("case", nargs="?", help="Unit test name (default: cwd)")
+    profile_parser.add_argument("nsets", nargs="?", help="Number of sets (default 1)")
+    profile_parser.add_argument(
+        "--tool",
+        choices=["nsys", "ncu", "none"],
+        default="nsys",
+        help="nsys (timeline), ncu (kernels in the 'compute' NVTX range) or none",
+    )
+    profile_parser.add_argument(
+        "--steps", type=int, default=None, help="stop after this many time steps (SPEL_MAX_STEPS)"
+    )
+    profile_parser.add_argument(
+        "-o", "--output", default=None,
+        help="report path (default unit-tests/profiles/<case>/<case>-nsets<N>-<tool>)",
+    )
+    profile_parser.add_argument("--stats", action="store_true", help="nsys: print summary stats")
+    profile_parser.add_argument(
+        "--tool-args", default="", help="extra profiler options, e.g. \"--launch-count 20\""
+    )
+    profile_parser.set_defaults(func=profile)
 
     upload_parser = subparsers.add_parser(
         "upload", help="rsync netCDF-Interface files <mach> <dest>"

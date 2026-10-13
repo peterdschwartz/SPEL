@@ -106,6 +106,7 @@ All commands are subcommands of `spel`. Run `spel <command> --help` for the auth
 | [`spel instrument`](#spel-instrument) | Instrument ELM to capture reference data; optionally build/run a CIME case |
 | [`spel validate`](#spel-validate) | Create, capture (one ELM run) and validate many unit tests in parallel |
 | [`spel run`](#spel-run) | Configure, build, and run a generated unit test, then validate it against ELM's data |
+| [`spel profile`](#spel-profile) | Build and run a unit test without outputs under Nsight Systems/Compute |
 | [`spel diff`](#spel-diff) | Compare two netCDF files and report relative error |
 | [`spel export`](#spel-export) | Turn a pickled unit test into database CSVs |
 | [`spel config`](#spel-config) | Print the resolved E3SM/ELM source paths |
@@ -331,6 +332,37 @@ ACC_NUM_CORES=4 ./build/elmtest   # rerun with 4 threads
 
 Comparing `ACC=OFF` and `ACC=MULTICORE` outputs (including `ACC_NUM_CORES=1` vs all cores) catches
 missing `private`/`reduction` clauses and races without a GPU.
+
+### `spel profile`
+
+Builds the case like `spel run`, then runs `build/elmtest` with `SPEL_PROFILE=1` under Nsight
+Systems (default) or Nsight Compute. No validation is done. In profile mode `main.F90` skips the
+per-step device-to-host copy (`spel_acc_update_host`) and `write_elmtypes`, because outputs only
+matter for correctness checks.
+
+```bash
+SPEL_FC=nvfortran SPEL_ACC=GPU SPEL_DBG=OFF spel profile canflux 8 --steps 100 --stats
+spel profile canflux 8 --tool ncu --steps 2 --tool-args "--set full --launch-count 20"
+spel profile canflux --tool none --steps 10          # profile mode, no profiler
+```
+
+| Option | Meaning |
+|--------|---------|
+| `--tool nsys` | `nsys profile --trace=cuda,nvtx,openacc,osrt`; `--stats` prints the summary tables |
+| `--tool ncu` | `ncu --nvtx --nvtx-include compute/`: only kernels from the routines under test |
+| `--steps N` | run at most `N` time steps (`SPEL_MAX_STEPS`) |
+| `-o PATH` | report path; default `unit-tests/profiles/<case>/<case>-nsets<N>-<tool>`, outside the case dir so `spel create` doesn't delete it |
+| `--tool-args "..."` | extra profiler options |
+
+nvfortran builds mark NVTX ranges (`spel_profMod`, compiled with `-DSPEL_NVTX`, linked with
+`-cudalib=nvtx`; configure with `-DNVTX=OFF` to drop them). The ranges are `spel_init` and
+`spel_timesteps`; inside the latter, each `step` contains `read_inputs`, `duplicate_sets`,
+`compute` (one range per generated call, e.g. `canopyfluxes`), and, outside profile mode,
+`update_host` and `write_outputs`. For gfortran builds the ranges are no-ops.
+You can also set `SPEL_PROFILE` and `SPEL_MAX_STEPS` yourself when running `build/elmtest`
+directly (e.g. under `nsys` or `ncu` with your own options).
+`ncu` needs access to the GPU performance counters (`ERR_NVGPUCTRPERM` otherwise; see NVIDIA's
+instructions for that error).
 
 ### `spel diff`
 

@@ -41,6 +41,9 @@ Do this in a scratch directory so `.mod`/`.o` files don't land in the repo.
 - Select the toolchain with env vars, which override `check_config.sh`:
   `SPEL_FC=nvfortran|gfortran SPEL_ACC=OFF|MULTICORE|GPU SPEL_DBG=ON|OFF spel run <case> [nsets]`.
 - `spel run` prompts for confirmation; use `yes | spel run ...` when running non-interactively.
+- `spel profile <case> [nsets] --steps N` runs with `SPEL_PROFILE=1` (no outputs written) under
+  `nsys`; it needs the same `SPEL_FC`/`SPEL_ACC` vars as the build, or `check_config.sh` reconfigures.
+  NVTX ranges come from `SourceFiles/spel_profMod.F90` (nvfortran only).
 - Only test on the local machine unless the user asks otherwise.
 
 ## Analysis cache
