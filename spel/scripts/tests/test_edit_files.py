@@ -271,3 +271,33 @@ def test_dummy_args():
     assert ef.dummy_args("subroutine foo(ncid, Flag)") == {"ncid", "flag"}
     assert ef.dummy_args("real(r8) function f(a, b) result(c)") == {"a", "b"}
     assert ef.dummy_args("subroutine g") == set()
+
+
+def test_remove_cpp_directives_keeps_one_entry_per_line(tmp_path):
+    """
+    The commented `#include "shr_assert.h"` stands in for the blank line cpp
+    emits for it: one entry per source line, so positions match line numbers.
+    """
+    import logging
+
+    from spel.scripts.edit_files import remove_cpp_directives
+
+    src = tmp_path / "m.F90"
+    src.write_text('module m\n\n#include "shr_assert.h"\n  integer :: i\nend module m\n')
+    inc = tmp_path / "shr_assert.h"
+    inc.write_text("use shr_assert_mod\n")
+    cpp = [
+        f'# 1 "{src}"\n',
+        "module m\n",
+        "\n",
+        "\n",
+        f'# 1 "{inc}" 1\n',
+        "use shr_assert_mod\n",
+        f'# 4 "{src}" 2\n',
+        "  integer :: i\n",
+        "end module m\n",
+    ]
+    lines = remove_cpp_directives(cpp, str(src), logging.getLogger("test"))
+    assert [lt.ln for lt in lines] == [0, 1, 2, 3, 4]
+    assert lines[2].commented and "shr_assert.h" in lines[2].line
+    assert lines[3].line.strip() == "integer :: i"

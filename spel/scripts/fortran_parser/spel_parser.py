@@ -1472,8 +1472,11 @@ class Parser:
         # advance to end of statement
         self.next_token()
         block = self.parse_block_statement(tok, [Token(Tok.ENDDO, "ENDDO")])
+        end_ln = self.lineno
         self.skip_construct_name()
-        return DoLoop(tok, index, start_expr, end_expr, block, step)
+        loop = DoLoop(tok, index, start_expr, end_expr, block, step)
+        loop.end_ln = end_ln
+        return loop
 
     def skip_construct_name(self) -> None:
         """cur_token ends a construct (`end do`): consume an `end do <name>`"""

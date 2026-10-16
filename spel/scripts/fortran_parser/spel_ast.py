@@ -667,6 +667,8 @@ class DoLoop(Statement):
         self.end: Optional[Expression] = end
         self.step: Optional[Expression] = step
         self.body: BlockStatement = body
+        # line of the `end do` (set by the parser)
+        self.end_ln: int = -1
 
     def statement_node(self) -> None:
         pass

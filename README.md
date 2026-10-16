@@ -107,6 +107,7 @@ All commands are subcommands of `spel`. Run `spel <command> --help` for the auth
 | [`spel validate`](#spel-validate) | Create, capture (one ELM run) and validate many unit tests in parallel |
 | [`spel run`](#spel-run) | Configure, build, and run a generated unit test, then validate it against ELM's data |
 | [`spel profile`](#spel-profile) | Build and run a unit test without outputs under Nsight Systems/Compute |
+| [`spel acc2omp`](#spel-acc2omp) | Translate modules' OpenACC directives to OpenMP (to run multithreaded with gfortran) |
 | [`spel diff`](#spel-diff) | Compare two netCDF files and report relative error |
 | [`spel export`](#spel-export) | Turn a pickled unit test into database CSVs |
 | [`spel config`](#spel-config) | Print the resolved E3SM/ELM source paths |
@@ -322,6 +323,7 @@ environment variables `SPEL_FC`, `SPEL_DBG` and `SPEL_ACC` override them without
 | `OFF` (default) | none | `!$acc` directives are comments |
 | `MULTICORE` | nvfortran: `-acc=multicore -Minfo=accel` | compute regions run on host threads; set the count with `ACC_NUM_CORES` (default: all cores). gfortran only gets `-fopenacc -foffload=disable` and a warning: GCC has no multicore target, so regions run on one thread |
 | `GPU` | nvfortran: `-acc=gpu -gpu=deepcopy -Minfo=accel -cuda` | needs nvfortran (`-DGPU=ON` still works as an alias) |
+| `OPENMP` | gfortran: `-fopenmp`; nvfortran: `-mp -Minfo=mp` | for sources translated by [`spel acc2omp`](#spel-acc2omp); set the thread count with `OMP_NUM_THREADS` |
 
 ```bash
 # nvfortran needs its own netcdf-fortran build (.mod files are compiler specific) on
@@ -363,6 +365,55 @@ You can also set `SPEL_PROFILE` and `SPEL_MAX_STEPS` yourself when running `buil
 directly (e.g. under `nsys` or `ncu` with your own options).
 `ncu` needs access to the GPU performance counters (`ERR_NVGPUCTRPERM` otherwise; see NVIDIA's
 instructions for that error).
+
+To compare a refactored routine against its reference across thread counts, run
+`profile_compare.sh` (repo root) on the machine you want numbers for. It builds both cases with
+nvfortran (`-fast`), profiles the reference with `ACC=OFF` and the refactor with `ACC=OFF` and
+`ACC=MULTICORE` at each `ACC_NUM_CORES`, and tabulates the per-call time of the routine's NVTX range
+(speed-up vs. the reference and vs. one thread):
+
+```bash
+./profile_compare.sh --env nvhpc_env.sh -n 16 soiltemperature soiltemp_acc
+./profile_compare.sh -c "1 8 32 64 128" --omp-case soiltemp_omp soiltemperature soiltemp_acc
+LAUNCH="srun -n 1 -c 128 --cpu-bind=cores" ./profile_compare.sh soiltemperature soiltemp_acc
+```
+
+`--env` sources a module/env file first, `--omp-case` adds an `acc2omp` case built with
+`ACC=OPENMP`, `--link-inputs` points a new case at the reference case's input data, and `LAUNCH`
+prefixes every run. Results go to `unit-tests/profiles/compare-<case>-nsets<N>-<date>/`
+(`results.csv`, `summary.txt`, the `.nsys-rep` reports and build/run logs).
+
+### `spel acc2omp`
+
+Translates the OpenACC directives of analyzed modules to OpenMP, so a unit test can run
+multithreaded with gfortran (GCC has no OpenACC multicore target). The data-sharing clauses
+come from the analysis, not from the OpenACC clauses:
+
+- the loop each `!$acc parallel loop` applies to, and its `collapse` nest, come from the
+  routine's loop nest; collapsed loops must be perfectly nested and rectangular
+- local scalars written in the loop (including through intent(out)/(inout) call arguments)
+  and inner loop indices become `private`; `firstprivate` if the loop reads them before
+  writing them. OpenACC reductions are kept; arrays stay shared unless OpenACC privatizes them
+- written dummy or global scalars, privatized values read after the loop, and callees that
+  write SAVEd locals or global scalars are reported
+
+The report lists each loop's clauses and how they differ from the OpenACC `private` list
+(`added`: privatized by the analysis but not by OpenACC, a likely race in the OpenACC
+version too). Data directives (`data`, `enter/exit data`, `update`, `declare`, ...),
+`routine` and inner `loop` directives are removed; `atomic` becomes `!$omp atomic`.
+`!$acc parallel`/`kernels` regions without `loop` are left as OpenACC (serial) and reported.
+
+```bash
+spel acc2omp --case soiltemp_acc --diff            # rewrite the case's copies in place
+SPEL_ACC=OPENMP OMP_NUM_THREADS=6 spel run soiltemp_acc
+spel acc2omp soiltemperaturemod -o /tmp/omp        # translated copies of the E3SM sources
+spel acc2omp soiltemperaturemod --dry-run          # report only
+```
+
+With `--case` and no module names, every analyzed module of the case with OpenACC compute
+loops is translated. Edits are located by content, so they apply to the case copies even
+though `spel create` shifted their lines. `spel create` regenerates the case without them.
+The analysis must include loop-nest information (rebuild an older cache with `spel analyze`).
 
 ### `spel diff`
 

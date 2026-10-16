@@ -851,8 +851,8 @@ def generate_cmake(files: list[str], case_dir: Path):
 
     option(DBG "Enable Debug mode" OFF)
     option(NVTX "NVTX ranges for Nsight profiling (nvfortran only)" ON)
-    set(ACC "OFF" CACHE STRING "OpenACC target: OFF, MULTICORE (host threads) or GPU")
-    set_property(CACHE ACC PROPERTY STRINGS OFF MULTICORE GPU)
+    set(ACC "OFF" CACHE STRING "OpenACC target: OFF, MULTICORE (host threads), GPU, or OPENMP (sources translated by spel acc2omp)")
+    set_property(CACHE ACC PROPERTY STRINGS OFF MULTICORE GPU OPENMP)
     option(GPU "Same as -DACC=GPU (kept for old check_config.sh scripts)" OFF)
     string(TOUPPER "${{ACC}}" ACC_MODE)
     if (GPU)
@@ -861,8 +861,8 @@ def generate_cmake(files: list[str], case_dir: Path):
         endif()
         set(ACC_MODE "GPU")
     endif()
-    if (NOT ACC_MODE MATCHES "^(OFF|MULTICORE|GPU)$")
-        message(FATAL_ERROR "ACC must be OFF, MULTICORE or GPU (got '${{ACC}}')")
+    if (NOT ACC_MODE MATCHES "^(OFF|MULTICORE|GPU|OPENMP)$")
+        message(FATAL_ERROR "ACC must be OFF, MULTICORE, GPU or OPENMP (got '${{ACC}}')")
     endif()
 
     enable_testing()
@@ -884,6 +884,11 @@ def generate_cmake(files: list[str], case_dir: Path):
             string(APPEND CMAKE_Fortran_FLAGS " -fopenacc -foffload=disable")
         elseif (ACC_MODE STREQUAL "GPU")
             message(FATAL_ERROR "ACC=GPU needs nvfortran")
+        elseif (ACC_MODE STREQUAL "OPENMP")
+            message(STATUS "Enabling OpenMP (threads set by OMP_NUM_THREADS)")
+            # -U_OPENMP: ELM's own `#ifdef _OPENMP` code (clump threading) stays
+            # off, as in the analysis; only the translated directives are active
+            string(APPEND CMAKE_Fortran_FLAGS " -fopenmp -U_OPENMP")
         endif()
     else()
         if (DBG)
@@ -892,7 +897,7 @@ def generate_cmake(files: list[str], case_dir: Path):
             set(CMAKE_Fortran_FLAGS "${{CMAKE_Fortran_FLAGS}} -fast")
         endif()
 
-        if (NOT ACC_MODE STREQUAL "OFF" AND NOT CMAKE_Fortran_COMPILER_ID MATCHES "^(NVHPC|PGI)$")
+        if (NOT ACC_MODE MATCHES "^(OFF|OPENMP)$" AND NOT CMAKE_Fortran_COMPILER_ID MATCHES "^(NVHPC|PGI)$")
             message(FATAL_ERROR "ACC=${{ACC_MODE}} needs nvfortran (compiler is ${{CMAKE_Fortran_COMPILER_ID}})")
         endif()
         if (ACC_MODE STREQUAL "MULTICORE")
@@ -901,6 +906,9 @@ def generate_cmake(files: list[str], case_dir: Path):
         elseif (ACC_MODE STREQUAL "GPU")
             message(STATUS "Enabling OpenACC GPU support")
             set(OPENACC_FLAGS "-acc=gpu -Minfo=accel")
+        elseif (ACC_MODE STREQUAL "OPENMP")
+            message(STATUS "Enabling OpenMP (threads set by OMP_NUM_THREADS)")
+            set(OPENACC_FLAGS "-mp -Minfo=mp -U_OPENMP")
         endif()
         if (DEFINED OPENACC_FLAGS)
             set(CMAKE_Fortran_FLAGS "${{CMAKE_Fortran_FLAGS}} ${{OPENACC_FLAGS}}" CACHE STRING "Fortran Compiler Flags" FORCE)

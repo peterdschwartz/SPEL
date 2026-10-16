@@ -45,6 +45,49 @@ def create(args):
             _run_and_validate(unit_test.case_dir)
 
 
+def acc2omp(args):
+    from spel.scripts.analysis_cache import load_analysis
+    from spel.transforms.acc_to_omp import TranslationError, case_modules, translate_modules
+
+    case_dir = Path(f"{SPEL_ROOT}/unit-tests/{args.case}") if args.case else None
+    if case_dir is not None and not case_dir.is_dir():
+        raise SystemExit(f"no unit-test case {case_dir}")
+    fut = load_analysis(reanalyze=args.reanalyze)
+    modules = args.modules or (case_modules(fut, case_dir) if case_dir else [])
+    if not modules:
+        raise SystemExit("acc2omp: name the modules to translate, or give --case")
+
+    failed = False
+    for tr in translate_modules(fut, modules):
+        print(tr.report())
+        failed |= any(n.level == "error" for n in tr.notes)
+        if case_dir is not None:
+            dest = case_dir / tr.path.name
+            target = dest.read_text().splitlines(keepends=True)
+        else:
+            dest = Path(args.output) / tr.path.name if args.output else None
+            target = None
+        try:
+            new_lines = tr.apply(target)
+        except TranslationError as err:
+            if target is not None and not any("!$acc" in l.lower() for l in target):
+                print(f"  {dest} has no OpenACC directives left (already translated?)")
+            else:
+                print(f"  ERROR {err}")
+            failed = True
+            continue
+        if args.diff:
+            print(tr.diff(target))
+        if dest is not None and not args.dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text("".join(new_lines))
+            print(f"  wrote {dest}")
+    if case_dir is not None and not args.dry_run:
+        print(f"Build with OpenMP: SPEL_ACC=OPENMP OMP_NUM_THREADS=<n> spel run {args.case}")
+    if failed:
+        raise SystemExit(1)
+
+
 def analyze(args):
     from spel.scripts.analysis_cache import build_analysis
 
@@ -352,6 +395,28 @@ def main():
     )
     add_capture_args(create_parser, standalone=False)
     create_parser.set_defaults(func=create)
+
+    acc2omp_parser = subparsers.add_parser(
+        "acc2omp",
+        help="translate modules' OpenACC directives to OpenMP (clauses from SPEL's analysis)",
+    )
+    acc2omp_parser.add_argument(
+        "modules", nargs="*", help="modules to translate (default with --case: those with compute loops)"
+    )
+    acc2omp_parser.add_argument(
+        "--case", help="rewrite the module copies in unit-tests/<case> in place"
+    )
+    acc2omp_parser.add_argument(
+        "-o", "--output", help="write translated copies of the analyzed sources to this directory"
+    )
+    acc2omp_parser.add_argument("--diff", action="store_true", help="print the changes")
+    acc2omp_parser.add_argument(
+        "--dry-run", dest="dry_run", action="store_true", help="report only, write nothing"
+    )
+    acc2omp_parser.add_argument(
+        "--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first"
+    )
+    acc2omp_parser.set_defaults(func=acc2omp)
 
     analyze_parser = subparsers.add_parser(
         "analyze",

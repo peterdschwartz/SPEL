@@ -3,7 +3,8 @@
 BUILD_DIR="build"
 debug=ON
 compiler="gfortran"
-# OpenACC target: OFF, MULTICORE (nvfortran; threads from ACC_NUM_CORES) or GPU.
+# OpenACC target: OFF, MULTICORE (nvfortran; threads from ACC_NUM_CORES), GPU, or
+# OPENMP (after `spel acc2omp`; threads from OMP_NUM_THREADS).
 # SPEL_ACC / SPEL_FC / SPEL_DBG override acc / compiler / debug,
 # e.g. SPEL_ACC=MULTICORE SPEL_FC=nvfortran SPEL_DBG=OFF
 acc=OFF

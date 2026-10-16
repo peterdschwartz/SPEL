@@ -168,6 +168,59 @@ class AssociateFrame:
     names: dict  # associate-name -> expanded target path | None (expression)
 
 
+@dataclass(eq=False)
+class LoopInfo:
+    """
+    A DO loop in the routine's loop nest.
+
+    start_ln/end_ln: lines of the `do` and the `end do`
+    index:       loop index (None for `do` without loop control)
+    depth:       0 for an outermost loop
+    bound_paths: variables read by the start/end/step expressions
+    """
+
+    start_ln: int
+    end_ln: int
+    index: Optional[str]
+    depth: int
+    bound_paths: frozenset = frozenset()
+    parent: Optional[LoopInfo] = field(default=None, repr=False)
+    children: list[LoopInfo] = field(default_factory=list, repr=False)
+    node: Optional[DoLoop] = field(default=None, repr=False)
+
+    def contains(self, ln: int) -> bool:
+        return self.start_ln <= ln <= self.end_ln
+
+    def walk(self):
+        """This loop and every loop nested in it, outer loops first."""
+        yield self
+        for child in self.children:
+            yield from child.walk()
+
+    @property
+    def tight_child(self) -> Optional[LoopInfo]:
+        """The inner loop if the body is exactly one DO loop (perfect nesting)."""
+        stmts = self.node.body.statements if self.node is not None else []
+        if len(stmts) == 1 and isinstance(stmts[0], DoLoop) and len(self.children) == 1:
+            return self.children[0]
+        return None
+
+    def perfect_nest(self, n: int) -> list[LoopInfo]:
+        """
+        The `n` perfectly nested loops starting here (for collapse(n)).
+        Raises ValueError if the nest is shallower or not perfectly nested.
+        """
+        nest = [self]
+        while len(nest) < n:
+            inner = nest[-1].tight_child
+            if inner is None:
+                raise ValueError(
+                    f"loop on line {nest[-1].start_ln + 1} is not perfectly nested to depth {n}"
+                )
+            nest.append(inner)
+        return nest
+
+
 class SubroutineRecord:
     def __init__(self, tree: SubroutineDefinitionConstruct, scope: Scope):
         self.name: str = tree.name
@@ -182,6 +235,8 @@ class SubroutineRecord:
         self.frames: list[AssociateFrame] = []
         self.selects: list[tuple[int, int]] = []
         self.namelists: dict[str, list[str]] = {}
+        # outermost DO loops; each LoopInfo links its nested loops
+        self.loop_nest: list[LoopInfo] = []
 
     # --- declarations ---
     @property
@@ -252,6 +307,18 @@ class SubroutineRecord:
     def loops(self) -> list[DoLoop]:
         return [e for e in self.events if isinstance(e, DoLoop)]
 
+    def all_loops(self) -> list[LoopInfo]:
+        """Every loop of the nest, in source order."""
+        return [info for root in self.loop_nest for info in root.walk()]
+
+    def loop_at(self, ln: int) -> Optional[LoopInfo]:
+        """The loop whose `do` statement is on line `ln`."""
+        return next((info for info in self.all_loops() if info.start_ln == ln), None)
+
+    def enclosing_loops(self, ln: int) -> list[LoopInfo]:
+        """Loops containing line `ln`, outermost first."""
+        return [info for info in self.all_loops() if info.contains(ln)]
+
     def pointer_targets(self) -> dict[str, list[str]]:
         result: dict[str, list[str]] = {}
         for e in self.events:
@@ -319,6 +386,7 @@ class _Walker:
         self.rec = rec
         self.resolver = resolver
         self.scope: Scope = rec.scope
+        self.loop_stack: list[LoopInfo] = []
 
     # --- specification part ---
     def define_routine_symbols(self) -> None:
@@ -402,14 +470,33 @@ class _Walker:
             case VariableDecl():
                 self.walk_declaration(stmt)
             case DoLoop():
+                first = len(self.rec.events)
                 for e in (stmt.start, stmt.end, stmt.step):
                     if e is not None:
                         self.walk_expr(e, ln)
+                bound_paths = frozenset(
+                    e.path for e in self.rec.events[first:] if isinstance(e, Access)
+                )
                 if stmt.index is not None:
                     self.walk_designator(
                         Identifier(stmt.token, stmt.index), "w", ln, context="do"
                     )
-                self.walk_block(stmt.body)
+                parent = self.loop_stack[-1] if self.loop_stack else None
+                info = LoopInfo(
+                    start_ln=ln,
+                    end_ln=getattr(stmt, "end_ln", -1),
+                    index=stmt.index,
+                    depth=len(self.loop_stack),
+                    bound_paths=bound_paths,
+                    parent=parent,
+                    node=stmt,
+                )
+                (parent.children if parent else self.rec.loop_nest).append(info)
+                self.loop_stack.append(info)
+                try:
+                    self.walk_block(stmt.body)
+                finally:
+                    self.loop_stack.pop()
                 self.rec.events.append(stmt)
             case DoWhile():
                 self.walk_expr(stmt.condition, ln)

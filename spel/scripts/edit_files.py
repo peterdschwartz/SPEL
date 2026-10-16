@@ -1047,13 +1047,18 @@ def remove_cpp_directives(
         if orig_ln is not None:
             # capture the first encountered preprocessed text for that orig line
             if match_assert:
-                work_lines.append(
-                    LineTuple(
-                        line=f"#include '{remove_include}'",
-                        ln=orig_ln - 1,
-                        commented=True,
-                    )
+                # stands in for the `#include` line (commented out in the unit
+                # test). It replaces the blank line cpp emitted for it: an extra
+                # entry would shift the position of every later line by one.
+                include = LineTuple(
+                    line=f"#include '{remove_include}'",
+                    ln=orig_ln - 1,
+                    commented=True,
                 )
+                if work_lines and work_lines[-1].ln == orig_ln - 1:
+                    work_lines[-1] = include
+                else:
+                    work_lines.append(include)
                 match_assert = False
             mapping[orig_ln] = i
             work_lines.append(LineTuple(line=cpp_lines[i].lower(), ln=orig_ln, commented=False))

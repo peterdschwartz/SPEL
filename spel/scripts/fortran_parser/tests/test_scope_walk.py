@@ -633,3 +633,44 @@ end subroutine s
     assert acc(rec, 9) == [("r", "mask", 9)]
     assert acc(rec, 10) == [("r", "mask", 10), ("w", "a", 10)]
     assert acc(rec, 12) == [("r", "glob", 12), ("w", "b", 12)]
+
+
+LOOPS = """
+subroutine loops(n, f, x)
+  implicit none
+  integer, intent(in) :: n, f(:)
+  real(r8), intent(inout) :: x(:,:)
+  integer :: i, j, c
+  do j = 1, 3
+     do i = 1, n
+        x(f(i),j) = 0.
+     end do
+  end do
+  do i = 1, n
+     c = f(i)
+     do j = 1, c
+        x(c,j) = 1.
+     end do
+  end do
+end subroutine loops
+"""
+
+
+def test_loop_nest():
+    rec = walk(LOOPS, globals=[gvar("r8")])
+    loops = rec.all_loops()
+    assert [(l.start_ln, l.end_ln, l.index, l.depth) for l in loops] == [
+        (6, 10, "j", 0),
+        (7, 9, "i", 1),
+        (11, 16, "i", 0),
+        (13, 15, "j", 1),
+    ]
+    outer, inner = rec.loop_nest[0], loops[1]
+    assert inner.parent is outer and outer.children == [inner]
+    assert inner.bound_paths == {"n"} and loops[3].bound_paths == {"c"}
+    # perfectly nested (collapse) vs. a statement before the inner loop
+    assert outer.perfect_nest(2) == [outer, inner]
+    with pytest.raises(ValueError):
+        rec.loop_nest[1].perfect_nest(2)
+    assert rec.loop_at(13) is loops[3]
+    assert rec.enclosing_loops(14) == [loops[2], loops[3]]
