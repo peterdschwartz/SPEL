@@ -83,10 +83,21 @@ Do this in a scratch directory so `.mod`/`.o` files don't land in the repo.
   NVTX ranges come from `SourceFiles/spel_profMod.F90` (nvfortran only); `main.F90` pushes one
   range per routine under test inside `compute`, so `nsys stats --report nvtx_sum` times just that
   routine.
-- `profile_compare.sh MASTER_CASE ACC_CASE` (repo root) builds the reference case (ACC=OFF) and the
-  OpenACC case (ACC=OFF, then MULTICORE at several `ACC_NUM_CORES`), optionally an `acc2omp` case
-  (`--omp-case`), and tabulates the per-call times of those NVTX ranges. It leaves the cases
-  configured for nvfortran.
+- `SPEL_CLUMPS=N` (run time) splits the `nsets` sets into `N` clumps of whole sets and runs the
+  routines in `elm_drv`'s `!$OMP PARALLEL DO` over clumps (`SourceFiles/main.F90`; clumps are set
+  up by `init_clumps` in `SourceFiles/elm_initializeMod.F90`). With `ACC=OPENMP` that is ELM's CPU
+  threading; it is the fair baseline for master, whose routines have no loop-level threading.
+  The clump loop has `IF (nclumps > 1)` so a single-clump OpenMP build doesn't nest the
+  `acc2omp` loops. OpenACC builds need one clump. IO uses the process bounds (`bounds_io`);
+  `read_elmtypes` overwrites its bounds argument with one set's bounds.
+- `nsets=N` with `SPEL_CLUMPS=M` must stay bit-identical to `nsets=1` (no `WARNING (spel_nsets)`).
+- Time the NVTX range `compute` (wall time of the clump loop). The per-routine ranges run inside
+  the clump threads, so with several clumps they time one clump.
+- `profile_compare.sh MASTER_CASE ACC_CASE` (repo root) times `compute` for master serial, master
+  and refactor with N clumps x 1 thread (`ACC=OPENMP`), the refactor with 1 clump x N OpenACC
+  threads (`ACC=MULTICORE`), and optionally an `acc2omp` case (`--omp-case`); the summary includes
+  the speed-up over master on the same thread count. Cases made before `SPEL_CLUMPS` must be
+  regenerated. It leaves the cases configured for nvfortran.
 
 ## Analysis
 

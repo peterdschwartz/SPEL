@@ -1,14 +1,26 @@
 #!/bin/bash
 # Multicore profiling comparison of a reference (master) unit test and its
-# OpenACC refactor: times only the NVTX ranges of the routines under test
-# (main.F90 pushes one per generated call inside the 'compute' range).
+# OpenACC refactor, with master threaded the way ELM threads it.
 #
-#   master case : nvfortran, ACC=OFF
-#   acc case    : nvfortran, ACC=OFF, then ACC=MULTICORE for each core count
-#   omp case    : (optional) nvfortran, ACC=OPENMP (translated by `spel acc2omp`)
+# ELM runs its physics in an OpenMP loop over clumps (elm_drv): each thread runs
+# whole routines serially on its own clump. SPEL_CLUMPS=N reproduces that in a
+# unit test (N clumps of whole input sets, one OpenMP thread per clump). The
+# configurations, all built with nvfortran (-fast):
+#
+#   master_off   master, ACC=OFF, 1 clump                      serial baseline
+#   master_cN    master, ACC=OPENMP, N clumps x 1 thread       ELM's CPU threading
+#   acc_off      refactor, ACC=OFF, 1 clump                    serial refactor
+#   acc_cN       refactor, ACC=OPENMP, N clumps x 1 thread     same strategy as master
+#   acc_mcN      refactor, ACC=MULTICORE, 1 clump x N threads  loop-level threading
+#   ompN         (--omp-case) acc2omp translation, ACC=OPENMP, 1 clump x N threads
+#
+# acc_cN vs master_cN isolates the code changes; acc_mcN vs master_cN compares
+# the two threading strategies on the same columns and cores.
 #
 # Every run uses SPEL_PROFILE=1 (no device->host copies, no output files) under
-# Nsight Systems; the times come from `nsys stats --report nvtx_sum`.
+# Nsight Systems. The headline time is the NVTX range 'compute' (wall time of the
+# clump loop, per time step); the routines' own ranges run inside the clump
+# threads, so for N clumps they time one clump (their max shows load imbalance).
 # Run it on the machine you want numbers for (e.g. inside an salloc on a
 # Perlmutter compute node).
 set -euo pipefail
@@ -20,14 +32,17 @@ Usage: $(basename "$0") [options] MASTER_CASE ACC_CASE
 Cases are names under unit-tests/ (or paths to case directories).
 
 Options:
-  -n, --nsets N        copies of the input sites (default: 16)
-  -c, --cores "LIST"   ACC_NUM_CORES values for the multicore runs
-                       (default: powers of two up to the physical core count, and that count)
+  -n, --nsets N        copies of the input sites (default: 16). Clump runs need
+                       N_clumps <= nsets (clumps are made of whole sets)
+  -c, --cores "LIST"   thread counts (default: powers of two up to the physical
+                       core count, and that count)
   -s, --steps N        stop after N time steps (SPEL_MAX_STEPS; default: all)
   -o, --outdir DIR     reports and summary (default: unit-tests/profiles/compare-<acc>-nsets<N>-<date>)
-  --omp-case CASE      also profile CASE built with ACC=OPENMP (run \`spel acc2omp --case CASE\` first)
-                       with OMP_NUM_THREADS set to each core count
-  --ranges "A B"       NVTX ranges to time (default: those pushed inside 'compute' in main.F90)
+  --skip "LIST"        configurations to leave out: any of master_c acc_c acc_mc
+  --omp-case CASE      also profile CASE built with ACC=OPENMP, 1 clump x N threads
+                       (run \`spel acc2omp --case CASE\` first)
+  --ranges "A B"       routine NVTX ranges to report besides 'compute' (default: those
+                       pushed inside 'compute' in main.F90)
   --env FILE           source FILE first (modules, PKG_CONFIG_PATH/LD_LIBRARY_PATH for the
                        nvfortran-built netcdf-fortran)
   --link-inputs        if unit-tests/input-data/<case> is missing for the acc/omp case, link
@@ -37,11 +52,16 @@ Options:
 Environment:
   LAUNCH      prefix for each run, e.g. LAUNCH="srun -n 1 -c 128 --cpu-bind=cores"
   NSYS        nsys executable (default: from PATH, else next to nvfortran)
-  Thread placement variables (ACC_BIND, OMP_PROC_BIND, OMP_PLACES, ...) are passed through.
+  Thread placement variables (OMP_PROC_BIND, OMP_PLACES, ACC_BIND, ...) are passed
+  through; set them for clump and multicore runs alike, e.g.
+  OMP_PROC_BIND=spread OMP_PLACES=cores.
+
+Strong scaling is one run (fixed --nsets); for weak scaling run it again with
+nsets proportional to the core count.
 
 Example (Perlmutter CPU node):
   salloc -N 1 -C cpu -q interactive -t 01:00:00
-  ./profile_compare.sh --env ~/spel_nvhpc_env.sh -n 16 soiltemperature soiltemp_acc
+  ./profile_compare.sh --env ~/spel_nvhpc_env.sh -n 128 soiltemperature soiltemp_acc
 EOF
 }
 
@@ -54,6 +74,7 @@ OMP_CASE=""
 RANGES=""
 ENV_FILE=""
 LINK_INPUTS=0
+SKIP=""
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -61,6 +82,7 @@ while [[ $# -gt 0 ]]; do
 	-c | --cores) CORES=$2; shift 2 ;;
 	-s | --steps) STEPS=$2; shift 2 ;;
 	-o | --outdir) OUTDIR=$2; shift 2 ;;
+	--skip) SKIP=$2; shift 2 ;;
 	--omp-case) OMP_CASE=$2; shift 2 ;;
 	--ranges) RANGES=$2; shift 2 ;;
 	--env) ENV_FILE=$2; shift 2 ;;
@@ -71,6 +93,10 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+for s in $SKIP; do
+	case $s in master_c | acc_c | acc_mc) ;; *) echo "--skip: unknown configuration '$s'" >&2; exit 2 ;; esac
+done
+skipped() { [[ " $SKIP " == *" $1 "* ]]; }
 
 if [[ -n $ENV_FILE ]]; then
 	# shellcheck disable=SC1090
@@ -86,6 +112,10 @@ OMP_DIR=""
 if [[ -n $OMP_CASE ]]; then OMP_DIR=$(case_dir "$OMP_CASE"); fi
 for d in "$MASTER_DIR" "$ACC_DIR" $OMP_DIR; do
 	[[ -f $d/main.F90 ]] || { echo "not a unit-test case: $d" >&2; exit 1; }
+	if ! grep -q "SPEL_CLUMPS" "$d/main.F90"; then
+		echo "$d predates SPEL_CLUMPS: regenerate it with \`spel create\`" >&2
+		exit 1
+	fi
 done
 
 # --- tools -------------------------------------------------------------------
@@ -123,6 +153,13 @@ if [[ -z $CORES ]]; then
 	while ((n < PHYS)); do CORES+="$n "; n=$((n * 2)); done
 	CORES+="$PHYS"
 fi
+CLUMP_CORES=""
+for n in $CORES; do
+	if ((n <= NSETS)); then CLUMP_CORES+="$n "; fi
+done
+if [[ $CLUMP_CORES != "$CORES " ]]; then
+	echo "NOTE: clump runs need N <= nsets ($NSETS): master_c/acc_c only for N in ($CLUMP_CORES)"
+fi
 if [[ -z $RANGES ]]; then
 	# NVTX ranges pushed between spel_prof_push('compute') and its pop
 	RANGES=$(awk '
@@ -130,13 +167,13 @@ if [[ -z $RANGES ]]; then
 		inside && /spel_prof_push\(/ {s=$0; sub(/.*spel_prof_push\(./, "", s); sub(/[^A-Za-z0-9_].*/, "", s); print s; depth++; next}
 		inside && /spel_prof_pop\(/ {if (depth == 0) inside=0; else depth--}
 	' "$ACC_DIR/main.F90" | sort -u | tr '\n' ' ')
-	[[ -n $RANGES ]] || { echo "no NVTX ranges found in $ACC_DIR/main.F90 (use --ranges)" >&2; exit 1; }
 fi
+RANGES="compute $RANGES"
 [[ -n $OUTDIR ]] || OUTDIR="$SPEL_ROOT/unit-tests/profiles/compare-$(basename "$ACC_DIR")-nsets$NSETS-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUTDIR"
 OUTDIR=$(cd "$OUTDIR" && pwd)
 RESULTS=$OUTDIR/results.csv
-echo "label,case,acc,threads,range,instances,total_s,avg_ms,med_ms" >"$RESULTS"
+echo "label,case,acc,clumps,threads,range,instances,total_s,avg_ms,med_ms,max_ms" >"$RESULTS"
 
 {
 	echo "date:      $(date -Is)"
@@ -148,9 +185,9 @@ echo "label,case,acc,threads,range,instances,total_s,avg_ms,med_ms" >"$RESULTS"
 	echo "master:    $MASTER_DIR"
 	echo "acc:       $ACC_DIR"
 	if [[ -n $OMP_DIR ]]; then echo "omp:       $OMP_DIR"; fi
-	echo "nsets=$NSETS steps=${STEPS:-all} cores=($CORES) ranges=($RANGES)"
+	echo "nsets=$NSETS steps=${STEPS:-all} cores=($CORES) ranges=($RANGES) skip=($SKIP)"
 	echo "LAUNCH=${LAUNCH:-}"
-	for v in ACC_BIND OMP_PROC_BIND OMP_PLACES; do
+	for v in OMP_PROC_BIND OMP_PLACES ACC_BIND; do
 		if [[ -n ${!v:-} ]]; then echo "$v=${!v}"; fi
 	done
 } | tee "$OUTDIR/info.txt"
@@ -167,11 +204,11 @@ build() { # case_dir acc
 	fi
 }
 
-profile() { # label case_dir acc threads
-	local label=$1 dir=$2 acc=$3 threads=$4
+profile() { # label case_dir acc clumps threads
+	local label=$1 dir=$2 acc=$3 clumps=$4 threads=$5
 	local log=$OUTDIR/$label.log
-	echo "== run $label"
-	local -a envs=(SPEL_PROFILE=1 ACC_NUM_CORES="$threads" OMP_NUM_THREADS="$threads")
+	echo "== run $label (clumps=$clumps threads=$threads)"
+	local -a envs=(SPEL_PROFILE=1 SPEL_CLUMPS="$clumps" ACC_NUM_CORES="$threads" OMP_NUM_THREADS="$threads")
 	if [[ -n $STEPS ]]; then envs+=(SPEL_MAX_STEPS="$STEPS"); fi
 	# shellcheck disable=SC2086
 	if ! (cd "$dir" && env "${envs[@]}" ${LAUNCH:-} "$NSYS" profile --trace=nvtx,osrt \
@@ -183,7 +220,7 @@ profile() { # label case_dir acc threads
 	"$NSYS" stats -q --report nvtx_sum --format csv --output - "$OUTDIR/$label.nsys-rep" 2>>"$log" |
 		python3 -c '
 import csv, sys
-label, case, acc, threads, ranges = sys.argv[1:6]
+label, case, acc, clumps, threads, ranges = sys.argv[1:7]
 wanted = set(ranges.split())
 rows = [r for r in csv.reader(sys.stdin) if r]
 head = next((i for i, r in enumerate(rows) if "Range" in r), None)
@@ -195,38 +232,74 @@ for r in rows[head + 1 :]:
     if name in wanted:
         total, n = float(r[col["Total Time (ns)"]]), int(r[col["Instances"]])
         avg, med = float(r[col["Avg (ns)"]]), float(r[col["Med (ns)"]])
-        print(f"{label},{case},{acc},{threads},{name},{n},{total/1e9:.6f},{avg/1e6:.6f},{med/1e6:.6f}")
-' "$label" "$(basename "$dir")" "$acc" "$threads" "$RANGES" >>"$RESULTS"
+        mx = float(r[col["Max (ns)"]])
+        print(f"{label},{case},{acc},{clumps},{threads},{name},{n},{total/1e9:.6f},"
+              f"{avg/1e6:.6f},{med/1e6:.6f},{mx/1e6:.6f}")
+' "$label" "$(basename "$dir")" "$acc" "$clumps" "$threads" "$RANGES" >>"$RESULTS"
 }
 
-build "$MASTER_DIR" OFF && profile master_off "$MASTER_DIR" OFF 1 || true
-build "$ACC_DIR" OFF && profile acc_off "$ACC_DIR" OFF 1 || true
-if build "$ACC_DIR" MULTICORE; then
-	for n in $CORES; do profile "acc_mc$n" "$ACC_DIR" MULTICORE "$n" || true; done
+# master: serial, then ELM-style clump threading
+build "$MASTER_DIR" OFF && profile master_off "$MASTER_DIR" OFF 1 1 || true
+if ! skipped master_c && build "$MASTER_DIR" OPENMP; then
+	for n in $CLUMP_CORES; do profile "master_c$n" "$MASTER_DIR" OPENMP "$n" "$n" || true; done
+fi
+# refactor: serial, clump threading, loop-level (OpenACC multicore) threading
+build "$ACC_DIR" OFF && profile acc_off "$ACC_DIR" OFF 1 1 || true
+if ! skipped acc_c && build "$ACC_DIR" OPENMP; then
+	for n in $CLUMP_CORES; do profile "acc_c$n" "$ACC_DIR" OPENMP "$n" "$n" || true; done
+fi
+if ! skipped acc_mc && build "$ACC_DIR" MULTICORE; then
+	for n in $CORES; do profile "acc_mc$n" "$ACC_DIR" MULTICORE 1 "$n" || true; done
 fi
 if [[ -n $OMP_DIR ]] && build "$OMP_DIR" OPENMP; then
-	for n in $CORES; do profile "omp$n" "$OMP_DIR" OPENMP "$n" || true; done
+	for n in $CORES; do profile "omp$n" "$OMP_DIR" OPENMP 1 "$n" || true; done
 fi
 
 # --- summary -----------------------------------------------------------------
 python3 - "$RESULTS" <<'EOF' | tee "$OUTDIR/summary.txt"
-import csv, sys
+import csv, re, sys
+
 rows = list(csv.DictReader(open(sys.argv[1])))
-for rng in sorted({r["range"] for r in rows}):
-    rs = [r for r in rows if r["range"] == rng]
-    by = {r["label"]: r for r in rs}
-    base = by.get("master_off")
-    mc1 = by.get("acc_mc1") or by.get("acc_off")
-    print(f"\nNVTX range '{rng}' (avg per call)")
-    print(f"{'config':<12} {'threads':>7} {'calls':>6} {'total s':>9} {'avg ms':>9} {'vs master':>9} {'vs 1 thread':>11}")
-    for r in rs:
-        avg = float(r["avg_ms"])
-        vs_master = f"{float(base['avg_ms']) / avg:8.2f}x" if base else "-"
-        same_kind = r["label"].startswith(("acc_mc", "omp"))
-        ref = by.get("omp1") if r["label"].startswith("omp") else mc1
-        vs_one = f"{float(ref['avg_ms']) / avg:10.2f}x" if (same_kind and ref) else "-"
-        print(f"{r['label']:<12} {r['threads']:>7} {r['instances']:>6} {float(r['total_s']):9.3f} "
-              f"{avg:9.3f} {vs_master:>9} {vs_one:>11}")
+SERIES = {  # label prefix -> (description, serial label of the same code)
+    "master_c": ("master, N clumps x 1 thread", "master_off"),
+    "acc_c": ("refactor, N clumps x 1 thread", "acc_off"),
+    "acc_mc": ("refactor, 1 clump x N threads (OpenACC)", "acc_off"),
+    "omp": ("refactor, 1 clump x N threads (acc2omp)", "acc_off"),
+}
+
+
+def series(label):
+    m = re.match(r"(master_c|acc_c|acc_mc|omp)(\d+)$", label)
+    return (m.group(1), int(m.group(2))) if m else (label, 1)
+
+
+compute = {r["label"]: r for r in rows if r["range"] == "compute"}
+if not compute:
+    sys.exit("no results")
+
+print("\nWall time per time step (NVTX 'compute': all clumps)")
+print("  vs master    : master serial (master_off) / this")
+print("  vs master@N  : master with ELM's clump threading on the same N threads / this")
+print("  vs own 1 thr : the same code on 1 thread / this\n")
+hdr = f"{'config':<11} {'threads':>7} {'avg ms':>9} {'vs master':>10} {'vs master@N':>12} {'vs own 1 thr':>13}  description"
+print(hdr)
+print("-" * len(hdr))
+base = compute.get("master_off")
+for label, r in compute.items():
+    kind, n = series(label)
+    avg = float(r["avg_ms"])
+    desc, serial = SERIES.get(kind, ("serial", label))
+    ref_n = compute.get(f"master_c{n}") or (base if n == 1 else None)
+    own1 = compute.get(f"{kind}1") or compute.get(serial)
+    fmt = lambda ref, w: f"{float(ref['avg_ms']) / avg:{w-1}.2f}x" if ref else f"{'-':>{w}}"
+    print(f"{label:<11} {r['threads']:>7} {avg:9.3f} {fmt(base, 10)} {fmt(ref_n, 12)} {fmt(own1, 13)}  {desc}")
+
+routines = sorted({r["range"] for r in rows} - {"compute"})
+for rng in routines:
+    print(f"\nNVTX '{rng}' per call (inside the clump loop: one clump's share for N clumps)")
+    print(f"{'config':<11} {'clumps':>6} {'calls':>7} {'avg ms':>9} {'max ms':>9}")
+    for r in (r for r in rows if r["range"] == rng):
+        print(f"{r['label']:<11} {r['clumps']:>6} {r['instances']:>7} {float(r['avg_ms']):9.3f} {float(r['max_ms']):9.3f}")
 EOF
 echo
 echo "results: $RESULTS"

@@ -573,8 +573,8 @@ class FunctionalUnitTest:
             self.type_dict
         )
 
-        in_arg_str = "io_inputs, bounds_clump"
-        out_arg_str = "io_outputs, bounds_clump"
+        in_arg_str = "io_inputs, bounds_io"
+        out_arg_str = "io_outputs, bounds_io"
         for _, elmvar in elm_inst_vars:
             in_arg_str = f"{in_arg_str}, {elmvar.name}={elmvar.name}"
             out_arg_str = f"{out_arg_str}, {elmvar.name}={elmvar.name}"

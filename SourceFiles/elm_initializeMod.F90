@@ -9,10 +9,11 @@ module elm_initializeMod
 
 contains
 
-   subroutine elm_init(nsets, dt, yr, bounds)
+   subroutine elm_init(nsets, dt, yr, bounds, nclumps)
       ! Read the input sites and, for nsets > 1, duplicate them nsets times.
-      ! There is always a single clump spanning the whole process, so the
-      ! filters (and the parallelism inside each routine) cover every set.
+      ! The sets are split into nclumps clumps of whole sets (see init_clumps);
+      ! with nclumps = 1 one clump spans the process, so the filters (and the
+      ! parallelism inside each routine) cover every set.
       use duplicateMod, only: duplicate_sets, scale_bounds
       use ReadWriteMod, only: read_elmtypes
       use FUTConstantsMod, only: read_constants
@@ -32,11 +33,17 @@ contains
       real*8, intent(in) :: dt
       integer, intent(in) :: yr
       type(bounds_type), intent(out) :: bounds
+      integer, intent(in) :: nclumps
       integer :: begp, endp, begc, endc, begg, endg, begl, endl, begt, endt
+      integer :: nc
       real*8, allocatable  :: icemask_grc(:)
-      type(bounds_type) :: bounds_clump
+      type(bounds_type) :: bounds_clump, bounds_set
 
       if (nsets < 1) stop "(elm_init) nsets must be >= 1"
+      if (nclumps < 1 .or. nclumps > nsets) then
+         print *, "(elm_init) nclumps =", nclumps, " nsets =", nsets
+         stop "(elm_init) clumps are made of whole sets: need 1 <= nclumps <= nsets"
+      end if
       ! nc_io allocates subgrid arrays nsets times larger and replicates
       ! the file data into every set when reading
       spel_nsets = nsets
@@ -46,6 +53,7 @@ contains
 
       ! bounds now hold one set (the input file); offset the subgrid indices
       ! of the copies and extend the bounds over all sets
+      bounds_set = bounds
       if (nsets > 1) then
          print *, "Duplicating input sites", nsets, "times"
          call duplicate_sets(nsets, bounds)
@@ -64,12 +72,14 @@ contains
       print *, "begt, endt", begt, endt
 
       allocate (icemask_grc(begg:endg)); icemask_grc(:) = 0.d0
-      call init_clumps(bounds)
-      call get_clump_bounds(1, bounds_clump)
+      call init_clumps(bounds, bounds_set, nsets, nclumps)
       call allocFilters()
 #ifndef _OPENACC
       ! OpenACC builds set the filters in main, once the data is on the device
-      call setFilters(bounds_clump, icemask_grc)
+      do nc = 1, nclumps
+         call get_clump_bounds(nc, bounds_clump)
+         call setFilters(bounds_clump, icemask_grc)
+      end do
 #endif
 
       !#LAKECON
@@ -78,24 +88,30 @@ contains
 
    end subroutine elm_init
 
-   subroutine init_clumps(bounds_proc)
-      ! A single clump spanning the process bounds
+   subroutine init_clumps(bounds_proc, bounds_set, nsets, nclumps)
+      ! Splits the process into nclumps clumps, as ELM's decomposition does for
+      ! its OpenMP threads. A clump is a block of whole sets (set k of every
+      ! subgrid level is the contiguous range begX + (k-1)*nX ... begX + k*nX - 1,
+      ! see duplicateMod), so the clump bounds follow from the set sizes alone.
+      ! The sets are spread as evenly as possible.
       use decompMod, only: bounds_type, clumps, procinfo, get_clump_bounds
       use decompMod, only: clump_pproc
       use filterMod, only: filter, filter_inactive_and_active
       type(bounds_type), intent(in) :: bounds_proc
+      type(bounds_type), intent(in) :: bounds_set   ! one set (before duplication)
+      integer, intent(in) :: nsets, nclumps
       !! Locals
       type(bounds_type) :: bounds_clump
 
-      integer :: nc, delta, nclumps
+      integer :: nc, first_set, last_set
       integer :: num_g, num_l, num_t, num_c, num_p
+      integer :: ng, nl, nt, nk, np
 
       num_g = bounds_proc%endg - bounds_proc%begg + 1
       num_l = bounds_proc%endl - bounds_proc%begl + 1
       num_t = bounds_proc%endt - bounds_proc%begt + 1
       num_c = bounds_proc%endc - bounds_proc%begc + 1
       num_p = bounds_proc%endp - bounds_proc%begp + 1
-      nclumps = 1
       clump_pproc = nclumps
 
       allocate (clumps(nclumps), procinfo%cid(clump_pproc))
@@ -123,28 +139,44 @@ contains
       procinfo%endp = bounds_proc%endp
       procinfo%endCohort = 0
 
+      ! sizes of one set
+      ng = bounds_set%endg - bounds_set%begg + 1
+      nt = bounds_set%endt - bounds_set%begt + 1
+      nl = bounds_set%endl - bounds_set%begl + 1
+      nk = bounds_set%endc - bounds_set%begc + 1
+      np = bounds_set%endp - bounds_set%begp + 1
+
+      last_set = 0
       do nc = 1, nclumps
-         clumps(nc)%begp = bounds_proc%begp
-         clumps(nc)%endp = bounds_proc%endp
-         clumps(nc)%begc = bounds_proc%begc
-         clumps(nc)%endc = bounds_proc%endc
-         clumps(nc)%begl = bounds_proc%begl
-         clumps(nc)%endl = bounds_proc%endl
-         clumps(nc)%begt = bounds_proc%begt
-         clumps(nc)%endt = bounds_proc%endt
-         clumps(nc)%begg = bounds_proc%begg
-         clumps(nc)%endg = bounds_proc%endg
+         first_set = last_set + 1
+         last_set = first_set - 1 + nsets/nclumps
+         if (nc <= mod(nsets, nclumps)) last_set = last_set + 1
+         clumps(nc)%begg = bounds_proc%begg + (first_set - 1)*ng
+         clumps(nc)%endg = bounds_proc%begg + last_set*ng - 1
+         clumps(nc)%begt = bounds_proc%begt + (first_set - 1)*nt
+         clumps(nc)%endt = bounds_proc%begt + last_set*nt - 1
+         clumps(nc)%begl = bounds_proc%begl + (first_set - 1)*nl
+         clumps(nc)%endl = bounds_proc%begl + last_set*nl - 1
+         clumps(nc)%begc = bounds_proc%begc + (first_set - 1)*nk
+         clumps(nc)%endc = bounds_proc%begc + last_set*nk - 1
+         clumps(nc)%begp = bounds_proc%begp + (first_set - 1)*np
+         clumps(nc)%endp = bounds_proc%begp + last_set*np - 1
          clumps(nc)%begCohort = bounds_proc%begCohort
          clumps(nc)%endCohort = bounds_proc%endCohort
       end do
+      if (clumps(nclumps)%endc /= bounds_proc%endc .or. clumps(nclumps)%endp /= bounds_proc%endp) &
+         stop "(init_clumps) clumps don't cover the process bounds"
 
-      call get_clump_bounds(1, bounds_clump)
-      print *, "(init clumps) bounds_clump"
-      print *, "g: ", bounds_clump%begg, bounds_clump%endg
-      print *, "l: ", bounds_clump%begl, bounds_clump%endl
-      print *, "t: ", bounds_clump%begt, bounds_clump%endt
-      print *, "c: ", bounds_clump%begc, bounds_clump%endc
-      print *, "p: ", bounds_clump%begp, bounds_clump%endp
+      print *, "(init clumps)", nclumps, " clump(s)"
+      do nc = 1, nclumps
+         call get_clump_bounds(nc, bounds_clump)
+         print '(a,i4,5(a,i8,a,i8))', " clump", nc, &
+            "  g:", bounds_clump%begg, "-", bounds_clump%endg, &
+            "  t:", bounds_clump%begt, "-", bounds_clump%endt, &
+            "  l:", bounds_clump%begl, "-", bounds_clump%endl, &
+            "  c:", bounds_clump%begc, "-", bounds_clump%endc, &
+            "  p:", bounds_clump%begp, "-", bounds_clump%endp
+      end do
 
    end subroutine init_clumps
 

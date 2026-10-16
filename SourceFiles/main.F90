@@ -19,7 +19,7 @@ use spel_profMod, only: spel_prof_push, spel_prof_pop, spel_env_flag, spel_env_i
 
 !=======================================!
 implicit none
-type(bounds_type)  ::  bounds_clump, bounds_proc
+type(bounds_type)  ::  bounds_clump, bounds_proc, bounds_io
 integer :: beg = 1, fin = 10, p, nclumps, nc
 integer :: err
 #if _CUDA
@@ -43,7 +43,8 @@ integer :: max_step
 !First, make sure the right number of inputs have been provided
 
 ! Optional argument: number of copies (sets) of the input sites.
-! All sets live in a single clump (nclumps = 1).
+! SPEL_CLUMPS=N splits the sets into N clumps of whole sets that run in an
+! OpenMP loop over clumps, as in elm_drv (default: one clump spanning every set).
 nsets = 1
 IF (COMMAND_ARGUMENT_COUNT() >= 1) THEN
    call get_command_argument(1, nsets_char)
@@ -57,6 +58,11 @@ spel_profile = spel_env_flag('SPEL_PROFILE')
 max_step = spel_env_int('SPEL_MAX_STEPS', 1001) - 1
 if (spel_profile) WRITE (*, *) 'SPEL_PROFILE: outputs disabled'
 if (max_step /= 1000) WRITE (*, *) 'SPEL_MAX_STEPS: running ', max_step + 1, ' steps'
+nclumps = spel_env_int('SPEL_CLUMPS', 1)
+WRITE (*, *) 'nclumps = ', nclumps
+#ifdef _OPENACC
+if (nclumps /= 1) stop "SPEL_CLUMPS > 1 needs a build without OpenACC (e.g. ACC=OPENMP)"
+#endif
 
 call spel_prof_push('spel_init')
 
@@ -65,7 +71,7 @@ block
    call spel_io_init(input_path, read_io=.true.)
 end block
 
-call elm_init(nsets, dtime_mod, year_curr, bounds_proc)
+call elm_init(nsets, dtime_mod, year_curr, bounds_proc, nclumps)
 
 !#INIT
 
@@ -106,8 +112,6 @@ call spel_prof_pop() ! spel_init
 #endif
 
 nclumps = procinfo%nclumps
-if (nclumps /= 1) stop "SPEL unit tests use a single clump"
-nc = 1
 
 block
     integer :: step = 0
@@ -117,15 +121,16 @@ block
        call spel_prof_push('step')
        if (step .ne. 0) then
           call spel_prof_push('read_inputs')
+          bounds_io = bounds_proc
           !#IO_READ
           call spel_prof_pop()
 
-          ! read_elmtypes leaves bounds_clump at one set's bounds. The inputs
+          ! read_elmtypes leaves bounds_io at one set's bounds. The inputs
           ! are copied from the (device) input buffers, so no host->device
           ! update is needed; duplicate_sets also offsets on the device.
           if (.not. io_inputs%end_run) then
              call spel_prof_push('duplicate_sets')
-             call duplicate_sets(nsets, bounds_clump)
+             call duplicate_sets(nsets, bounds_io)
              call spel_prof_pop()
           end if
        end if
@@ -134,11 +139,17 @@ block
           exit
        end if
 
-       call get_clump_bounds(nc,bounds_clump)
-       !$acc update device(bounds_clump)
-
+      ! The 'compute' range is the wall time of all clumps. The clump loop is
+      ! elm_drv's; it is only active with several clumps, so that with one
+      ! clump the routines' own OpenMP loops (spel acc2omp) are not nested.
       call spel_prof_push('compute')
+      !$OMP PARALLEL DO PRIVATE (nc, bounds_clump) IF (nclumps > 1)
+      do nc = 1, nclumps
+         call get_clump_bounds(nc, bounds_clump)
+         !$acc update device(bounds_clump)
       !#CALL_SUB
+      end do
+      !$OMP END PARALLEL DO
       call spel_prof_pop()
 
        if (.not. spel_profile) then
@@ -147,6 +158,7 @@ block
           call spel_prof_pop()
 
           call spel_prof_push('write_outputs')
+          bounds_io = bounds_proc
           !#IO_WRITE
           call spel_prof_pop()
        end if

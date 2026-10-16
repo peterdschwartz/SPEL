@@ -492,7 +492,7 @@ def prepare_main(
     active_instances, _, elm_inst_vars = hio.get_var_usage_and_elm_inst_vars(type_dict)
 
     # Insert 'read_elmtypes' call
-    arg_str = "io_inputs, bounds_clump"
+    arg_str = "io_inputs, bounds_io"
     for _, elmvar in elm_inst_vars:
         arg_str = f"{arg_str}, {elmvar.name}={elmvar.name}"
 

@@ -292,12 +292,23 @@ The test executable accepts one optional positional argument:
 |-----|---------|---------|
 | 1 | copies of the input sites (`nsets`) | 1 |
 
-The unit test always runs a single clump spanning the whole process, so filters and loops cover
-every site at once. With `nsets > 1`, the netCDF reads replicate each subgrid-dimensioned input
+By default the unit test runs a single clump spanning the whole process, so filters and loops
+cover every site at once. With `nsets > 1`, the netCDF reads replicate each subgrid-dimensioned input
 `nsets` times and the generated `duplicateMod` offsets the subgrid index fields
 (`veg_pp%column`, `col_pp%landunit`, ...) of each copy. Outputs are written for the first copy
 only, so `fut-outputs*.nc` stay comparable with `spel-outputs*.nc`. A
 `WARNING (spel_nsets)` line means a copy produced results that differ from the first copy.
+
+`SPEL_CLUMPS=N` (run time, `1 <= N <= nsets`) splits the sets into `N` clumps of whole sets
+(as evenly as possible), builds the filters of each clump, and calls the routines in the same
+`!$OMP PARALLEL DO` over clumps that `elm_drv` uses, so a build with `ACC=OPENMP` threads the
+unit test the way ELM threads it on CPUs (one thread per clump, `OMP_NUM_THREADS=N`). Without
+OpenMP the clumps run one after the other. OpenACC builds need `SPEL_CLUMPS=1`. The NVTX range
+`compute` times the whole clump loop.
+
+```bash
+SPEL_ACC=OPENMP SPEL_CLUMPS=8 OMP_NUM_THREADS=8 spel run soiltemperature 16
+```
 
 Time-step inputs are read in chunks: `read_elmtypes` loads a whole input file (720 timesteps by
 default) per variable into set-1-shaped buffers, then each step copies its slice into the
@@ -323,7 +334,7 @@ environment variables `SPEL_FC`, `SPEL_DBG` and `SPEL_ACC` override them without
 | `OFF` (default) | none | `!$acc` directives are comments |
 | `MULTICORE` | nvfortran: `-acc=multicore -Minfo=accel` | compute regions run on host threads; set the count with `ACC_NUM_CORES` (default: all cores). gfortran only gets `-fopenacc -foffload=disable` and a warning: GCC has no multicore target, so regions run on one thread |
 | `GPU` | nvfortran: `-acc=gpu -gpu=deepcopy -Minfo=accel -cuda` | needs nvfortran (`-DGPU=ON` still works as an alias) |
-| `OPENMP` | gfortran: `-fopenmp`; nvfortran: `-mp -Minfo=mp` | for sources translated by [`spel acc2omp`](#spel-acc2omp); set the thread count with `OMP_NUM_THREADS` |
+| `OPENMP` | gfortran: `-fopenmp -U_OPENMP`; nvfortran: `-mp -Minfo=mp -U_OPENMP` | threads the clump loop (`SPEL_CLUMPS`) and sources translated by [`spel acc2omp`](#spel-acc2omp); set the thread count with `OMP_NUM_THREADS`. `-U_OPENMP` keeps ELM's own `#ifdef _OPENMP` code off, as in the analysis |
 
 ```bash
 # nvfortran needs its own netcdf-fortran build (.mod files are compiler specific) on
@@ -368,20 +379,32 @@ instructions for that error).
 
 To compare a refactored routine against its reference across thread counts, run
 `profile_compare.sh` (repo root) on the machine you want numbers for. It builds both cases with
-nvfortran (`-fast`), profiles the reference with `ACC=OFF` and the refactor with `ACC=OFF` and
-`ACC=MULTICORE` at each `ACC_NUM_CORES`, and tabulates the per-call time of the routine's NVTX range
-(speed-up vs. the reference and vs. one thread):
+nvfortran (`-fast`) and times the NVTX range `compute` (wall time per time step) for:
+
+| Config | Build | Threading |
+|--------|-------|-----------|
+| `master_off`, `acc_off` | `ACC=OFF` | serial |
+| `master_cN`, `acc_cN` | `ACC=OPENMP`, `SPEL_CLUMPS=N` | `N` clumps x 1 thread, as `elm_drv` threads ELM |
+| `acc_mcN` | `ACC=MULTICORE` | 1 clump x `N` OpenACC threads |
+| `ompN` (`--omp-case`) | `ACC=OPENMP` on an `acc2omp` case | 1 clump x `N` OpenMP threads |
+
+The summary gives each configuration's speed-up over master serial, over master with clump
+threading on the same `N` threads (the fair comparison with ELM's CPU threading), and over the
+same code on one thread. `acc_cN` vs `master_cN` isolates the code changes; `acc_mcN` vs
+`master_cN` compares the threading strategies. Clump runs need `N <= nsets`.
 
 ```bash
-./profile_compare.sh --env nvhpc_env.sh -n 16 soiltemperature soiltemp_acc
+./profile_compare.sh --env nvhpc_env.sh -n 128 soiltemperature soiltemp_acc
 ./profile_compare.sh -c "1 8 32 64 128" --omp-case soiltemp_omp soiltemperature soiltemp_acc
-LAUNCH="srun -n 1 -c 128 --cpu-bind=cores" ./profile_compare.sh soiltemperature soiltemp_acc
+OMP_PROC_BIND=spread OMP_PLACES=cores LAUNCH="srun -n 1 -c 128 --cpu-bind=cores" \
+    ./profile_compare.sh -n 128 soiltemperature soiltemp_acc
 ```
 
-`--env` sources a module/env file first, `--omp-case` adds an `acc2omp` case built with
-`ACC=OPENMP`, `--link-inputs` points a new case at the reference case's input data, and `LAUNCH`
-prefixes every run. Results go to `unit-tests/profiles/compare-<case>-nsets<N>-<date>/`
-(`results.csv`, `summary.txt`, the `.nsys-rep` reports and build/run logs).
+`--env` sources a module/env file first, `--skip` leaves out configurations, `--omp-case` adds
+an `acc2omp` case, `--link-inputs` points a new case at the reference case's input data, and
+`LAUNCH` prefixes every run. Results go to `unit-tests/profiles/compare-<case>-nsets<N>-<date>/`
+(`results.csv`, `summary.txt`, the `.nsys-rep` reports and build/run logs). For weak scaling,
+run it again with `nsets` proportional to the core count.
 
 ### `spel acc2omp`
 
