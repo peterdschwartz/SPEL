@@ -122,6 +122,7 @@ class Subroutine(object):
         self.sub_lines: list[LineTuple] = []
 
         self.logger: logging.Logger = get_logger(f"{self.module}::{self.name}")
+        self.logger.info(f"Analyzing {self.module}::{self.name}")
         self.flat_ifs: list[FlatIfs] = []
         self.ifs_analyzed: bool = False
         self.syntax_tree: Optional[SubroutineDefinitionConstruct] = None

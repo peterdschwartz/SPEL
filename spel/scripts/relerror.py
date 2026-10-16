@@ -153,8 +153,14 @@ def find_diffs(refn: str, compfn: str, var: str = "", ostream=sys.stdout):
     compdata = xarray.open_dataset(compfn)
 
     if findall:
-        var_names = [var for var in refdata.keys()]
-        current_var = var_names[0]
+        # A development branch may no longer use some of the reference
+        # branch's variables; those are reported but not compared.
+        missing = [var for var in refdata.keys() if var not in compdata]
+        if missing:
+            ostream.write(f"NOTE: {len(missing)} reference variables not in the comparison file:\n")
+            for name in missing:
+                ostream.write(f"  {name}\n")
+        var_names = [var for var in refdata.keys() if var in compdata]
         error_log = []
         ndiffs = 0
         for var in progressbar(var_names, "VAR:", 40):
