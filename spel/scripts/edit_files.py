@@ -875,6 +875,7 @@ def get_used_mods(
     Checks to see what mods are needed to compile the file
     """
     # Keep track of nested level
+    assert ifile, "Attempting to parse None"
     linenumber, module_name = get_module_name_from_file(fpath=ifile)
     fort_mod = FortranModule(fname=ifile, name=module_name, ln=linenumber)
 
@@ -976,6 +977,7 @@ def get_used_mods(
     files_to_parse = []
     for m in needed_mods:
         needed_modfile = get_filename_from_module(m, verbose=verbose)
+        assert needed_modfile, f"Couldn't find file for {m}"
         if needed_modfile not in mods:
             files_to_parse.append(needed_modfile)
             mods.append(needed_modfile)
@@ -1225,7 +1227,7 @@ def process_for_unit_test(
                 mod_dict=mod_dict,
             )
 
-    required_mod_paths = [get_filename_from_module(m) for m in required_mods]
+    required_mod_paths = [rfile for x in required_mods if (rfile := get_filename_from_module(x)) is not None]
     for rmod in required_mod_paths:
         if rmod not in mods:
             mods, mod_dict = get_used_mods(

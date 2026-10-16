@@ -8,22 +8,18 @@ from unittest.mock import patch
 
 import spel.scripts.dynamic_globals as dg
 import spel.scripts.interfaces as interfaces
-from spel.scripts.aggregate import aggregate_dtype_vars
 from spel.scripts.analyze_subroutines import Subroutine
 from spel.scripts.config import Options, scripts_dir
 from spel.scripts.DerivedType import DerivedType
 from spel.scripts.driver_callsites import driver_callsites
-from spel.scripts.edit_files import process_for_unit_test
 from spel.scripts.fortran_modules import FortranModule
 from spel.scripts.functional_unit_test import FunctionalUnitTest
+from spel.scripts.tests.fixtures.expected_parse_results import line_of
 from spel.scripts.types import ReadWrite
-from spel.scripts.tests.expected_parse_results import line_of
-from spel.scripts.UnitTestforELM import process_subroutines_for_unit_test
+from spel.scripts.UnitTestforELM import finalize_unit_test
 from spel.scripts.utilityFunctions import Variable
 
-
-
-test_dir = os.path.dirname(__file__) + "/"
+test_dir = os.path.dirname(__file__) + "/fixtures/"
 logger = logging.getLogger("TEST")
 logging.basicConfig(level=logging.INFO)  # change to DEBUG to see detailed logs
 
@@ -110,7 +106,7 @@ def elm_src_pointing_to(src_dir: Path):
         for name, mod in list(sys.modules.items()):
             if not name.startswith("spel.") or mod is None:
                 continue
-            for attr in ("ELM_SRC", "SHR_SRC"):
+            for attr in ("ELM_SRC", "SHR_SRC","E3SM_SRCROOT"):
                 if hasattr(mod, attr):
                     stack.enter_context(patch.object(mod, attr, src_dir))
 
@@ -119,9 +115,7 @@ def elm_src_pointing_to(src_dir: Path):
         stack.enter_context(patch.object(dg, "map_fpath_to_module_name", {}))
         stack.enter_context(patch.object(dg, "map_module_lines", {}))
         stack.enter_context(patch.object(dg, "map_module_head", {}))
-        stack.enter_context(
-            patch.object(interfaces, "_interface_procs_cache", {})
-        )
+        stack.enter_context(patch.object(interfaces, "_interface_procs_cache", {}))
         yield
 
 
@@ -131,88 +125,46 @@ def test_sub_parse(subtests):
     """
     with elm_src_pointing_to(Path(test_dir)):
         dg.populate_interface_list()
-        fn = f"{scripts_dir}/tests/example_functions.f90"
+        fn = f"{test_dir}/example_functions.f90"
         test_sub_name = "test_sub_parse::call_sub"
         sub_name_list = [test_sub_name]
+        from spel.scripts.analysis_cache import extract_unit_test, load_analysis
 
-        mod_dict: dict[str, FortranModule] = {}
-        main_sub_dict: dict[str, Subroutine] = {}
+        analysis = load_analysis(reanalyze=True)
+        unit_test = extract_unit_test(analysis, sub_name_list, case_dir=Path(test_dir)/"fut", logger=logger)
+        unit_test.write_meta_file()
 
-        ordered_mods = process_for_unit_test(
-            case_dir=test_dir,
-            mod_dict=mod_dict,
-            mods=[],
-            required_mods=[],
-            sub_dict=main_sub_dict,
-            sub_name_list=sub_name_list,
-            overwrite=False,
-            verbose=False,
-        )
-
-        main_sub_dict[test_sub_name].unit_test_function = True
-
-        type_dict: dict[str, DerivedType] = {}
-        for mod in mod_dict.values():
-            for utype, dtype in mod.defined_types.items():
-                type_dict[utype] = dtype
-
-        for dtype in type_dict.values():
-            dtype.find_instances(mod_dict)
-
-        bounds_inst = Variable(
-            type="bounds_type",
-            name="bounds",
-            dim=0,
-            subgrid="?",
-            ln=-1,
-        )
-        type_dict["bounds_type"].instances["bounds"] = bounds_inst.copy()
-
-        instance_to_user_type = {}
-        instance_dict: dict[str, DerivedType] = {}
-        for type_name, dtype in type_dict.items():
-            for instance in dtype.instances.values():
-                instance_to_user_type[instance.name] = type_name
-                instance_dict[instance.name] = dtype
-
-        unit_test = FunctionalUnitTest(
-            casedir=Path(test_dir),
-            cfg=Options(),
-            logger=logger,
-        )
-        unit_test.subroutine_dict = main_sub_dict
-        unit_test.module_dict = mod_dict
-        unit_test.type_dict = type_dict
-        process_subroutines_for_unit_test(unit_test)
-        active_vars = main_sub_dict[test_sub_name].active_global_vars
+        active_vars = unit_test.subroutine_dict[test_sub_name].active_global_vars
 
         modname = "test_sub_parse"
-        names = {'host_subroutine','sub_program','sub_func1'}
+        names = {"host_subroutine", "sub_program", "sub_func1"}
 
         for n in names:
-            sub = main_sub_dict[f"{modname}::{n}"]
-            sub.logger.warning("="*10)
+            sub = unit_test.subroutine_dict[f"{modname}::{n}"]
+            sub.logger.warning("=" * 10)
             sub.logger.warning(f"fileinfo: {sub.get_file_info()}")
             sub.logger.warning(f"{pformat(sub.sub_lines)}")
 
         with subtests.test(msg="call-tree-routines-are-walked"):
-            fut = main_sub_dict[test_sub_name]
+            fut = unit_test.subroutine_dict[test_sub_name]
             walked = set()
             for node in fut.abstract_call_tree.traverse_postorder():
-                sub = main_sub_dict[node.node.subname]
+                sub = unit_test.subroutine_dict[node.node.subname]
                 if sub.library:
                     continue
                 assert sub.record is not None, f"{sub.id} not walked"
                 assert sub.record_access is not None, f"{sub.id} not mapped"
                 walked.add(sub.name)
             assert "call_sub" in walked
-            assert {"tridiagonal" , "tridiagonal_sr"} & {c.name for c in fut.record.calls}
+            assert {"tridiagonal", "tridiagonal_sr"} & {
+                c.name for c in fut.record.calls
+            }
 
         with subtests.test(msg="root-bound-at-driver-call-site"):
-            fut = main_sub_dict[test_sub_name]
+            fut = unit_test.subroutine_dict[test_sub_name]
             drv_lines = Path(f"{test_dir}/elm_driver.F90").read_text().splitlines()
             call_ln = next(i for i, l in enumerate(drv_lines) if "call call_sub" in l)
-            access, _, _ = driver_callsites([fut], main_sub_dict, mod_dict)
+            access, _, _ = driver_callsites([fut], unit_test.subroutine_dict, unit_test.module_dict)
             access = access[fut.id]
             # globals passed by elm_drv take the dummies' status at the call line
             assert {"unused_inst%field2", "patch_state_updater%dwt"} <= access.keys()
@@ -220,9 +172,10 @@ def test_sub_parse(subtests):
             assert all(rw.ln == call_ln for rws in access.values() for rw in rws)
 
         with subtests.test(msg="internal-subprograms"):
-            host = main_sub_dict[f"{modname}::host_subroutine"]
+            host = unit_test.subroutine_dict[f"{modname}::host_subroutine"]
             internal = {
-                n: main_sub_dict[f"{modname}::{n}"] for n in ("sub_program", "sub_func1")
+                n: unit_test.subroutine_dict[f"{modname}::{n}"]
+                for n in ("sub_program", "sub_func1")
             }
             # 0-based lines in example_functions.F90
             expected_lns = tuple(
@@ -237,7 +190,10 @@ def test_sub_parse(subtests):
             assert host.endline == host.contains_ln
             assert not host.is_internal and host.host is None
             assert host.syntax_tree is not None
-            assert [s.name for s in host.syntax_tree.contains] == ["sub_program", "sub_func1"]
+            assert [s.name for s in host.syntax_tree.contains] == [
+                "sub_program",
+                "sub_func1",
+            ]
             assert max(lt.ln for lt in host.sub_lines) <= host.contains_ln
             assert host.sub_lines[-1].line.strip() == "contains"
             assert host.internal_subs == internal
@@ -249,25 +205,25 @@ def test_sub_parse(subtests):
 
         with subtests.test(msg="interface-bodies-are-not-routines"):
             for n in ("soil_hk_interface", "soil_suction_interface"):
-                assert f"{modname}::{n}" not in main_sub_dict
+                assert f"{modname}::{n}" not in unit_test.subroutine_dict
             # routines after the abstract interface block are still found
-            assert f"{modname}::host_subroutine" in main_sub_dict
-            mod_globals = mod_dict[modname].global_vars
+            assert f"{modname}::host_subroutine" in unit_test.subroutine_dict
+            mod_globals = unit_test.module_dict[modname].global_vars
             for dummy in ("this", "iface_smp", "iface_hk", "iface_sat"):
                 assert dummy not in mod_globals
 
         with subtests.test(msg="sub-lines-end-at-END-statement"):
-            for sub in main_sub_dict.values():
+            for sub in unit_test.subroutine_dict.values():
                 if sub.library or sub.contains_ln is not None:
                     continue
                 last = sub.sub_lines[-1].line.strip()
                 assert last.startswith("end ") and sub.name in last, f"{sub.id}: {last}"
 
         active_globals_fut: dict[str, Variable] = {}
-        for sub in main_sub_dict.values():
+        for sub in unit_test.subroutine_dict.values():
             active_globals_fut.update(sub.active_global_vars)
 
-        for var in main_sub_dict[test_sub_name].active_global_vars.values():
+        for var in unit_test.subroutine_dict[test_sub_name].active_global_vars.values():
             logger.info(
                 f"Variable Info:\n"
                 f"  name         : {var.name}\n"
@@ -281,18 +237,19 @@ def test_sub_parse(subtests):
             len(active_vars) == 7
         ), f"Didn't correctly find the active global variables:\n{active_vars}"
 
-        aggregate_dtype_vars(
-            sub_dict=main_sub_dict,
-            type_dict=type_dict,
-            inst_to_dtype_map=instance_to_user_type,
-        )
-        test_sub = main_sub_dict[test_sub_name].sub_lines
+        finalize_unit_test(unit_test,db_mode=False)
+        test_sub = unit_test.subroutine_dict[test_sub_name].sub_lines
 
-        def pstatus(rw:ReadWrite):
+        def pstatus(rw: ReadWrite):
             return f"{rw.status}@{rw.ln+1}"
 
-        from spel.scripts.tests.expected_parse_results import expected_access,elmtypes,args
-        for sub_obj in main_sub_dict.values():
+        from spel.scripts.tests.expected_parse_results import (
+            args,
+            elmtypes,
+            expected_access,
+        )
+
+        for sub_obj in unit_test.subroutine_dict.values():
             if sub_obj.id in expected_access:
                 if expected_access[sub_obj.id].get(elmtypes):
                     test_dict = {
@@ -300,13 +257,5 @@ def test_sub_parse(subtests):
                         for k, status in sub_obj.elmtype_access_by_ln.items()
                     }
                     with subtests.test(msg=f"{sub_obj.id}-elmtypes"):
-                        assert expected_access[sub_obj.id][ elmtypes ] == test_dict
+                        assert expected_access[sub_obj.id][elmtypes] == test_dict
 
-
-        active_set: set[str] = set()
-        for inst_name, dtype in instance_dict.items():
-            if not dtype.instances[inst_name].active:
-                continue
-            for field_var in dtype.components.values():
-                if field_var.active:
-                    active_set.add(f"{inst_name}%{field_var.name}")

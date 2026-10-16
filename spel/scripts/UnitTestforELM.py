@@ -205,7 +205,10 @@ def analyze_unit_test(
         unit_test.primary_subroutines = roots_from(unit_test)
         for sub in unit_test.primary_subroutines.values():
             sub.unit_test_function = True
-    main_sub_dict["filtermod::setfilters"].unit_test_function = True
+
+    setfilters = main_sub_dict.get("filtermod::setfilters")
+    if setfilters:
+        main_sub_dict["filtermod::setfilters"].unit_test_function = True
 
     process_subroutines_for_unit_test(unit_test, keep_going=roots_from is not None)
 
@@ -234,7 +237,7 @@ def finalize_unit_test(unit_test: FunctionalUnitTest, db_mode: bool) -> None:
 
     fut_subs: set[str] = {
         sub.id
-        for sub in unit_test.subroutine_dict.values()
+        for sub in unit_test.primary_subroutines.values()
         if sub.unit_test_function and sub.name != "setfilters"
     }
     # merged over all roots (a field is guarded only if every root using it guards it)
@@ -259,9 +262,6 @@ def finalize_unit_test(unit_test: FunctionalUnitTest, db_mode: bool) -> None:
             if "c13" in key or "c14" in key:
                 del sub.elmtype_access_summary[key]
 
-    # Create a makefile for the unit test
-    file_list = [get_filename_from_module(m) for m in ordered_mods]
-    unit_test.generate_cmake(files=file_list)
 
     unittest_subs = {
         sub for sub in unit_test.subroutine_dict.values() if sub.unit_test_function
@@ -274,6 +274,10 @@ def finalize_unit_test(unit_test: FunctionalUnitTest, db_mode: bool) -> None:
             unit_test.active_global_vars.update(childsub.active_global_vars)
 
     if not db_mode:
+        # Create a makefile for the unit test
+        file_list = [get_filename_from_module(m) for m in ordered_mods]
+        unit_test.generate_cmake(files=file_list)
+
         # Generate/modify FORTRAN files needed to initialize and run Unit Test
         unit_test.prepare_unit_test_files()
         # elm_instMod.F90

@@ -4,7 +4,7 @@ def parse_line(user_input: str):
     import scripts.types as t_
     from spel.scripts.fortran_parser.tracing import Trace
 
-    Trace.enabled = True
+    Trace.enabled = False
     ln = 0
     ln += 1
     line = [t_.LineTuple(line=user_input, ln=ln)]

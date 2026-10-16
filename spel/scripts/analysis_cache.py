@@ -273,7 +273,6 @@ def load_analysis(
     from spel.scripts.export_objects import _load_pickle
 
     logger = logger or get_logger("SPEL", level=logging.INFO)
-    migrate_legacy_cache(logger)
     path = cache_dir() / ANALYSIS_PICKLE
     if reanalyze or not path.is_file():
         build_analysis(logger)
@@ -490,8 +489,9 @@ def extract_unit_test(
     reset_active(fut)
 
     fut.primary_subroutines = selected
-    setfilters = fut.subroutine_dict["filtermod::setfilters"]
-    setfilters.unit_test_function = True
+    setfilters = fut.subroutine_dict.get( "filtermod::setfilters" )
+    if setfilters:
+        setfilters.unit_test_function = True
     # filter builders are roots so that what they read is captured and read
     for b in builder_ids:
         fut.subroutine_dict[b].unit_test_function = True

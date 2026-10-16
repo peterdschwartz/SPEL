@@ -388,11 +388,11 @@ def test_associate_parsing():
 
 
 def test_var_parsing():
-    Trace.enabled = True
+    Trace.enabled = False
     parse_statements(var_txt)
 
 def test_use_parsing():
-    Trace.enabled = True
+    Trace.enabled = False
     program = parse_statements(
         """use mod1
         use mod3, only: x => y, zs_jf, assignment(=)

@@ -248,6 +248,10 @@ class SubroutineRecord:
     def function_calls(self) -> list[FunctionRef]:
         return [e for e in self.events if isinstance(e, FunctionRef)]
 
+    @property
+    def loops(self) -> list[DoLoop]:
+        return [e for e in self.events if isinstance(e, DoLoop)]
+
     def pointer_targets(self) -> dict[str, list[str]]:
         result: dict[str, list[str]] = {}
         for e in self.events:
@@ -406,6 +410,7 @@ class _Walker:
                         Identifier(stmt.token, stmt.index), "w", ln, context="do"
                     )
                 self.walk_block(stmt.body)
+                self.rec.events.append(stmt)
             case DoWhile():
                 self.walk_expr(stmt.condition, ln)
                 self.walk_block(stmt.body)

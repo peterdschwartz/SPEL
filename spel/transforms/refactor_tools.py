@@ -151,7 +151,7 @@ def adjust_array_access_and_allocation(
             line_it.replace_in_line(lns, regex, f"{varname}({new_bounds})", sub.logger)
 
     insert_mappings(line_it, sub)
-    insert_decls(line_it, sub)
+    # insert_decls(line_it, sub)
     # Output file:
     base_fn = sub.filepath.split("/")[-1]
     with open(f"{spel_output_dir}{base_fn}", "w") as ofile:
@@ -161,12 +161,12 @@ def adjust_array_access_and_allocation(
     return
 
 
-def insert_decls(
-    line_it: LogicalLineIterator,
-    sub: Subroutine,
-):
-
-    return
+# def insert_decls(
+#     line_it: LogicalLineIterator,
+#     sub: Subroutine,
+# ):
+#
+#     return
 
 
 def insert_mappings(
