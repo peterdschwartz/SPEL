@@ -71,6 +71,30 @@ subroutine check(status)
    end if
 end subroutine check
 
+logical function spel_streq(a, b)
+   ! case-insensitive string equality, used by namelist guards in ReadWriteMod
+   character(len=*), intent(in) :: a, b
+   integer :: i, ca, cb
+   spel_streq = .false.
+   if (len_trim(a) /= len_trim(b)) return
+   do i = 1, len_trim(a)
+      ca = iachar(a(i:i))
+      cb = iachar(b(i:i))
+      if (ca >= iachar('A') .and. ca <= iachar('Z')) ca = ca + 32
+      if (cb >= iachar('A') .and. cb <= iachar('Z')) cb = cb + 32
+      if (ca /= cb) return
+   end do
+   spel_streq = .true.
+end function spel_streq
+
+logical function nc_has_var(ncid, varname)
+   ! false for globals that were unallocated when the file was written
+   integer, intent(in) :: ncid
+   character(len=*), intent(in) :: varname
+   integer :: varid
+   nc_has_var = nf90_inq_varid(ncid, trim(varname), varid) == nf90_noerr
+end function nc_has_var
+
 logical function nc_is_index_field(varname)
    ! Subgrid index fields (<inst>_pp__<field>) are offset per set by duplicateMod
    character(len=*), intent(in) :: varname

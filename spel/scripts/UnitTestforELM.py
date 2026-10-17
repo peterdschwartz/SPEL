@@ -39,7 +39,7 @@ from spel.scripts.record_access import (
 )
 from spel.scripts.nml.analyze_ifs import get_if_blocks
 from spel.scripts.nml.analyze_namelist import (
-    check_sub_for_nml_guarded_vars,
+    check_subs_for_nml_guarded_vars,
     find_all_namelist,
     find_nml_ifs,
     nml_guards,
@@ -237,13 +237,16 @@ def finalize_unit_test(unit_test: FunctionalUnitTest, db_mode: bool) -> None:
         for sub in unit_test.subroutine_dict.values()
         if sub.unit_test_function and sub.name != "setfilters"
     }
-    for sub_id in fut_subs:
-        sub_obj = unit_test.subroutine_dict[sub_id]
-        if sub_obj.abstract_call_tree and "filter" not in sub_obj.name:
-            unit_test.guarded_usage_dict = check_sub_for_nml_guarded_vars(
-                root_sub=sub_obj,
-                instance_dict=instance_dict,
-            )
+    # merged over all roots (a field is guarded only if every root using it guards it)
+    unit_test.guarded_usage_dict = check_subs_for_nml_guarded_vars(
+        root_subs=[
+            sub_obj
+            for sub_id in sorted(fut_subs)
+            if (sub_obj := unit_test.subroutine_dict[sub_id]).abstract_call_tree
+            and "filter" not in sub_obj.name
+        ],
+        instance_dict=instance_dict,
+    )
 
     aggregate_dtype_vars(
         sub_dict=unit_test.subroutine_dict,

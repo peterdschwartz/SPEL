@@ -11,6 +11,7 @@ from spel.scripts.fortran_parser.spel_ast import (
     IfConstruct,
     InfixExpression,
     PrefixExpression,
+    StringLiteral,
 )
 
 
@@ -27,8 +28,12 @@ class Expectation:
             return f".not. {self.variable}"
         elif self.constraint == "True":
             return self.variable
-        else:
-            return f"{self.variable} {self.constraint}"
+        op, _, rhs = self.constraint.partition(" ")
+        if _is_string_literal(rhs) and op.lower() in _STRING_EQ | _STRING_NE:
+            # the analysis lowercases sources, so compare strings case-insensitively
+            streq = f"spel_streq({self.variable}, {rhs})"
+            return streq if op.lower() in _STRING_EQ else f".not. {streq}"
+        return f"{self.variable} {self.constraint}"
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,20 @@ class AnyOf:
 
 
 ConditionExpectation: TypeAlias = Expectation | AllOf | AnyOf
+
+_STRING_EQ = {"==", "=", ".eq."}
+_STRING_NE = {"/=", "!=", ".ne."}
+
+
+def _is_string_literal(text: str) -> bool:
+    return len(text) >= 2 and text[0] == text[-1] and text[0] in "'\""
+
+
+def _operand_str(expr: Expression) -> str:
+    """Fortran source for a comparison operand (StringLiteral.__str__ drops the quotes)"""
+    if isinstance(expr, StringLiteral):
+        return f"'{expr.value}'"
+    return str(expr)
 
 
 def expected_constraints(
@@ -364,7 +383,7 @@ def infer_condition_expectations(
                 expectations.append(
                     Expectation(
                         expr.left_expr.value,
-                        f"{expected_op} {expr.right_expr}",
+                        f"{expected_op} {_operand_str(expr.right_expr)}",
                     )
                 )
 
@@ -379,7 +398,7 @@ def infer_condition_expectations(
                 expectations.append(
                     Expectation(
                         expr.right_expr.value,
-                        f"{expected_op} {expr.left_expr}",
+                        f"{expected_op} {_operand_str(expr.left_expr)}",
                     )
                 )
 

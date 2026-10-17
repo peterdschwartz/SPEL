@@ -1,6 +1,7 @@
 import re
 import subprocess
 from collections import defaultdict
+from collections.abc import Iterable
 from pprint import pprint
 import sys
 
@@ -21,6 +22,7 @@ from spel.scripts.fortran_parser.spel_parser import Parser
 from spel.scripts.nml.namelist_cascade import NML_CASCADES
 from spel.scripts.types import FlatIfs, LineTuple, LogicalLineIterator, NameList
 from spel.scripts.utilityFunctions import Variable
+from spel.scripts.validate_access import merge_guards
 
 
 def find_nml_ifs(sub_dict: dict[str, Subroutine], nml_dict: dict[str, NameList]):
@@ -71,15 +73,17 @@ def nml_guards(root_sub: Subroutine) -> dict[str, ConditionExpectation]:
     return var_dict
 
 
-def check_sub_for_nml_guarded_vars(
-    root_sub: Subroutine,
+def check_subs_for_nml_guarded_vars(
+    root_subs: Iterable[Subroutine],
     instance_dict: dict[str, DerivedType],
 ) -> dict[ConditionExpectation, list[Variable]]:
     """
-    Given a root subroutine node, check
-    if any global variables are ONLY accessed under certain NML options
+    Given the unit test's root subroutines, find the global variables ONLY
+    accessed under certain NML options (guarded in every root that accesses them)
     """
-    var_dict = nml_guards(root_sub)
+    var_dict = merge_guards(
+        (root_sub.elmtype_access_by_ln, nml_guards(root_sub)) for root_sub in root_subs
+    )
 
     temp = defaultdict(list)
     for v, cond in var_dict.items():

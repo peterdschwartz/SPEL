@@ -195,6 +195,9 @@ def evaluate_guard(cond: ConditionExpectation, values: dict[str, Any]) -> Option
                 return None
             if isinstance(rhs, bool):
                 lhs = bool(lhs)
+            elif isinstance(rhs, str) and isinstance(lhs, str):
+                # the analysis lowercases string literals (see Expectation.to_fortran)
+                lhs, rhs = lhs.strip().lower(), rhs.strip().lower()
             try:
                 return bool(fn(lhs, rhs))
             except TypeError:

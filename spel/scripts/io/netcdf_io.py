@@ -39,6 +39,41 @@ def guard_fortran_lines(
     ]
 
 
+def is_deferred_shape(var: Variable) -> bool:
+    """
+    `x(:)`/`x(:,:)` arrays (allocatable or pointer), as opposed to `x(ngases,3)`.
+    Derived-type components count as deferred: their `bounds` holds the dimension
+    names from their allocate statement (e.g. 'topo'), not the declaration.
+    """
+    if var.dim == 0:
+        return False
+    if "%" in var.name:
+        return True
+    bounds = var.bounds.strip().strip("()")
+    return not bounds or all(b.strip() == ":" for b in bounds.split(","))
+
+
+def alloc_status(var: Variable) -> str | None:
+    """
+    allocated()/associated() test for deferred-shape module arrays, which ELM may
+    leave unallocated (e.g. AllocationMod::aroot is only allocated with crop_prog)
+    """
+    if "%" in var.name or not is_deferred_shape(var):
+        return None
+    return f"associated({var.name})" if var.ptrscalar else f"allocated({var.name})"
+
+
+def if_block(lines: list[str], cond: str | None, indent: str) -> list[str]:
+    if cond is None:
+        return lines
+    inner = indent + "  "
+    return [
+        f"{indent}if ({cond}) then\n",
+        *[f"{inner}{line.lstrip()}" if line.strip() else line for line in lines],
+        f"{indent}end if\n",
+    ]
+
+
 def create_nc_define_vars(
     vars: dict[str, Variable],
     time: bool,
@@ -482,6 +517,7 @@ def create_nc_def(
                 f"dim_names(1:{var.dim}), lbound({var.name}), ubound({var.name}))\n"
             )
 
+        var_lines = if_block(var_lines, alloc_status(var), tabs)
         condition = guards.get(var.name)
 
         lines.extend(
@@ -555,10 +591,11 @@ def create_nc_write(
             f"'{varname}'{timestep})\n"
         )
 
-        var_lines = [
-            f"{tabs}if(verbose) print *, '{varname}'\n",
-            f"{tabs}{stmt}",
-        ]
+        var_lines = if_block(
+            [f"{tabs}if(verbose) print *, '{varname}'\n", f"{tabs}{stmt}"],
+            alloc_status(var),
+            tabs,
+        )
 
         lines.extend(
             guard_fortran_lines(
@@ -628,14 +665,20 @@ def create_nc_read(
 
         varname = var.name.replace("%", "__")
 
-        var_lines = [
-            (f"{tabs}call nc_alloc(" f'ncid, "{varname}", {var.dim}, {var.name})\n'),
-            (
-                f"{tabs}call nc_read_var("
-                f"ncid, '{varname}', {var.dim}, "
-                f"{var.name}{time_str})\n"
-            ),
-        ]
+        var_lines: list[str] = []
+        # explicit-shape arrays (e.g. elm_varcon::d_con_w(ngases,3)) are already sized
+        if is_deferred_shape(var):
+            var_lines.append(
+                f"{tabs}call nc_alloc(" f'ncid, "{varname}", {var.dim}, {var.name})\n'
+            )
+        var_lines.append(
+            f"{tabs}call nc_read_var("
+            f"ncid, '{varname}', {var.dim}, "
+            f"{var.name}{time_str})\n"
+        )
+        # not written if it was unallocated in ELM (see alloc_status)
+        if alloc_status(var):
+            var_lines = if_block(var_lines, f"nc_has_var(ncid, '{varname}')", tabs)
 
         lines.extend(
             guard_fortran_lines(
@@ -1240,6 +1283,30 @@ def gen_check() -> str:
     {tabs}      stop 2
     {tabs}   end if
     {tabs}end subroutine check
+
+    {tabs}logical function spel_streq(a, b)
+    {tabs}   ! case-insensitive string equality, used by namelist guards in ReadWriteMod
+    {tabs}   character(len=*), intent(in) :: a, b
+    {tabs}   integer :: i, ca, cb
+    {tabs}   spel_streq = .false.
+    {tabs}   if (len_trim(a) /= len_trim(b)) return
+    {tabs}   do i = 1, len_trim(a)
+    {tabs}      ca = iachar(a(i:i))
+    {tabs}      cb = iachar(b(i:i))
+    {tabs}      if (ca >= iachar('A') .and. ca <= iachar('Z')) ca = ca + 32
+    {tabs}      if (cb >= iachar('A') .and. cb <= iachar('Z')) cb = cb + 32
+    {tabs}      if (ca /= cb) return
+    {tabs}   end do
+    {tabs}   spel_streq = .true.
+    {tabs}end function spel_streq
+
+    {tabs}logical function nc_has_var(ncid, varname)
+    {tabs}   ! false for globals that were unallocated when the file was written
+    {tabs}   integer, intent(in) :: ncid
+    {tabs}   character(len=*), intent(in) :: varname
+    {tabs}   integer :: varid
+    {tabs}   nc_has_var = nf90_inq_varid(ncid, trim(varname), varid) == nf90_noerr
+    {tabs}end function nc_has_var
     """)
 
 

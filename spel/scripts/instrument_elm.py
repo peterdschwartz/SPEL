@@ -874,8 +874,10 @@ def _stream(cmd: list[str], cwd: Optional[Path] = None) -> tuple[int, Optional[s
     """Run cmd echoing its output; (exit code, CASEDIR it printed)."""
     print("Running:", " ".join(cmd))
     casedir = None
+    # no stdin: mpiexec (hydra) forwards it and aborts if it is e.g. `yes | spel ...`
     with subprocess.Popen(
-        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        cmd, cwd=cwd, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     ) as proc:
         for line in proc.stdout:
             print(line, end="")

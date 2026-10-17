@@ -137,3 +137,27 @@ def test_boolean_equality():
 
     assert expr_1 == expr_2
 
+
+
+def test_string_comparison_guard_is_quoted_fortran():
+    # nu_com .eq. 'rd'  (analysis lowercases sources, so the literal is 'rd')
+    from spel.scripts.fortran_parser.spel_ast import StringLiteral
+
+    expr = InfixExpression(
+        tok=tok,
+        op=".eq.",
+        left=Identifier(tok=tok, value="nu_com"),
+        right=StringLiteral(tok=tok, val="rd"),
+    )
+    variables = {"nu_com"}
+    assert infer_condition_expectations(expr, variables, True) == Expectation(
+        "nu_com", ".eq. 'rd'"
+    )
+    assert (
+        infer_condition_expectations(expr, variables, True).to_fortran()
+        == "spel_streq(nu_com, 'rd')"
+    )
+    assert (
+        infer_condition_expectations(expr, variables, False).to_fortran()
+        == ".not. spel_streq(nu_com, 'rd')"
+    )

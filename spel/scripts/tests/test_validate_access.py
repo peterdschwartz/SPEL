@@ -166,6 +166,9 @@ GUARDS = {"veg_ws%h2o": PHS, "gone%v": PHS}
         (Expectation("method", "> nlev"), {"method": 2, "nlev": 1}, True),
         (Expectation("flag", "== .true."), {"flag": 0}, False),
         (Expectation("x", "== 1.0_r8"), {"x": 1.0}, True),
+        # string literals are lowercased by the analysis -> case-insensitive
+        (Expectation("nu_com", ".eq. 'rd'"), {"nu_com": "RD"}, True),
+        (Expectation("nu_com", ".ne. 'rd'"), {"nu_com": "ECA"}, True),
         (AllOf((PHS, Expectation("crop", "True"))), {"use_hydrstress": 0}, False),
         (AllOf((PHS, Expectation("crop", "True"))), {"use_hydrstress": 1}, None),
         (AnyOf((PHS, Expectation("crop", "True"))), {"use_hydrstress": 1}, True),
