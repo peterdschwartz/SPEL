@@ -132,3 +132,11 @@ def test_declarations_only_comments_out_contained_routines():
     assert [lt.ln for lt in kept] == list(range(10)) + [15, 16]
     assert all(lt.commented for lt in lines[10:15])
     assert not any(lt.commented for lt in lines[:10] + lines[15:])
+
+
+def test_generated_elm_instmod_declares_header_typed_imports(inst_mod, type_dict):
+    # hlm_fates_interface_type is #defined to integer in unittest_defs.h
+    text = "\n".join(elminst_lines(type_dict, inst_mod, imported={"alm_fates"}))
+    assert '#include "unittest_defs.h"' in text
+    assert "type(hlm_fates_interface_type)                      :: alm_fates" in text
+    assert "elmfatesinterfacemod" not in text.lower()

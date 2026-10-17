@@ -170,6 +170,20 @@ def routine_lines(lines: list[LineTuple], name: str) -> list[LineTuple]:
     raise SemanticError(f"routine {name} not found")
 
 
+def forwarded_global(caller_id: str, local: str) -> Optional[str]:
+    """
+    The name a scalar local of `caller_id` copies when its only assignment
+    is `local = <name>` (e.g. `dt = dtime_mod`); None otherwise.
+    """
+    mod_name, name = caller_id.split("::")
+    _, lines = load_module(mod_name)
+    assign = re.compile(rf"^\s*{re.escape(local)}\s*=(?!=)\s*(.*?)\s*;?\s*$", re.IGNORECASE)
+    rhs = [m.group(1) for lt in routine_lines(lines, name) if (m := assign.match(lt.line))]
+    if len(rhs) == 1 and re.fullmatch(r"[a-z_]\w*", rhs[0], re.IGNORECASE):
+        return rhs[0].lower()
+    return None
+
+
 def driver_callsites(
     roots: Iterable[Subroutine],
     sub_dict: dict[str, Subroutine],

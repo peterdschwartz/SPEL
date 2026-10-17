@@ -467,7 +467,10 @@ def extract_unit_test(
     if unreached:
         sys.exit(f"Error- not reached from {DRIVER_ROUTINE} in the cached analysis: {unreached}")
     sites, bindings = call_sites(fut, selected, logger)
-    builders = filter_builders(fut, selected, bindings, logger)
+    # main.F90 calls the routines in the order the caller does
+    first_ln = {s: min((c.ln for c in sites.calls.get(s, [])), default=sys.maxsize) for s in selected}
+    selected = dict(sorted(selected.items(), key=lambda kv: first_ln[kv[0]]))
+    builders =filter_builders(fut, selected, bindings, logger)
     builder_ids = {b for b, _ in builders}
     builder_bindings = [b for b in fut.driver_bindings if b.callee in builder_ids]
 

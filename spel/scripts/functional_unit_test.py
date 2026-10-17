@@ -26,7 +26,7 @@ from spel.scripts.config import (
     spel_output_dir,
     unit_test_files,
 )
-from spel.scripts.edit_files import macros
+from spel.scripts.edit_files import header_types, macros
 from spel.scripts.fortran_modules import (
     FortranModule,
     declaration_source,
@@ -434,6 +434,7 @@ class FunctionalUnitTest:
         the call chain (driver_bindings): elm_drv's clump bounds and filters
         become main's bounds_clump and filter(nc).
         """
+        from spel.scripts.driver_callsites import forwarded_global
         from spel.scripts.fortran_parser.symbols import Origin
 
         intrinsic = {"real": "real(r8)", "integer": "integer", "logical": "logical"}
@@ -472,6 +473,20 @@ class FunctionalUnitTest:
                 elif var is not None and var.optional and b is None:
                     continue
                 elif var is not None and var.dim == 0 and var.type in intrinsic:
+                    # a local the caller copies from a global (`dt = dtime_mod`)
+                    src = (
+                        forwarded_global(b.caller, b.actual)
+                        if b is not None and b.origin is Origin.LOCAL
+                        else None
+                    )
+                    mod = next(
+                        (m for m, fm in self.module_dict.items() if src in fm.global_vars),
+                        None,
+                    ) if src else None
+                    if mod is not None:
+                        args.append(f"{dummy}={src}")
+                        use(f"use {mod}, only : {src}\n")
+                        continue
                     where = f"{b.actual} in {b.caller}" if b is not None else "nothing"
                     self.logger.warning(
                         f"{sub.id}: dummy '{dummy}' is bound to {where}, not a global; "
@@ -544,11 +559,11 @@ class FunctionalUnitTest:
         acc_filter_update = (
             ["call spel_acc_update_filters()\n"] if builder_calls else []
         )
-        # insert_at_token(reversed(...)) below emits the calls last-to-first,
-        # so the builders, which must run first, go at the end
+        # in execution order: the filter builders, then the routines in the
+        # order their caller calls them
         adjusted_calls = [
             c if c.endswith("\n") else f"{c}\n"
-            for c in list(adjusted_calls) + acc_filter_update + builder_calls
+            for c in builder_calls + acc_filter_update + list(adjusted_calls)
         ]
         modules_to_add.append(
             "use SpelAccDataMod, only: spel_acc_enter_data, spel_acc_update_device, "
@@ -559,7 +574,7 @@ class FunctionalUnitTest:
         lines = insert_at_token(lines, "!#USE_START", modules_to_add)
         lines = insert_at_token(lines, "!#VAR_DECL", adjusted_vars)
         lines = insert_at_token(
-            lines, "!#CALL_SUB", with_prof_ranges(list(reversed(adjusted_calls)))
+            lines, "!#CALL_SUB", with_prof_ranges(adjusted_calls)
         )
         lines = insert_at_token(
             lines,
@@ -1081,7 +1096,16 @@ def elminst_lines(
 
     uses: dict[str, list[str]] = {}
     decls: list[str] = []
+    header_decl = False
     for name in sorted(names):
+        gv = inst_mod.global_vars.get(name)
+        if gv is not None and gv.type.lower() in header_types:
+            # type is #defined to an intrinsic in unittest_defs.h (e.g. alm_fates)
+            decl = declaration_line(inst_mod, name)
+            if decl is not None and decl not in decls:
+                decls.append(decl)
+                header_decl = True
+            continue
         source = declaration_source(inst_mod, name, typedict)
         if source is None:
             logger.warning(f"elm_instMod: can't provide '{name}' (type not in unit test)")
@@ -1098,6 +1122,8 @@ def elminst_lines(
 
     spaces = " " * 2
     out = ["module elm_instMod"]
+    if header_decl:
+        out.append('#include "unittest_defs.h"')
     out += [f"{spaces}use {m}, only : {', '.join(items)}" for m, items in uses.items()]
     out += [f"{spaces}implicit none", f"{spaces}save", f"{spaces}public"]
     out += [spaces + d for d in decls]

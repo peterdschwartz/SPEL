@@ -12,7 +12,7 @@ from pathlib import Path
 
 from spel.scripts.analyze_subroutines import Subroutine, link_internal_subprograms
 from spel.scripts.check_sections import check_function_start, create_init_obj
-from spel.scripts.config import E3SM_SRCROOT, spel_output_dir
+from spel.scripts.config import E3SM_SRCROOT, spel_mods_dir, spel_output_dir
 from spel.scripts.DerivedType import DerivedType, parse_derived_type_definition
 from spel.scripts.fortran_parser.symbols import rename_pair
 from spel.scripts.fortran_modules import (
@@ -122,13 +122,30 @@ bad_symbols = {
     "ncd_pio_openfile",
     "ncd_io",
     "ncd_pio_closefile",
-    "alm_fates",
-    "elm_fates",
     "ncd_inqdlen",
     "t_start_lnd",
     "t_stop_lnd",
     "ep_betr",
 }
+
+INTRINSIC_TYPES = {"integer", "real", "logical", "character", "complex"}
+
+
+def read_header_types(path: Path) -> set[str]:
+    """Derived types that unittest_defs.h `#define`s to an intrinsic type."""
+    regex = re.compile(r"^\s*#define\s+(\w+)\s+(\w+)\s*$")
+    return {
+        m.group(1).lower()
+        for line in path.read_text().splitlines()
+        if (m := regex.match(line)) and m.group(2).lower() in INTRINSIC_TYPES
+    }
+
+
+# Types of bad modules that stay usable: the unit test's unittest_defs.h maps
+# them to an intrinsic type, so their objects can still be declared and passed
+# as arguments (e.g. alm_fates). Only statements that reference their
+# components (`alm_fates%...`) are commented out.
+header_types: set[str] = read_header_types(Path(spel_mods_dir) / "unittest_defs.h")
 
 remove_subs = [
     "prepare_data_for_em_ptm_driver",
@@ -158,6 +175,9 @@ BAD_MODULE_NAMES: dict[str, set[str]] = {
     },
 }
 bad_module_imports: dict[str, set[str]] = {k: set(v) for k, v in BAD_MODULE_NAMES.items()}
+
+# module name -> its globals of a header type (see header_types)
+opaque_exports: dict[str, set[str]] = {}
 
 # Entries of bad_symbols that must not be commented out
 regex_hack = re.compile(r"\b(nan|spval|r8|is_active_betr_bgc)\b")
@@ -200,6 +220,8 @@ parse_interface_end = "parse_interface_end"
 # These are required to be re-compiled after an initial pass through file
 parse_bad_inst = "parse_bad_inst"
 parse_sub_call = "parse_sub_call"
+parse_opaque_decl = "parse_opaque_decl"
+parse_opaque_ref = "parse_opaque_ref"
 
 #
 # Macros that we want to process. Any not in the list will be
@@ -322,6 +344,7 @@ def pop_routine_frame(state: ParseState, name: str, logger: Logger) -> RoutineFr
         sys.exit(1)
     frame = state.routine_stack.pop()
     state.bad_names.difference_update(frame.bad_locals)
+    state.opaque_names.difference_update(frame.opaque_locals)
     return frame
 
 
@@ -450,6 +473,38 @@ def handle_bad_inst(state: ParseState, logger: Logger):
     return
 
 
+def record_opaque_decl(state: ParseState, logger: Logger):
+    """Declaration of objects of a header type: keep it, track the names."""
+    assert state.curr_line
+    names = declared_names(state.curr_line.line)
+    state.opaque_names.update(names)
+    if state.routine_stack:
+        state.routine_stack[-1].opaque_locals.update(names)
+    elif not state.in_interface and not in_derived_type_def(state):
+        opaque_exports.setdefault(state.module_name.lower(), set()).update(names)
+
+
+def collect_opaque_imports(state: ParseState):
+    """Names imported from modules whose globals of a header type are kept."""
+    if not opaque_exports:
+        return
+    for fline in state.line_it:
+        m = regex_use.match(fline.line)
+        if not m or state.line_it.lines[state.line_it.start_index].commented:
+            continue
+        exported = opaque_exports.get(m.group(1).lower())
+        if not exported:
+            continue
+        if not m.group(2):
+            state.opaque_names.update(exported)
+            continue
+        for item in split_top_level(m.group(3) or ""):
+            local, _, remote = (x.strip().lower() for x in item.partition("=>"))
+            if (remote or local) in exported:
+                state.opaque_names.add(local)
+    state.line_it.reset()
+
+
 def apply_comments(lines: list[LineTuple]) -> list[LineTuple]:
     comment_ = "!#py "
 
@@ -504,6 +559,8 @@ def parse_bad_modules(
                         continue
                     el = name if name.lower() == "nan" else f"{name}|{alias}"
                 el = el.lower()
+                if el.split("|")[0] in header_types:
+                    continue  # provided by unittest_defs.h
                 if el and not regex_hack.search(el):
                     state.bad_names.add(el)
                     imported.setdefault(orig_ln, set()).add(el)
@@ -747,15 +804,30 @@ def comment_bad_references(state: ParseState, pass_manager: PassManager, head_ln
             module_level
         )
     prune_unavailable_imports(state)
+    collect_opaque_imports(state)
 
-    pass_manager.remove_pass(name=parse_sub_call)
-    pass_manager.remove_pass(name=parse_bad_inst)
+    for name in (parse_opaque_decl, parse_sub_call, parse_opaque_ref, parse_bad_inst):
+        pass_manager.remove_pass(name=name)
+    if header_types:
+        types_alt = "|".join(sorted(map(re.escape, header_types)))
+        pass_manager.add_pass(
+            pattern=re.compile(
+                rf"^\s*(?:type|class)\s*\(\s*({types_alt})\s*\)", re.IGNORECASE
+            ),
+            fn=record_opaque_decl,
+            name=parse_opaque_decl,
+        )
     pass_manager.add_pass(
         pattern=NameSetPattern(
             state.bad_names, r"\s*(call)[\s]+({names})", re.IGNORECASE
         ),
         fn=set_comment,
         name=parse_sub_call,
+    )
+    pass_manager.add_pass(
+        pattern=NameSetPattern(state.opaque_names, r"\b({names})\s*%"),
+        fn=handle_bad_inst,
+        name=parse_opaque_ref,
     )
     pass_manager.add_pass(
         pattern=NameSetPattern(state.bad_names, r"\b({names})\b"),

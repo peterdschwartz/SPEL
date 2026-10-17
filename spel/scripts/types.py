@@ -57,6 +57,8 @@ class RoutineFrame:
     cpp_contains_ln: Optional[int] = None
     # locals of an unavailable type, banned only until the routine ends
     bad_locals: set[str] = field(default_factory=set)
+    # locals/dummies of a header type (see edit_files.header_types)
+    opaque_locals: set[str] = field(default_factory=set)
     dummy_args: set[str] = field(default_factory=set)
 
 
@@ -447,6 +449,8 @@ class ParseState:
     # Names that must be commented out of this file (global bad symbols plus
     # file-local ones, e.g. locals bound to unavailable imports)
     bad_names: set[str] = field(default_factory=set)
+    # Objects of a header type: kept, but their component references are commented out
+    opaque_names: set[str] = field(default_factory=set)
     # original line number of an edited `use` statement -> local names removed
     pruned_uses: dict[int, set[str]] = field(default_factory=dict)
 
