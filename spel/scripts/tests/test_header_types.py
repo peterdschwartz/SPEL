@@ -48,8 +48,6 @@ end module soildecompmod
 def fresh_exports(monkeypatch):
     monkeypatch.setattr(ef, "opaque_exports", {})
     monkeypatch.setattr(ef, "unavailable_exports", {})
-    # other tests' analyses may have marked these modules unavailable
-    monkeypatch.setattr(ef, "bad_modules", ef.bad_modules - {"elm_instmod", "soildecompmod"})
 
 
 def active(lines: list[str]) -> list[str]:

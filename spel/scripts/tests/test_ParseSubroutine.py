@@ -119,7 +119,7 @@ def elm_src_pointing_to(src_dir: Path):
         yield
 
 
-def test_sub_parse(subtests):
+def test_sub_parse(subtests, tmp_path):
     """
     Test for parsing function/subroutine calls
     """
@@ -131,7 +131,7 @@ def test_sub_parse(subtests):
         from spel.scripts.analysis_cache import extract_unit_test, load_analysis
 
         analysis = load_analysis(reanalyze=True)
-        unit_test = extract_unit_test(analysis, sub_name_list, case_dir=Path(test_dir)/"fut", logger=logger)
+        unit_test = extract_unit_test(analysis, sub_name_list, case_dir=tmp_path, logger=logger)
         unit_test.write_meta_file()
 
         active_vars = unit_test.subroutine_dict[test_sub_name].active_global_vars
@@ -243,7 +243,7 @@ def test_sub_parse(subtests):
         def pstatus(rw: ReadWrite):
             return f"{rw.status}@{rw.ln+1}"
 
-        from spel.scripts.tests.expected_parse_results import (
+        from spel.scripts.tests.fixtures.expected_parse_results import (
             args,
             elmtypes,
             expected_access,

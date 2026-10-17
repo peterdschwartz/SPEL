@@ -33,3 +33,23 @@ def elm_drv_analysis():
     if not path.is_file():
         pytest.skip(f"no elm_drv analysis at {path}")
     return _load_pickle(path)
+
+
+@pytest.fixture(autouse=True)
+def restore_edit_files_globals():
+    """
+    edit_files keeps per-run state in module globals (modules found unavailable,
+    names they no longer export); restore it in place after each test so one
+    test's analysis doesn't change another's edits.
+    """
+    import copy
+
+    import spel.scripts.edit_files as ef
+
+    names = ("bad_modules", "bad_symbols", "unavailable_exports", "bad_module_imports", "opaque_exports")
+    saved = {n: copy.deepcopy(getattr(ef, n)) for n in names}
+    yield
+    for n, value in saved.items():
+        current = getattr(ef, n)
+        current.clear()
+        current.update(value)

@@ -6,7 +6,7 @@ import time
 from spel.scripts.config import ELM_SRC, unittests_dir
 from spel.scripts.fortran_modules import get_filename_from_module, get_module_name_from_file
 from spel.scripts.utilityFunctions import line_unwrapper
-from spel.scripts.write_routines import create_deepcopy_module
+from spel.scripts.functional_unit_test import create_deepcopy_module
 
 regex_contains = re.compile(r"^(contains)", re.IGNORECASE)
 
