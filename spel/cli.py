@@ -58,9 +58,7 @@ def compact(args):
     if args.action == "rewrite":
         return compact_rewrite(fut, args)
     instances = args.instances.split(",") if args.instances else None
-    reports, tracer = build_inventory(
-        fut, types=FLUX_TYPES, instances=instances, unpack_after=args.unpack_after
-    )
+    reports, tracer = build_inventory(fut, types=FLUX_TYPES, instances=instances)
     print(summary(reports))
     for r in reports:
         if r.field in (args.field or []) or r.verdict in (args.verdict or []):
@@ -96,16 +94,42 @@ def compact_rewrite(fut, args):
             mapped += [r for r in role_types(nm, types) if r not in mapped]
         print(f"types: {', '.join(mapped)} (from .spel-nutrient.json)")
         types = mapped
+    if getattr(args, "no_map_sites", False):
+        import spel.transforms.compact.select as _sel
+
+        _sel.MAP_SITES = False
     sels = []
     for dtype in [] if args.loops_only else types:
-        sel = select_fields(fut, dtype, unpack_after=args.unpack_after)
+        sel = select_fields(fut, dtype)
+        if getattr(args, "exclude_fields", None):
+            for comp in args.exclude_fields.split(","):
+                if comp in sel.components:
+                    sel.components.pop(comp)
+                    sel.history.pop(comp, None)
+                    sel.levels.pop(comp, None)
+                    sel.restart.pop(comp, None)
+                    sel.excluded[comp] = "--exclude-fields"
+            drop = set(args.exclude_fields.split(","))
+            sel.sites = [st for st in sel.sites if st.components - drop]
+        if getattr(args, "fields", None):
+            keep = set(args.fields.split(","))
+            for comp in list(sel.components):
+                if comp not in keep:
+                    sel.components.pop(comp)
+                    sel.history.pop(comp, None)
+                    sel.levels.pop(comp, None)
+                    sel.excluded[comp] = "not in --fields"
+            sel.sites = [st for st in sel.sites if st.components & keep]
+            if not sel.components:
+                print(f"{dtype}: no selected field in --fields; skipped")
+                continue
         sels.append(sel)
         print(f"{dtype}: {len(sel.components)} fields, {len(sel.sites)} access sites")
         nested = [c for c, why in sel.excluded.items() if why.startswith("lives on")]
         if nested:
             print(f"  {len(nested)} shared fields live on an embedded holder; pass --type <that type> (see --excluded)")
         for comp, zc in sel.components.items():
-            print(f"  {comp:32s} zeroed: {zc:20s} unpack: {sel.unpack[comp]}")
+            print(f"  {comp:32s} zeroed: {zc:20s} history: {sel.history[comp]}")
         if args.excluded:
             for comp, why in sorted(sel.excluded.items()):
                 print(f"  excluded {comp:32s} {why}")
@@ -119,7 +143,7 @@ def compact_rewrite(fut, args):
     from spel.transforms.compact.inventory import FLUX_TYPES
 
     try:
-        rewriter.build(args.unpack_after, loop_types=FLUX_TYPES if args.setvalues_loops else ())
+        rewriter.build(loop_types=FLUX_TYPES if args.setvalues_loops else ())
     except RewriteError as err:
         raise SystemExit(f"compact rewrite: {err}")
     for note in rewriter.notes:
@@ -132,7 +156,7 @@ def compact_rewrite(fut, args):
     e3sm = git_state(Path(E3SM_SRCROOT))
     try:
         written = rewriter.apply(
-            manifest(rewriter, args.unpack_after, spel_commit, e3sm),
+            manifest(rewriter, spel_commit, e3sm),
             output=Path(args.output) if args.output else None,
             replace=args.replace,
         )
@@ -846,9 +870,10 @@ def main():
     compact_parser.add_argument(
         "--type",
         nargs="+",
-        default=["vegetation_carbon_flux", "vegetation_nitrogen_flux", "vegetation_phosphorus_flux"],
-        help="rewrite: the derived types (default: the patch-level C/N/P flux types; on nutrient-transformed "
-        "sources their family base type, vegetation_nutrient_flux)",
+        default=["vegetation_carbon_flux", "vegetation_nitrogen_flux", "vegetation_phosphorus_flux",
+                 "column_carbon_flux", "column_nitrogen_flux", "column_phosphorus_flux"],
+        help="rewrite: the derived types (default: the patch- and column-level C/N/P flux types; on "
+        "nutrient-transformed sources their family base types, vegetation_nutrient_flux and column_nutrient_flux)",
     )
     compact_parser.add_argument(
         "--roles",
@@ -867,11 +892,28 @@ def main():
         help="rewrite: only the SetValues loops, no compact layout (to measure the two separately)",
     )
     compact_parser.add_argument(
-        "--no-setvalues-loops",
+        "--setvalues-loops",
         dest="setvalues_loops",
-        action="store_false",
-        help="rewrite: keep the blocked associate loops in the flux types' SetValues "
-        "(default: make them do concurrent loops, also for types not compacted)",
+        action="store_true",
+        default=False,
+        help="rewrite: also turn the flux types' blocked SetValues loops (associate idx => filter(fi:...)) "
+        "into do concurrent loops, for all six types. Off by default: 7%% slower CNZero with Intel on the "
+        "stride-8 case (2026-10-24); it helped nvfortran",
+    )
+    compact_parser.add_argument(
+        "--no-setvalues-loops", dest="setvalues_loops", action="store_false", help="(the default)"
+    )
+    compact_parser.add_argument(
+        "--exclude-fields", dest="exclude_fields", default="",
+        help="rewrite: drop these components (comma-separated) from every selection, for bisecting",
+    )
+    compact_parser.add_argument(
+        "--fields", default="",
+        help="rewrite: keep only these components (comma-separated) of every selection, for bisecting",
+    )
+    compact_parser.add_argument(
+        "--no-map-sites", dest="no_map_sites", action="store_true",
+        help="rewrite: only filter-gathered sites (no x(compact_cidx_p(p)) for sub-filter or pfti-mapped members)",
     )
     compact_parser.add_argument(
         "--replace",
@@ -882,12 +924,6 @@ def main():
         "--instances",
         default="veg_cf,veg_nf,veg_pf,col_cf,col_nf,col_pf",
         help="comma-separated instances (default: the C12 flux instances)",
-    )
-    compact_parser.add_argument(
-        "--unpack-after",
-        dest="unpack_after",
-        default="ecosystemdynleaching",
-        help="elm_drv call after which compact fields are unpacked (default: ecosystemdynleaching)",
     )
     compact_parser.add_argument("--field", nargs="*", help="print the details of these instance%%fields")
     compact_parser.add_argument(

@@ -157,7 +157,11 @@ def scan_routine(sub_id: str, tree, types: dict[str, DerivedType], module_types:
             pointer, target = st.expression.left_expr, st.expression.right_expr
         if pointer is not None:
             names, _ = path_of(pointer)
-            if names and len(names) > 1:
+            tnames, tcomps = path_of(target)
+            # a target rooted in an array element (`compact_groups(id)%data(:, s)`, the compact
+            # layout's storage) is not an alias of another instance's component
+            storage = bool(tcomps) and bool(tcomps[0][1])
+            if names and len(names) > 1 and not storage:
                 for owner, path in owners(names, base_type(names[0]), types):
                     ptrs.append(PointerInit(owner, path, str(target).strip(), sub_id, st.lineno))
     return allocs, ptrs

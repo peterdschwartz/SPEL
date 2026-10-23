@@ -367,6 +367,11 @@ def finalize_unit_test(
         file_list = [get_filename_from_module(m) for m in ordered_mods]
         if builders_file := write_filter_builders_module(unit_test):
             file_list.append(builders_file)
+        from spel.transforms.compact.unit_test import write_compact_module
+
+        if compact_file := write_compact_module(unit_test):
+            file_list.append(compact_file)
+            logger.info(f"compact layout: {len(unit_test.compact_fields)} fields packed around compute ({compact_file})")
         unit_test.generate_cmake(files=file_list)
 
         # Generate/modify FORTRAN files needed to initialize and run Unit Test

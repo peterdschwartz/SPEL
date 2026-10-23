@@ -782,11 +782,11 @@ class FunctionalUnitTest:
             self.type_dict
         )
 
-        # types rewritten by `spel compact rewrite`: pack/unpack around compute
-        from spel.transforms.compact.unit_test import compact_instances, hook_lines
+        # sources rewritten by `spel compact rewrite`: pack/unpack the compact fields
+        # around compute (SpelCompactMod, written by UnitTestforELM with the file list)
+        from spel.transforms.compact.unit_test import hook_lines
 
-        compact = compact_instances(self.type_dict, active_instances)
-        for token, hook in hook_lines(compact).items():
+        for token, hook in hook_lines(getattr(self, "compact_fields", [])).items():
             lines = insert_at_token(lines, token, hook)
 
         # time-step scalars: copied from the per-step inputs after every read

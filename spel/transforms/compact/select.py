@@ -3,10 +3,13 @@ The fields of a derived type to compact, and the access sites to rewrite.
 
 A component is selected when, for every instance of the type it is zeroed in:
 
-  * its inventory verdict is `compact` (every access between the zeroing and
-    the unpack point gathers from the main filter),
-  * it is not a restart variable and nothing accesses it after the unpack
-    point (those would need the full layout),
+  * its inventory verdict is `compact` (every access after the zeroing, for
+    the rest of the step, gathers from the main filter),
+  * nothing accesses it before its zeroing in the step (the compact storage
+    is reallocated before the step's zeroing when the filters change, so an
+    earlier read would see garbage),
+  * it is not a restart variable and no history registration writes set_*
+    values into it (there is no full array to write to),
   * every access site can be rewritten: the subscript is the variable `p` of
     ``p = filter_soilp(fp)`` inside a loop ``do fp = 1, num_soilp`` (then
     ``x(p)`` becomes ``x(k0p+fp)``), or the access has no subscripts (a whole
@@ -33,7 +36,6 @@ from pathlib import Path
 from typing import Optional
 
 from spel.transforms.compact.inventory import (
-    UNPACK_AFTER,
     Entry,
     FieldReport,
     Tracer,
@@ -41,20 +43,25 @@ from spel.transforms.compact.inventory import (
     split_window,
 )
 from spel.transforms.compact.holders import Holder, find_holder, srcroot_of
-from spel.transforms.compact.index_forms import MAIN_FILTER
+from spel.transforms.compact.index_forms import MAIN_FILTER, SUBSET_FILTERS
 
 
 @dataclass
 class Site:
-    """An access to rewrite: `written(sub0, ...)` -> `written(<k0>+fp, ...)` on line `ln`."""
+    """
+    An access to rewrite on line `ln`: `written(sub0, ...)` -> `written(<k0>+fp, ...)`
+    (mode "filter": sub0 = filter(fp)), or `written(<cidx>(sub0), ...)` (mode "map":
+    sub0 is a provable filter member reached through a subgrid map, fp None).
+    """
 
     sub: str
     ln: int  # 0-based first line of the statement
     path: str
     written: str
     sub0: str
-    fp: str
+    fp: Optional[str]
     components: set[str] = field(default_factory=set)
+    mode: str = "filter"
 
 
 @dataclass
@@ -76,13 +83,97 @@ class Selection:
     dtype: str
     subgrid: str
     instances: list[str]
-    components: dict[str, str]  # component -> zeroing class (guard text)
-    unpack: dict[str, bool]  # component -> copied to the full layout at the unpack point
+    components: dict[str, str]  # component -> zeroing guard text (its group)
+    history: dict[str, bool]  # component -> registered for history (read through the inverse map)
     sites: list[Site]
     excluded: dict[str, str]  # component -> reason
     untraced: list[str]
+    levels: dict[str, str] = field(default_factory=dict)  # rank-2 component -> upper bound of its levels (text)
+    restart: dict[str, bool] = field(default_factory=dict)  # component -> restart variable (restartvar gathers/scatters)
     polymorphic: dict[str, Polymorphic] = field(default_factory=dict)
     holder: Optional[Holder] = None  # the type and where its instances live (see holders.py)
+
+
+MAP_SITES = True  # set False (--no-map-sites) to keep the phase-1 rule: filter-gathered sites only
+
+
+def member_through_map(e: Entry, subgrid: str) -> bool:
+    """
+    Whether the access's subscript is a filter member reached other than by
+    gathering from the main filter (site mode "map", compact index
+    `compact_cidx_p(p)`): an element of a sub-filter of the main filter
+    (`filter_pcropp`, SUBSET_FILTERS), or patch `p = col_pp%pfti(c) + pi - 1` of
+    a `filter_soilc` column read or written under `veg_pp%active(p)`. The soil
+    patch filter is exactly the active patches on soil/crop columns
+    (filterMod), so such a patch is in `filter_soilp`.
+    """
+    form = e.index
+    if not MAP_SITES or form is None or form.foreign or not e.sub0:
+        return False
+    if subgrid == "c" and form.kind == "map" and form.var == e.sub0 and form.filter == {"veg_pp%column"}:
+        # c = veg_pp%column(p), p in filter_soilp: the column of an active soil patch is an
+        # active soil/crop column (is_active_p needs col_pp%active(c)), so c is in filter_soilc
+        inner = form.inner
+        return inner is not None and inner.kind == "filter" and MAIN_FILTER["p"] in inner.filter
+    if form.kind == "filter" and form.var == e.sub0 and form.inner is not None and form.inner.kind == "count":
+        # an element of a filter inside the main one (filter_pcropp: active crop patches)
+        subset = form.filter & SUBSET_FILTERS[subgrid]
+        counts = {f"filter%num_{f.split('%')[1]}" for f in subset}
+        return bool(subset) and MAIN_FILTER[subgrid] not in form.filter and bool(counts & form.inner.filter)
+    if subgrid != "p" or form.kind != "offset":
+        return False
+    text = form.text.replace(" ", "")
+    inner = form.inner
+    if "col_pp%pfti(" not in text or inner is None or inner.kind != "filter" or "filter%soilc" not in inner.filter:
+        return False
+    active = re.compile(rf"(?<![%\w])veg_pp%active\({re.escape(e.sub0)}\)")
+    for g in e.guards:
+        gt = str(g).replace(" ", "")
+        if active.search(gt) and ".or." not in gt and ".not." not in gt and "not(" not in gt:
+            return True
+    return False
+
+
+def level_bounds(rs) -> Optional[str]:
+    """
+    The upper bound (text) of the levels of a rank-2 field, from its
+    allocation bounds `begc:endc,1:nlevdecomp_full`; the lower bound must be
+    1 (the group buffer's levels are 1:nlev) and the same for every instance.
+    A reason starting with "!" when it cannot be compact.
+    """
+    hi: set[str] = set()
+    for r in rs:
+        parts = split_top(r.bounds)
+        if len(parts) != 2:
+            return f"!bounds {r.bounds}"
+        lev = parts[1]
+        if ":" in lev:
+            lo, up = lev.split(":", 1)
+            if lo.strip() != "1":
+                return f"!levels {lev} (lower bound must be 1)"
+            hi.add(up.strip())
+        else:
+            hi.add(lev.strip())
+    if len(hi) != 1 or not hi or "" in hi:
+        return f"!levels differ between instances: {sorted(hi)}"
+    return hi.pop()
+
+
+def split_top(text: str) -> list[str]:
+    """Split on the commas outside parentheses."""
+    out, depth, cur = [], 0, ""
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur)
+    return [o for o in out if o != ""] if text else []
 
 
 def rewritable(e: Entry, subgrid: str) -> Optional[str]:
@@ -90,6 +181,8 @@ def rewritable(e: Entry, subgrid: str) -> Optional[str]:
     form = e.index
     if not e.sub0:
         return None  # whole array passed on, or a dummy bound to an element
+    if member_through_map(e, subgrid):
+        return None
     if form is None or form.kind != "filter" or form.foreign:
         return f"index form {form} at {e.loc}"
     inner = form.inner
@@ -107,9 +200,9 @@ def rewritable(e: Entry, subgrid: str) -> Optional[str]:
     return None
 
 
-def select_fields(fut, dtype_name: str, unpack_after: str = UNPACK_AFTER) -> Selection:
+def select_fields(fut, dtype_name: str) -> Selection:
     holder = find_holder(fut, dtype_name)
-    reports, tracer = build_inventory(fut, types=(dtype_name,), unpack_after=unpack_after)
+    reports, tracer = build_inventory(fut, types=(dtype_name,))
     dtype = fut.type_dict[dtype_name]
     instances = holder.instances
     excluded: dict[str, str] = {}
@@ -130,24 +223,47 @@ def select_fields(fut, dtype_name: str, unpack_after: str = UNPACK_AFTER) -> Sel
     if len(subgrids) != 1 or (subgrid := subgrids.pop()) not in MAIN_FILTER:
         raise ValueError(f"{dtype_name}: fields on subgrids {subgrids}; one of {set(MAIN_FILTER)} expected")
 
+    # fields some pointer component aliases (`transport_ptr_list(i)%trcr_tend_ptr =>
+    # col_cf%core%decomp_pools_transport_tendency`): the alias is set once and indexed on
+    # its own, so it would dangle after a rebind and keep full-layout sites
+    aliased = {
+        str(target).lower().replace(" ", "")
+        for dtype in fut.type_dict.values()
+        for c in dtype.components.values()
+        for target in (getattr(c, "pointer", None) or [])
+    }
     chosen: dict[str, str] = {}
-    unpack: dict[str, bool] = {}
+    history: dict[str, bool] = {}
+    levels: dict[str, str] = {}
+    restart: dict[str, bool] = {}
     for comp, rs in sorted(by_comp.items()):
-        if instances[0] not in {r.field.split("%")[0] for r in rs}:
-            excluded[comp] = f"not zeroed for {instances[0]}"
-        elif bad := [r for r in rs if r.verdict not in ("compact", "unused")]:
+        if alias := [r.field for r in rs if r.field.lower() in aliased]:
+            excluded[comp] = f"aliased by a pointer component ({alias[0]})"
+            continue
+        # every instance must zero the field: the inventory only reports (and the rewrite only
+        # checks and edits) the accesses of instances whose per-step zeroing writes it; an
+        # instance without that zeroing may index the field over the full range unseen
+        zeroed_in = {r.field.split("%")[0] for r in rs}
+        if missing := [i for i in instances if i not in zeroed_in]:
+            excluded[comp] = f"not zeroed for {missing[0]}"
+        elif bad := [r for r in rs if r.verdict not in ("compact", "compact+maps", "unused")]:
             excluded[comp] = f"verdict {bad[0].verdict} for {bad[0].field.split('%')[0]}"
-        elif any(r.restart for r in rs):
-            excluded[comp] = "restart variable"
-        elif any(r.after_unpack for r in rs):
-            excluded[comp] = "accessed after the unpack point"
-        elif rs[0].rank != 1:
+        elif any(r.set_special for r in rs):
+            excluded[comp] = "history registration with set_* values"
+        elif before := [loc for r in rs for loc in r.read_before_zero + r.written_before_zero]:
+            excluded[comp] = f"accessed before its zeroing: {before[0]}"
+        elif rs[0].rank not in (1, 2):
             excluded[comp] = f"rank {rs[0].rank}"
+        elif rs[0].rank == 2 and (why := level_bounds(rs)) is not None and why.startswith("!"):
+            excluded[comp] = why[1:]
         elif len({r.zero_class for r in rs}) != 1 or '"' in rs[0].zero_class or "'" in rs[0].zero_class:
             excluded[comp] = f"zeroing classes {sorted({r.zero_class for r in rs})}"
         else:
             chosen[comp] = rs[0].zero_class
-            unpack[comp] = any(r.history for r in rs)
+            history[comp] = any(r.history for r in rs)
+            restart[comp] = any(r.restart for r in rs)
+            if rs[0].rank == 2:
+                levels[comp] = level_bounds(rs)
 
     by_field: dict[str, list[Entry]] = defaultdict(list)
     for e in tracer.entries:
@@ -159,7 +275,7 @@ def select_fields(fut, dtype_name: str, unpack_after: str = UNPACK_AFTER) -> Sel
             break
         for comp, reason in drop.items():
             chosen.pop(comp, None)
-            unpack.pop(comp, None)
+            history.pop(comp, None)
             excluded[comp] = reason
 
     sel = Selection(
@@ -167,7 +283,9 @@ def select_fields(fut, dtype_name: str, unpack_after: str = UNPACK_AFTER) -> Sel
         subgrid=subgrid,
         instances=instances,
         components=dict(sorted(chosen.items(), key=lambda kv: (kv[1], kv[0]))),
-        unpack=unpack,
+        history=history,
+        levels={c: levels[c] for c in chosen if c in levels},
+        restart={c: restart.get(c, False) for c in chosen},
         sites=sorted(sites.values(), key=lambda s: (s.sub, s.ln, s.path)),
         excluded=excluded,
         untraced=[],
@@ -183,7 +301,7 @@ def select_fields(fut, dtype_name: str, unpack_after: str = UNPACK_AFTER) -> Sel
             break
         for comp, reason in drop.items():
             sel.components.pop(comp, None)
-            sel.unpack.pop(comp, None)
+            sel.history.pop(comp, None)
             sel.excluded[comp] = reason
         while True:
             sites, poly, drop = _sites(tracer, by_field, sel.components, subgrid, holder)
@@ -191,7 +309,7 @@ def select_fields(fut, dtype_name: str, unpack_after: str = UNPACK_AFTER) -> Sel
                 break
             for comp, reason in drop.items():
                 sel.components.pop(comp, None)
-                sel.unpack.pop(comp, None)
+                sel.history.pop(comp, None)
                 sel.excluded[comp] = reason
         sel.sites = sorted(sites.values(), key=lambda s: (s.sub, s.ln, s.path))
         sel.polymorphic = poly
@@ -213,16 +331,22 @@ def _sites(tracer: Tracer, by_field, chosen, subgrid, holder: Holder):
         for e in window:
             if e.cls == "zero":
                 continue
+            if e.status == "arg?":
+                drop.setdefault(comp, f"passed whole to an unanalyzed routine at {e.loc}")
+                continue
             if (why := rewritable(e, subgrid)) is not None:
                 drop.setdefault(comp, why)
                 continue
             if not e.sub0:
                 continue
-            fp = e.index.inner.var
+            if member_through_map(e, subgrid):
+                mode, fp = "map", None
+            else:
+                mode, fp = "filter", e.index.inner.var
             site = sites.get(e.site)
             if site is None:
-                site = sites[e.site] = Site(e.sub, e.ln, e.path, e.written, e.sub0, fp)
-            elif (site.sub0, site.fp) != (e.sub0, fp):
+                site = sites[e.site] = Site(e.sub, e.ln, e.path, e.written, e.sub0, fp, mode=mode)
+            elif (site.sub0, site.fp, site.mode) != (e.sub0, fp, mode):
                 drop.setdefault(comp, f"site {e.loc} indexed differently in different visits")
             site.components.add(comp)
     def selected(path: str) -> bool:

@@ -89,7 +89,6 @@ bad_modules = {
     "perfmod_gpu",
     "dynpftfilemod",
     "dyncropfilemod",
-    "dynharvestmod",
     "dynfateslandusechangemod",
     "cnallocationbetrmod",
     "dynedmod",
@@ -220,6 +219,7 @@ parse_interface_end = "parse_interface_end"
 # These are required to be re-compiled after an initial pass through file
 parse_bad_inst = "parse_bad_inst"
 parse_sub_call = "parse_sub_call"
+parse_type_extends = "parse_type_extends"
 parse_opaque_decl = "parse_opaque_decl"
 parse_opaque_ref = "parse_opaque_ref"
 
@@ -408,6 +408,27 @@ def finalize_function(state: ParseState, logger: Logger):
     # reset function state:
     state.in_func -= 1
     return
+
+
+regex_type_extends = re.compile(r"^\s*type\s*,.*?\bextends\s*\(\s*(\w+)\s*\)", re.IGNORECASE)
+
+
+def handle_type_extends(state: ParseState, logger: Logger):
+    """
+    `type, extends(X) :: t` where X is a header type (`#define file_desc_t
+    integer`) or a banned name: keep the type without its parent, as
+    dynFileMod's dyn_file_type extends PIO's file_desc_t.
+    """
+    assert state.curr_line
+    l_cont = state.curr_line.line
+    m = regex_type_extends.match(l_cont)
+    if not m:
+        return
+    parent = m.group(1).lower()
+    if parent in header_types or parent in flat_names(state.bad_names):
+        rewrite_statement(
+            state, re.sub(r",\s*extends\s*\([^)]*\)", "", l_cont.strip(), flags=re.IGNORECASE)
+        )
 
 
 def handle_bad_inst(state: ParseState, logger: Logger):
@@ -842,7 +863,7 @@ def comment_bad_references(state: ParseState, pass_manager: PassManager, head_ln
     prune_unavailable_imports(state)
     collect_opaque_imports(state)
 
-    for name in (parse_opaque_decl, parse_sub_call, parse_opaque_ref, parse_bad_inst):
+    for name in (parse_opaque_decl, parse_type_extends, parse_sub_call, parse_opaque_ref, parse_bad_inst):
         pass_manager.remove_pass(name=name)
     if header_types:
         types_alt = "|".join(sorted(map(re.escape, header_types)))
@@ -853,6 +874,9 @@ def comment_bad_references(state: ParseState, pass_manager: PassManager, head_ln
             fn=record_opaque_decl,
             name=parse_opaque_decl,
         )
+    pass_manager.add_pass(
+        pattern=regex_type_extends, fn=handle_type_extends, name=parse_type_extends
+    )
     pass_manager.add_pass(
         pattern=NameSetPattern(
             state.bad_names, r"\s*(call)[\s]+({names})", re.IGNORECASE

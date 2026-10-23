@@ -590,61 +590,72 @@ def test_wait_for_case_jobs_polls_until_complete(tmp_path):
                            sleep=lambda s: None, timeout_s=2.0, poll_s=1.0)
 
 
-def test_capture_module_compact_instances():
-    """A compact-layout instance is unpacked and switched to the full layout around every capture."""
+def test_capture_module_compact_fields():
+    """A compact field is gathered into a full-layout scratch array around every capture."""
     from spel.scripts.subset import SubsetSpec
+    from spel.transforms.compact.unit_test import CompactField
 
-    compact = [("veg_cf", "p", "vegetationdatatype"), ("veg_pf", "p", "vegetationdatatype")]
+    compact = [
+        CompactField("veg_cf", "core", "leaf_to_litter", "vegetation_nutrient_flux", "NutrientFluxType", "VegetationDataType", "p"),
+        CompactField("col_nf", "", "x", "column_nitrogen_flux", "ColumnFluxTypes", "ColumnDataType", "c"),
+    ]
     src = ie.generate_capture_module(NAMES, ["cnstate_vars"], compact=compact)
-    assert "use vegetationdatatype, only : veg_cf, veg_pf" in src
-    assert "use filterMod, only : filter" in src
-    unpack = "call veg_cf%cbuf%unpack(filter(bounds%clump_index)%num_soilp, filter(bounds%clump_index)%soilp, all=.true.)"
-    assert src.count(unpack) == 2 and src.count("call veg_pf%FullView()") == 2
-    assert src.count("call veg_cf%CompactView()") == 2
+    assert "use VegetationDataType, only : veg_cf" in src and "use ColumnDataType, only : col_nf" in src
+    assert "use NutrientFluxType, only : vegetation_nutrient_flux_compact_bind" in src
+    assert "real(r8), allocatable, target :: cap_veg_cf_core_leaf_to_litter(:)" in src
+    assert "call gather_p(veg_cf%core%leaf_to_litter, cap_veg_cf_core_leaf_to_litter, bounds%begp, bounds%endp, proc%begp, proc%endp)" in src
+    assert "call gather_c(col_nf%x, cap_col_nf_x, bounds%begc, bounds%endc, proc%begc, proc%endc)" in src
+    assert "veg_cf%core%leaf_to_litter => cap_veg_cf_core_leaf_to_litter" in src
+    assert "call vegetation_nutrient_flux_compact_bind(veg_cf%core)" in src and "call column_nitrogen_flux_compact_bind(col_nf)" in src
+    assert src.count("call compact_capture_begin(bounds)") == 2 and src.count("call compact_capture_end()") == 2
     for io in ("io_inputs", "io_outputs"):
-        body = src[src.index(f"write_elmtypes({io}") - 400 : src.index(f"write_elmtypes({io}") + 200]
-        assert body.index("FullView()") < body.index(f"write_elmtypes({io}") < body.index("CompactView()")
+        at = src.index(f"write_elmtypes({io}")
+        assert src.rfind("compact_capture_begin", 0, at) > src.rfind("compact_capture_end", 0, at)
+        assert src.index("compact_capture_end", at) < src.index("end subroutine", at)
     # subset captures get the same treatment
     spec = SubsetSpec.parse("urban")
     sub = ie.generate_capture_module(NAMES, ["cnstate_vars"], subset=spec, compact=compact)
-    assert sub.count(unpack) == 2 and sub.count("call veg_cf%CompactView()") == 2
-    assert sub.index("FullView()") < sub.index("write_elmtypes(io_inputs") < sub.index("veg_cf%CompactView()")
-    # without compact instances the module is unchanged
+    assert sub.count("call compact_capture_begin(bounds)") == 2 and "subroutine gather_p" in sub
+    # without compact fields the module is unchanged
     assert ie.generate_capture_module(NAMES, ["cnstate_vars"]) == ie.generate_capture_module(NAMES, ["cnstate_vars"], compact=())
-    assert "FullView" not in ie.generate_capture_module(NAMES, ["cnstate_vars"])
+    assert "compact_capture" not in ie.generate_capture_module(NAMES, ["cnstate_vars"])
 
 
-def test_compact_instances_bound_and_embedded():
-    """A concrete type with its own buffer and a core holder with one: both hooked."""
+def test_compact_fields_from_manifest_and_module():
+    """Fields of the manifest's groups, for active instances and used components; the unit-test module."""
     from types import SimpleNamespace
 
-    from spel.transforms.compact.unit_test import compact_instances, hook_lines
+    from spel.transforms.compact.unit_test import compact_fields, compact_module, deactivate_runtime_components, hook_lines
 
-    def comp(name, type_, dim=1, bounds="begp:endp", nested=False):
-        return SimpleNamespace(name=name, type=type_, dim=dim, bounds=bounds, nested=nested, active=True)
+    def comp(name, type_, active=True):
+        return SimpleNamespace(name=name, type=type_, active=active)
 
     base = SimpleNamespace(
-        type_name="vegetation_nutrient_flux", declaration="nutrientfluxtype", procedures={},
-        components={"x": comp("x", "real"), "cbuf": comp("cbuf", "compact_buffer_type", 0, None)},
+        type_name="vegetation_nutrient_flux", declaration="NutrientFluxType",
+        components={"x": comp("x", "real"), "y": comp("y", "real"), "cgrp_id": comp("cgrp_id", "integer")},
     )
     carbon = SimpleNamespace(
-        type_name="vegetation_carbon_flux", declaration="vegetationfluxtypes",
-        procedures={"compactview": "m::veg_cf_compact_view"},
-        components={
-            "core": comp("core", "vegetation_nutrient_flux", 0, None),
-            "core%x": comp("core%x", "real", nested=True),
-            "y": comp("y", "real"),
-            "cbuf": comp("cbuf", "compact_buffer_type", 0, None),
-        },
+        type_name="vegetation_carbon_flux", declaration="VegetationFluxTypes",
+        components={"core": comp("core", "vegetation_nutrient_flux"), "core%x": comp("core%x", "real"),
+                    "core%y": comp("core%y", "real", active=False), "core%cgrp_id": comp("core%cgrp_id", "integer")},
     )
     type_dict = {t.type_name: t for t in (base, carbon)}
-    active = {"veg_cf": SimpleNamespace(type="vegetation_carbon_flux", declaration="vegetationdatatype")}
-    insts = compact_instances(type_dict, active)
-    assert [(c.instance, c.path, c.bound) for c in insts] == [("veg_cf", "", True), ("veg_cf", "core", False)]
-    hooks = hook_lines(insts)
-    text = "".join(hooks["!#COMPACT_BEFORE"] + hooks["!#COMPACT_AFTER"] + hooks["!#COMPACT_INIT"])
-    assert "call veg_cf%CompactView()" in text
-    assert "call vegetation_nutrient_flux_compact_view(veg_cf%core)" in text
-    assert "call veg_cf%core%cbuf%unpack(" in text
-    assert "call vegetation_nutrient_flux_compact_init(veg_cf%core, bounds_proc%begp, bounds_proc%endp)" in text
-    assert hooks["!#USE_START"] == ["use nutrientfluxtype, only : vegetation_nutrient_flux_compact_init, vegetation_nutrient_flux_compact_view, vegetation_nutrient_flux_full_view\n"]
+    active = {"veg_cf": SimpleNamespace(type="vegetation_carbon_flux", declaration="VegetationDataType")}
+    manifest = {"types": {"vegetation_nutrient_flux": {
+        "level": "p", "instances": ["veg_cf", "veg_nf"], "embedded_in": {"veg_cf": "core", "veg_nf": "core"},
+        "groups": [{"index": 1, "guard": None, "fields": ["x", "y"]}]}}}
+    fields = compact_fields(type_dict, active, manifest)
+    assert [(f.instance, f.path, f.comp, f.subgrid) for f in fields] == [("veg_cf", "core", "x", "p")]
+    assert fields[0].shadow == "sh_veg_cf_core_x" and fields[0].bind_call == "call vegetation_nutrient_flux_compact_bind(veg_cf%core)"
+    mod = compact_module(fields)
+    assert "sh_veg_cf_core_x => veg_cf%core%x" in mod
+    assert "veg_cf%core%x(off+1:off+n) = sh_veg_cf_core_x(filter(nc)%soilp(1:n))" in mod
+    assert "sh_veg_cf_core_x(filter(nc)%soilp(1:n)) = veg_cf%core%x(off+1:off+n)" in mod
+    assert "veg_cf%core%x => sh_veg_cf_core_x" in mod
+    assert "call compact_filters_set(compact_lev_col" in mod
+    hooks = hook_lines(fields)
+    assert hooks["!#COMPACT_BEFORE"] == ["      call spel_compact_pack()\n"]
+    assert any("spel_compact_init(bounds_proc)" in l for l in hooks["!#COMPACT_INIT"])
+    assert deactivate_runtime_components(type_dict) == ["vegetation_carbon_flux%core%cgrp_id", "vegetation_nutrient_flux%cgrp_id"]
+    assert not carbon.components["core%cgrp_id"].active
+    assert compact_fields(type_dict, active, None) == [] and hook_lines([]) == {}

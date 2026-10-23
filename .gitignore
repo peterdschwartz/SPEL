@@ -78,3 +78,4 @@ spel/db/*.env
 *.sqlite3
 spel/db/staticfiles/
 spel/db/media/
+.claude/settings.local.json

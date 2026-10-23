@@ -293,18 +293,28 @@ feature that needs to know what a statement *is* or which names it uses must get
 
 ## Compact layout (`spel compact`)
 
-- Since 2026-10-22 the E3SM branch no longer carries the compact commit (reverted in a3711572cb): the
-  layout is applied per case at build time, `e3sm_casegen.sh --compact` (= `spel compact rewrite --srcroot SRC
-  --reanalyze -o CASE/SourceMods/src.elm`, case name gets `.compact`). Captures and hand edits work on
-  unrewritten sources; compact unit tests still need the compact-aware capture hooks.
-- Design and rules: `spel/transforms/compact/DESIGN.md`; deferred fields: `DEFERRED.md`.
+- Since 2026-10-22 the E3SM branch no longer carries the compact rewrite: the layout is applied per
+  case at build time, `e3sm_casegen.sh --compact` (= `spel compact rewrite --srcroot SRC --reanalyze
+  -o CASE/SourceMods/src.elm`, case name gets `.compact`; `COMPACT_ARGS` env adds options such as
+  `--roles`). The branch does carry `CompactLayoutMod.F90` (the history readers use it); the rewrite
+  requires it to equal the SPEL template `spel/transforms/compact/templates/CompactLayoutMod.F90` and
+  does not write it again. Captures and hand edits work on unrewritten sources.
+- v2 (2026-10-24): fields live only in per-group buffers over the process soil filters, clumps are
+  contiguous slices, history reads them through the inverse map in the kernels (`histComputeMod`), a
+  generated `CompactBindMod` resizes and rebinds when the filters change. No unpack point any more.
+  Design and rules: `spel/transforms/compact/DESIGN.md`; deferred fields: `DEFERRED.md`.
 - The inventory is deliberately conservative: false positives (e.g. value-dependent guards like
   `ch4_prod`'s `lake`) are reviewed by hand, not analyzed away.
 - `rewrite` needs the analysis of exactly the sources it edits (`spel analyze` first) and refuses
-  sources that already have `CompactLayoutMod.F90`. Test it with `-o $CASE/SourceMods/src.elm`
-  against a baseline case built from the same commit (bit-for-bit history files).
+  sources that already have `CompactBindMod.F90` or `.spel-compact.json`. Test it with
+  `-o $CASE/SourceMods/src.elm` against a baseline case built from the same commit (bit-for-bit
+  history files; `$SCRATCH/prsplit/validate_level.sh LABEL SRC REF` with `COMPACT_ARGS` does this).
+  Don't run analysis probes on a srcroot while a `--reanalyze` of it runs (truncated pickle).
 - `CompactLayoutMod` must only use share modules (`shr_*`): `decompMod` uses it, so ELM modules
   like `abortutils` would make a module cycle.
+- Unit tests of rewritten sources get a generated `SpelCompactMod.F90` (shadows packed around
+  `compute`); `cgrp_id` is never captured. Captures gather the full layout through the inverse map and
+  need one thread per process.
 
 ## Refactoring a routine against a reference
 
