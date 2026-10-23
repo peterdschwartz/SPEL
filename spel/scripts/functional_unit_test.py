@@ -350,7 +350,7 @@ class FunctionalUnitTest:
         return block, call_lines, path, mod_lines, index[lns[0]]
 
     def _driver_scalar_dummies(self) -> dict[str, str]:
-        """Scalar real/integer dummy arguments of the driver routine (elm_drv), by name."""
+        """Scalar real/integer/logical dummy arguments of the driver routine (elm_drv), by name."""
         sites = getattr(self, "driver_sites", None)
         if sites is None:
             return {}
@@ -362,7 +362,7 @@ class FunctionalUnitTest:
         body = text[m.end():]
         body = body[: re.search(rf"^\s*end\s+subroutine", body, re.M).start()]
         found = {}
-        for decl in re.finditer(r"^\s*(real|integer)\b[^:\n]*::([^!\n]*)", body, re.M):
+        for decl in re.finditer(r"^\s*(real|integer|logical)\b[^:\n]*::([^!\n]*)", body, re.M):
             for name in decl.group(2).split(","):
                 name = name.strip()
                 if name in names and "(" not in name:
@@ -371,8 +371,9 @@ class FunctionalUnitTest:
 
     def _use_driver_args(self, call_lines: list[str]) -> tuple[list[str], set[str]]:
         """
-        Replace actuals that are elm_drv dummies (nextsw_cday, declinp1) by the
+        Replace actuals that are elm_drv dummies (nextsw_cday, declinp1, doalb) by the
         captured spel_drv_<name>(1) from ReadWriteMod; records them in driver_args.
+        Logicals are stored as integers (0/1), like the time scalars.
         """
         dummies = self._driver_scalar_dummies()
         used: set[str] = set()
@@ -381,7 +382,8 @@ class FunctionalUnitTest:
             for name, typ in dummies.items():
                 pattern = rf"(?<![\w%])({name})\b(?!\s*=(?!=))"
                 if re.search(pattern, line, re.I):
-                    line = re.sub(pattern, f"spel_drv_{name}(1)", line, flags=re.I)
+                    actual = f"(spel_drv_{name}(1) /= 0)" if typ == "logical" else f"spel_drv_{name}(1)"
+                    line = re.sub(pattern, actual, line, flags=re.I)
                     self.driver_args[name] = typ
                     used.add(name)
             out.append(line)
