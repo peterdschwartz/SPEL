@@ -24,6 +24,7 @@ clean_lnd=0
 submit=0
 refcase=""
 start_date=""
+datm_y1=""; datm_y2=""
 ntasks=""
 nthrds=""
 threaded=0
@@ -109,7 +110,10 @@ Usage: $(basename "$0") [options]
                        --res and --with-crops/--no-crops.
   --refcase DIR        hybrid start from a refcase saved by save_refcase.sh
                        (e.g. \$DIN_LOC_ROOT/spel-refcases/<compset>/<case>/<date>)
-  --start-date DATE    RUN_STARTDATE for --refcase (default: the refcase date)
+  --start-date DATE    RUN_STARTDATE (with --refcase: default = the refcase date; also for a
+                       startup run from a --finidat restart, e.g. 0003-07-01)
+  --datm-years Y1 Y2   DATM_CLMNCEP_YR_START/END (ALIGN=1): the forcing years the start date
+                       must fall in (model year n reads forcing year Y1+n-1)
   --keep               reuse an existing case instead of recreating it
   --build              run case.setup and case.build
   --no-build           undo --build (after --preset)
@@ -197,6 +201,7 @@ while [ $# -gt 0 ]; do
       --no-debug) debug=FALSE ;;
       --refcase) refcase=$(realpath "$2"); shift ;;
       --start-date) start_date=$2; shift ;;
+      --datm-years) datm_y1=$2; datm_y2=$3; shift 2 ;;
       --keep) keep=1 ;;
       --build) build=1 ;;
       --clean-lnd) clean_lnd=1 ;;
@@ -390,6 +395,12 @@ PY
    ./xmlchange RUN_REFDATE="$ref_date"
    ./xmlchange RUN_REFTOD="$ref_tod"
    ./xmlchange RUN_STARTDATE="${start_date:-$ref_date}"
+fi
+if [ -z "$refcase" ] && [ -n "$start_date" ]; then
+   ./xmlchange RUN_STARTDATE="$start_date"
+fi
+if [ -n "$datm_y1" ]; then
+   ./xmlchange DATM_CLMNCEP_YR_START="$datm_y1",DATM_CLMNCEP_YR_END="$datm_y2",DATM_CLMNCEP_YR_ALIGN=1
 fi
 { set +x; } 2>/dev/null
 echo "CASEDIR=${casedir}"

@@ -176,7 +176,8 @@ def generate_elmtypes_io_netcdf(unit_test: FunctionalUnitTest) -> None:
     # elm_drv arguments the routines take (nextsw_cday, declinp1): one value per step
     drv_args = getattr(unit_test, "driver_args", {})
     for name, typ in drv_args.items():
-        drv_var = Variable(typ, f"spel_drv_{name}", "?", 0, 1, bounds="(1)")
+        # logicals are stored as integers (0/1)
+        drv_var = Variable("integer" if typ == "logical" else typ, f"spel_drv_{name}", "?", 0, 1, bounds="(1)")
         dtype_vars[drv_var.name] = drv_var
     # time-step scalars (spel.scripts.io.time_scalars): one value per step
     from spel.scripts.io.time_scalars import unit_test_time_scalars

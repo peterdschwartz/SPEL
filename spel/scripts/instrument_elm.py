@@ -699,11 +699,15 @@ def _capture_parts(names: CaptureNames, instances: list[str]) -> tuple[str, ...]
     inst_args = "".join(f",{cont}{n}={n}" for n in instances)
     rw, fc = names.io_module("ReadWriteMod"), names.io_module("FUTConstantsMod")
     pre = names.file_prefix
-    ftype = {"real": "real(r8)", "integer": "integer"}
+    ftype = {"real": "real(r8)", "integer": "integer", "logical": "logical"}
     drv_dummies = "".join(f", {n}" for n, _ in names.drv_args)
     drv_use = "".join(f", spel_drv_{n}" for n, _ in names.drv_args)
     drv_decl = "".join(f"    {ftype[t]}, intent(in) :: {n}\n" for n, t in names.drv_args)
-    drv_copy = "".join(f"    spel_drv_{n}(1) = {n}\n" for n, _ in names.drv_args)
+    # logicals are stored as integers (0/1), like the time scalars
+    drv_copy = "".join(
+        f"    spel_drv_{n}(1) = merge(1, 0, {n})\n" if t == "logical" else f"    spel_drv_{n}(1) = {n}\n"
+        for n, t in names.drv_args
+    )
     if names.time:
         from spel.scripts.io.time_scalars import capture_lines
 

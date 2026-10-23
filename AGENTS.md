@@ -41,8 +41,9 @@ Production profiling and large (e.g. crop, `--preset crop-perf`) reference runs.
   build of identical code ran 3-8% slower on untouched BGC routines (summer stride-8, 2026-10-22), which
   looked like a code regression. Don't `xmlchange` a case while its `case.build` runs ("env_run.xml appears
   to have changed without a corresponding invalidation"; recover with `case.setup --reset`).
-- Stride-8 summer window: `--finidat $SCRATCH/stride8/spin30m.elm.r.0003-07-01.nc` (symlink: the real
-  path exceeds the namelist string limit), then `xmlchange RUN_STARTDATE=0003-07-01,DATM_CLMNCEP_YR_END=1903`.
+- Stride-8 summer window: `--finidat $SCRATCH/stride8/spin30m.elm.r.0003-07-01.nc --start-date 0003-07-01
+  --datm-years 1901 1903` (symlink: the real path exceeds the namelist string limit). A case without the
+  start date silently runs January from the July restart (it happened once: canflux -20%, surfalb +10%).
 - Unit-test toolchains (`spel/machines/perlmutter.toml`, all verified 2026-10-22 with
   `spel machine check`): `gfortran` (PrgEnv-gnu, gcc-native 14, the default), `nvfortran`
   (PrgEnv-nvidia, nvidia/25.9 = `/opt/nvidia/hpc_sdk/Linux_x86_64/25.9`) and `ifx`; modules from

@@ -83,16 +83,23 @@ def test_driver_arguments_come_from_the_capture(tmp_path, monkeypatch):
         driver_args={},
     )
     fake._driver_scalar_dummies = lambda: FunctionalUnitTest._driver_scalar_dummies(fake)
-    assert fake._driver_scalar_dummies() == {"nextsw_cday": "real", "declinp1": "real", "declin": "real"}
+    assert fake._driver_scalar_dummies() == {
+        "doalb": "logical", "nextsw_cday": "real", "declinp1": "real", "declin": "real"
+    }
     calls, used = FunctionalUnitTest._use_driver_args(
-        fake, ["call surfacealbedo(bounds_clump, nextsw_cday, declinp1=declinp1, surfalb_vars)"]
+        fake, ["call surfacealbedo(bounds_clump, nextsw_cday, declinp1=declinp1, surfalb_vars)",
+               "call ecosystemdynnoleaching1(bounds_clump, doalb, cnstate_vars)"]
     )
     assert calls == [
-        "call surfacealbedo(bounds_clump, spel_drv_nextsw_cday(1), declinp1=spel_drv_declinp1(1), surfalb_vars)"
+        "call surfacealbedo(bounds_clump, spel_drv_nextsw_cday(1), declinp1=spel_drv_declinp1(1), surfalb_vars)",
+        # a logical dummy is stored as an integer (0/1), like the time scalars
+        "call ecosystemdynnoleaching1(bounds_clump, (spel_drv_doalb(1) /= 0), cnstate_vars)",
     ]
-    assert used == {"nextsw_cday", "declinp1"}
+    assert used == {"nextsw_cday", "declinp1", "doalb"}
 
     names = ie.CaptureNames.for_case("ref_sa", tuple(fake.driver_args.items()))
     module = ie.generate_capture_module(names, [])
-    assert "subroutine spel_capture_inputs_ref_sa(bounds, nextsw_cday, declinp1)" in module
+    assert "subroutine spel_capture_inputs_ref_sa(bounds, nextsw_cday, declinp1, doalb)" in module
+    assert "logical, intent(in) :: doalb" in module
     assert "spel_drv_declinp1(1) = declinp1" in module
+    assert "spel_drv_doalb(1) = merge(1, 0, doalb)" in module
