@@ -39,6 +39,7 @@ compressed_cft=0
 daily_hist=0
 remove_zero_weight_urban=0
 finidat=""
+compact=0
 name_suffix=""
 case "$(hostname -f)" in
    chr*) default_cft_dir=/lcrc/group/e3sm/$USER/crop_inputdata/crop_reduced_inputdata ;;
@@ -84,6 +85,9 @@ Usage: $(basename "$0") [options]
                        Any t-lr25 case takes the t-lr25 domain file and MOSART
                        input from that directory when \$DIN_LOC_ROOT lacks them
   --finidat FILE       finidat in user_nl_elm (e.g. a spun-up restart)
+  --compact            apply the SPEL compact layout at build time: `spel compact rewrite
+                       --srcroot SRC --reanalyze -o CASE/SourceMods/src.elm` (adds .compact
+                       to an --auto-name case name)
   --remove-zero-weight-urban
                        add 'run_zero_weight_urban = .false.' to user_nl_elm
                        (older E3SM hashes lack this namelist option)
@@ -140,6 +144,7 @@ while [ $# -gt 0 ]; do
                   scratch=${SPEL_SCRATCH:?machine file sets no scratch}
                   compiler=${SPEL_CASEGEN_COMPILER-$compiler}
                   nthrds=${SPEL_CASEGEN_NTHRDS-$nthrds}
+                  [ -n "$nthrds" ] && threaded=1   # a machine-file nthrds means a threaded (FORCE_BUILD_SMP) build
                   max_mpitasks_per_node=${SPEL_CASEGEN_MAX_MPITASKS_PER_NODE-$max_mpitasks_per_node}
                else
                   case "$(hostname -f)" in
@@ -184,7 +189,8 @@ while [ $# -gt 0 ]; do
       --daily-history) daily_hist=1 ;;
       --no-daily-history) daily_hist=0 ;;
       --remove-zero-weight-urban) remove_zero_weight_urban=1 ;;
-      --finidat) finidat=$(realpath "$2"); shift ;;
+      --finidat) finidat=$(realpath -s "$2"); shift ;;
+      --compact) compact=1 ;;
       --name-suffix) name_suffix=$2; shift ;;
       --auto-name) auto_name=1 ;;
       --share) share=1 ;;
@@ -224,6 +230,9 @@ if [ "$auto_name" -eq 1 ]; then
    casename=$(date +%Y%m%d).$res.$compset.$mach.NTASKS${ntasks:-default}${nthrds:+x$nthrds}.$git_hash
    if [ "$compressed_cft" -eq 1 ]; then
       casename=$casename.compressed_cft
+   fi
+   if [ "$compact" -eq 1 ]; then
+      casename=$casename.compact
    fi
    if [ -n "$name_suffix" ]; then
       casename=$casename.$name_suffix
@@ -334,6 +343,13 @@ if [ "$keep" -eq 0 ] || [ ! -d "$casedir" ]; then
 
    if [ -n "$finidat" ]; then
       echo " finidat = '$finidat'" >> user_nl_elm
+   fi
+
+   if [ "$compact" -eq 1 ]; then
+      # the compact layout is a generated transform applied per case, not kept in the sources
+      command -v spel >/dev/null || { echo "--compact needs spel on PATH" >&2; exit 1; }
+      spel compact rewrite --srcroot "$src_path" --reanalyze -o "$casedir/SourceMods/src.elm" \
+         || { echo "spel compact rewrite failed" >&2; exit 1; }
    fi
 fi
 

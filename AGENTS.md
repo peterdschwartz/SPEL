@@ -36,6 +36,13 @@ Production profiling and large (e.g. crop, `--preset crop-perf`) reference runs.
   install is `~/.local/perlmutter/python-3.13/26.8.1/bin/spel`.
 - Crop performance runs: `./e3sm_casegen.sh --preset crop-perf --res t-lr25 --with-crops
   --compressed-cft` (pm-cpu default compiler = Intel, 1024 tasks, 5 days, debug queue).
+- Performance cases must all be the same kind of build: the crop-perf preset makes threaded builds
+  (`FORCE_BUILD_SMP=TRUE`, `-qopenmp`, NTHRDS=1; machine file `casegen.nthrds = 1`). A non-threaded Intel
+  build of identical code ran 3-8% slower on untouched BGC routines (summer stride-8, 2026-10-22), which
+  looked like a code regression. Don't `xmlchange` a case while its `case.build` runs ("env_run.xml appears
+  to have changed without a corresponding invalidation"; recover with `case.setup --reset`).
+- Stride-8 summer window: `--finidat $SCRATCH/stride8/spin30m.elm.r.0003-07-01.nc` (symlink: the real
+  path exceeds the namelist string limit), then `xmlchange RUN_STARTDATE=0003-07-01,DATM_CLMNCEP_YR_END=1903`.
 - Unit-test toolchains (`spel/machines/perlmutter.toml`, all verified 2026-10-22 with
   `spel machine check`): `gfortran` (PrgEnv-gnu, gcc-native 14, the default), `nvfortran`
   (PrgEnv-nvidia, nvidia/25.9 = `/opt/nvidia/hpc_sdk/Linux_x86_64/25.9`) and `ifx`; modules from
@@ -285,6 +292,10 @@ feature that needs to know what a statement *is* or which names it uses must get
 
 ## Compact layout (`spel compact`)
 
+- Since 2026-10-22 the E3SM branch no longer carries the compact commit (reverted in a3711572cb): the
+  layout is applied per case at build time, `e3sm_casegen.sh --compact` (= `spel compact rewrite --srcroot SRC
+  --reanalyze -o CASE/SourceMods/src.elm`, case name gets `.compact`). Captures and hand edits work on
+  unrewritten sources; compact unit tests still need the compact-aware capture hooks.
 - Design and rules: `spel/transforms/compact/DESIGN.md`; deferred fields: `DEFERRED.md`.
 - The inventory is deliberately conservative: false positives (e.g. value-dependent guards like
   `ch4_prod`'s `lake`) are reviewed by hand, not analyzed away.

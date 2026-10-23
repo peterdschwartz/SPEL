@@ -12,6 +12,9 @@ env = { NERSC_HOST = "perlmutter" }
 [casegen]
 # `e3sm_casegen.sh --preset crop-perf`: machine default compiler (Intel), $SCRATCH cases
 compiler = ""
+# Threaded build with one thread (FORCE_BUILD_SMP, -qopenmp), like every crop-perf case so far:
+# a non-threaded Intel build of the same code runs 3-8% differently on untouched routines (2026-10-22).
+nthrds = 1
 
 # Each toolchain takes its modules from E3SM's config_machines.xml (pm-cpu, the named
 # compiler, mpilib mpich), so they follow the E3SM checkout. The Cray netcdf-fortran .pc
