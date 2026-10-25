@@ -43,6 +43,31 @@ def create(args):
             _run_and_validate(unit_test.case_dir)
 
 
+def device_data(args):
+    from pathlib import Path
+
+    from spel.scripts.analysis_cache import load_analysis
+    from spel.scripts.config import E3SM_SRCROOT
+    from spel.transforms.device.generate import DeviceDataError, apply, generate
+
+    fut = load_analysis(reanalyze=args.reanalyze)
+    srcroot = Path(E3SM_SRCROOT)
+    if args.print_module:
+        text, p = generate(fut, srcroot)
+        print(text)
+        for s in p.skipped:
+            print("! skipped:", s)
+        return
+    try:
+        p, report = apply(fut, srcroot, out_dir=Path(args.out_dir) if args.out_dir else None, dry_run=args.dry_run)
+    except DeviceDataError as exc:
+        sys.exit(f"device-data: {exc}")
+    for line in report:
+        print(("would write " if args.dry_run else "") + line)
+    for s in p.skipped:
+        print("skipped:", s)
+
+
 def compact(args):
     args.type_given = "--type" in sys.argv
     from spel.scripts.analysis_cache import load_analysis
@@ -939,6 +964,19 @@ def main():
         "--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first"
     )
     compact_parser.set_defaults(func=compact)
+
+    device_parser = subparsers.add_parser(
+        "device-data",
+        help="generate ElmDeviceDataMod (device init, first-step deep copy, whole-state updates) for a full OpenACC run",
+    )
+    device_parser.add_argument("--dry-run", action="store_true", help="report the plan and the edits, write nothing")
+    device_parser.add_argument("--print", dest="print_module", action="store_true", help="print the generated module")
+    device_parser.add_argument(
+        "-o", "--out-dir", default=None,
+        help="write the module and the edited driver files here (a case's SourceMods/src.elm) instead of in place",
+    )
+    device_parser.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
+    device_parser.set_defaults(func=device_data)
 
     nutrient_parser = subparsers.add_parser(
         "nutrient",
