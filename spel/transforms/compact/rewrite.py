@@ -1152,46 +1152,26 @@ end module {BIND_MODULE}
         per-statement cost about 1000x the stores). A block the compact rewrite
         emptied is dropped. Returns the loops rewritten.
         """
-        rec = sub.record
+        from spel.transforms.blocked_loops import find_blocked_loops, name_pattern
+
         fe = self.file(sub.filepath)
-        n = 0
-        for loop in rec.all_loops():
-            node = loop.node
-            body = node.body.statements
-            if node.step is None or len(body) != 1 or not isinstance(body[0], AssociateConstruct):
-                continue
-            assoc = body[0]
-            if len(assoc.associations) != 1:
-                continue
-            (name, selector), = assoc.associations.items()
-            if not isinstance(selector, FuncExpression) or len(selector.args) != 1:
-                continue
-            bounds = selector.args[0]
-            if not isinstance(bounds, BoundsExpression) or str(bounds.start).lower() != loop.index:
-                continue
-            filt = str(selector.function)
-            start, end = str(node.start), str(node.end)
-            do_ln, end_ln = loop.start_ln, loop.end_ln
-            if statement_end(fe.lines, do_ln) != do_ln or node.lineno != do_ln or node.end_ln != end_ln:
-                raise RewriteError(f"{fe.path}:{do_ln + 1}: unexpected blocked loop: {fe.lines[do_ln].strip()}")
-            assoc_end = statement_end(fe.lines, assoc.lineno)
-            for ln in (assoc.end_ln, *range(assoc.lineno, assoc_end + 1)):
-                fe.deletes.add(ln)
-            use = re.compile(rf"(?<![%\w]){re.escape(name)}\b", re.IGNORECASE)
-            kept = 0
-            for ln in range(assoc_end + 1, assoc.end_ln):
-                if use.search(fe.lines[ln].split("!")[0]) and ln not in fe.deletes:
-                    fe.subs[ln].append((use, f"{filt}({loop.index})"))
-                    kept += 1
+        try:
+            loops = find_blocked_loops(sub.record, fe.lines)
+        except ValueError as err:
+            raise RewriteError(f"{fe.path}:{err}")
+        for b in loops:
+            fe.deletes.update(b.assoc_lines)
+            use = name_pattern(b.name)
+            kept = [ln for ln in b.uses if ln not in fe.deletes]
+            for ln in kept:
+                fe.subs[ln].append((use, f"{b.filter}({b.index})"))
             if kept:
-                fe.subs[do_ln].append(
-                    (re.compile(r"^(\s*).*$"), rf"\g<1>do concurrent ({loop.index} = {start}:{end})  {TAG}")
+                fe.subs[b.do_ln].append(
+                    (re.compile(r"^(\s*).*$"), rf"\g<1>do concurrent ({b.index} = {b.start}:{b.end})  {TAG}")
                 )
             else:  # every field of the block is compact now
-                for ln in range(do_ln, end_ln + 1):
-                    fe.deletes.add(ln)
-            n += 1
-        return n
+                fe.deletes.update(range(b.do_ln, b.end_ln + 1))
+        return len(loops)
 
     # --- run ---
     def build(self, loop_types=()) -> None:

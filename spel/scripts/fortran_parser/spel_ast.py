@@ -907,7 +907,8 @@ class IfConstruct(Statement):
         self.consequence: BlockStatement = consequence
         self.else_ifs: list[ElseIf] = []
         self.else_: Optional[Else] = None
-        self.end_ln: int = -1
+        self.end_ln: int = -1  # end of the first branch (the `else if`/`else`/`end if` line)
+        self.construct_end_ln: int = -1  # the `end if` line (-1 for a one-line if statement)
 
     def statement_node(self) -> None:
         pass

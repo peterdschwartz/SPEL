@@ -303,6 +303,9 @@ def _atomic_targets(maps: AccessMaps, atomics: list[AtomicRegion], lo: int, hi: 
     return targets
 
 
+INTRINSIC_TYPES = {"integer", "real", "logical", "character", "complex", "double precision", "doubleprecision"}
+
+
 def plan_compute_loop(
     sub,
     directive: AccDirective,
@@ -362,6 +365,7 @@ def plan_compute_loop(
         plan.if_clause = c.args
 
     inside, after = _region_accesses(maps, lo, hi)
+    call_lines = {c.ln for c in rec.calls}
     atomic = _atomic_targets(maps, atomics or [], lo, hi)
     for var, (kind, accesses) in sorted(inside.items(), key=lambda kv: kv[1][1][0]):
         if var in par_idx or var in red_vars:
@@ -373,6 +377,7 @@ def plan_compute_loop(
         # writes of the whole variable, not only of derived-type components
         whole = any("w" in s and path == var for _, s, path in accesses)
         is_array = decl is not None and decl.dim > 0
+        derived = decl is not None and decl.type.lower().split("(")[0].strip() not in INTRINSIC_TYPES
         if not written:
             if var in acc_private or var in acc_first:
                 plan.unneeded.append(var)
@@ -408,7 +413,10 @@ def plan_compute_loop(
         elif var in acc_private:
             plan.private.append(var)
             note("warn", f"{kind} '{var}' is privatized (OpenACC private)")
-        elif whole:
+        elif whole and not (derived and all(ln in call_lines for ln, st, path in accesses if "w" in st and path == var)):
+            # (a derived-type object passed whole to a callee: the callee's component writes are
+            # mapped as component paths; a whole-object status on a call line only repeats the
+            # dummy's intent when the callee does not touch it)
             note("warn", f"{kind} scalar '{var}' is written in the parallel loop (race)")
     for var in acc_private + acc_first:
         if var not in inside and var not in plan.unneeded:

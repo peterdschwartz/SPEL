@@ -57,3 +57,35 @@ def test_segments_and_edits():
                 "  !$acc update self(x) if_present")) in got
     assert (12, ("  !$acc update device(y) if_present",)) in got
     assert (18, ("     !$acc update device(y) if_present",)) in got
+
+
+COLD = """subroutine check(n, x, nbad)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(inout) :: x(:)
+  integer, intent(inout) :: nbad
+  integer :: i
+  !$acc parallel loop default(present) reduction(+:nbad)
+  do i = 1, n
+     if (x(i) < 0.0_r8) nbad = nbad + 1
+  end do
+  if (nbad > 0) then
+     do i = 1, n
+        if (x(i) < 0.0_r8) call endrun('negative x')
+     end do
+  end if
+end subroutine check"""
+
+
+def test_error_check_syncs_inside_the_branch():
+    lines = COLD.split("\n")
+    sub = StubSub(COLD)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "x")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    acc_sync._segments(rs, sub, parse_statements(COLD).statements[0],
+                       acc_sync._spans(find_directives(lines), sub.record),
+                       acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub)), lines, acc_sync._Types(fut), out)
+    (seg,) = rs.segments  # the loop inside `if (nbad > 0)`, not the whole if construct
+    assert (seg.first, seg.after) == (11, 14) and seg.stale == {"x"}

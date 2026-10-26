@@ -16,7 +16,9 @@ routine that does):
   what it writes.
 
 The headers of constructs that hold kernels (if conditions, do bounds) are evaluated on
-the host too: their reads get an `update self` before the construct.
+the host too: their reads get an `update self` before the construct. An if construct
+that can abort (`endrun` in a branch: an error check) is treated the same way even when
+it runs no kernels, so its syncs run only when the error branch is taken.
 
 Only intrinsic-typed data is updated (a whole derived-type object would overwrite the
 host's pointer components with device addresses): members reached through derived-type
@@ -33,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
-from spel.transforms.acc_apply import _Facts, _path, call_tree
+from spel.transforms.acc_apply import _Facts, _path, abort_calls, call_tree
 from spel.transforms.acc_directives import find_directives
 
 TAG = "! spel acc-sync"
@@ -290,7 +292,9 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = ()) -> SyncPlan:
 
 def _end_of(st, lines: list[str]) -> int:
     """Last line of a statement: a construct's end, else the last continuation line."""
-    end = getattr(st, "end_ln", -1)
+    end = getattr(st, "construct_end_ln", -1)  # an if construct's `end if` (its end_ln ends the first branch)
+    if end is None or end < 0:
+        end = getattr(st, "end_ln", -1)
     if end is not None and end >= 0:
         return end
     ln = st.lineno
@@ -382,6 +386,12 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
             if stale:
                 seg.stale.add(path)
 
+    aborts = abort_calls(node.body)
+
+    def cold(st, hi: int) -> bool:
+        """An if construct that can abort (an error check): its syncs go inside its branches."""
+        return isinstance(st, A.IfConstruct) and any(st.lineno <= ln <= hi for ln in aborts)
+
     def returns_in(lo: int, hi: int) -> list[int]:
         return [st.lineno for st, _ in _walk(node.body) if isinstance(st, A.ReturnStatement) and lo <= st.lineno <= hi]
 
@@ -402,7 +412,7 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
             if st.lineno < first_exec:
                 continue
             hi = _end_of(st, lines)
-            if not touches_device(st.lineno, hi):
+            if not touches_device(st.lineno, hi) and not cold(st, hi):
                 run.append(st)
                 continue
             flush()

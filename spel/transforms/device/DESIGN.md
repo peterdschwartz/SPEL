@@ -177,6 +177,35 @@ denormals the GPU flushes to zero. OFF is bit-identical to before, and MULTICORE
 Driver: `$SCRATCH/spelval/port_eco.sh` (acc-apply → acc-locals → acc-sync → `spel create`,
 with a reanalysis after each step); comparison: `$SCRATCH/spelval/tools/cmp_steps.py`.
 
+## Porting the remaining host loops (2026-10-26)
+
+Each host segment that gets ported removes its syncs. To measure what is left, run the unit
+test with `NVCOMPILER_ACC_NOTIFY=2` and sum the transfers per source line
+(`$SCRATCH/spelval/tools/notify_sum.sh`). For dd_eco this went from 9.4 GB per 27-step run
+to about 0.2 GB. The pipeline now runs these steps before acc-apply, plus hand ports kept
+as a patch against the base commit:
+
+- `spel/transforms/blocked_loops.py` rewrites the SetValues idiom (`associate (idx =>
+  filter(fi:...))` blocks) into one element per iteration. It shares its detection with
+  `spel compact`'s `--setvalues-loops`. It is repeated until nothing is left, because
+  routines first reached after an unblock appear only in the next analysis.
+- acc-apply interchanges perfect (level, column) nests that the planner calls
+  `interchange` (`_swappable`, `_swap`). The column loop becomes the compute loop and the
+  level loop runs `seq`, so each column's order of operations is unchanged.
+- Only assignments through a vector subscript block a loop (`x(idx) =` with an index
+  array). A plain section `x(c,:) =` belongs to one iteration.
+- acc-apply takes parse trees from the preprocessed module (`routine_tree`), so an
+  `#ifdef` inside an associate list (FireArea) no longer makes the whole routine
+  "unsafe". Abort calls come from the parse tree (`abort_calls`), because the analysis
+  drops `endrun` calls from its edited sources.
+- acc-sync puts the syncs of an if construct that can abort inside its branches: an
+  error check runs its host code, and pays for the copies, only when the check fails.
+  Hand-ported checks count failures on the device (`reduction(+:nbad)`) and run the
+  original diagnostic loop on the host only when `nbad > 0` (VerticalProfile).
+- Patch-to-column scatters are ported by hand as column-parallel loops over each
+  column's patches in filter order (bit-for-bit, since filters are ascending). The soil
+  patches of a soil column are its active patches (FireFluxes).
+
 ## Usage
 
 ```

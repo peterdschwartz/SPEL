@@ -1764,6 +1764,7 @@ class Parser:
             if_block.else_ = else_
 
         if self.curTokenIs(Tok.ENDIF):
+            if_block.construct_end_ln = self.lineno
             self.next_token()
 
         return if_block

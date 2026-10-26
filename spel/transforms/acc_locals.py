@@ -62,6 +62,9 @@ class RoutineReport:
     # of those, the ones the host also reads or writes (outside compute constructs and
     # device calls): their values must move, `create` alone would hand the device garbage
     host_accessed: list[str] = field(default_factory=list)
+    # device-only locals that error checks print on the host: first line of each such branch
+    # (an if that can abort), where an `update self` brings the values over first
+    cold_reads: dict[str, list[int]] = field(default_factory=dict)
     # (call line, callee, local arrays passed) of device calls with uncovered locals
     device_calls: list[tuple[int, str, list[str]]] = field(default_factory=list)
     # locals the routine enters (`enter data`) and never deletes: their mapping outlives the
@@ -189,9 +192,27 @@ def check_routine(sub, device_routines: set[str], lines: list[str]) -> RoutineRe
             report.device_calls.append((call.ln, str(call.name), sorted(set(passed))))
     order = list(arrays)
     report.locals_needed = sorted(needed, key=order.index)
-    host = {a.base.lower() for a in accesses
-            if a.base.lower() in needed and not any(lo <= a.ln <= hi for lo, hi in device_lines)}
+    # host accesses; reads in an error check (a branch that can abort) only need an
+    # `update self` there, not a copy around every kernel
+    from spel.transforms.acc_apply import cold_branches, routine_tree
+
+    try:
+        cold = cold_branches(routine_tree(sub).body)
+    except BaseException:  # the parser exits on what it cannot read: no exemption
+        cold = []
+    host: set[str] = set()
+    cold_reads: dict[str, set[int]] = {}
+    for a in accesses:
+        name = a.base.lower()
+        if name not in needed or any(lo <= a.ln <= hi for lo, hi in device_lines):
+            continue
+        branch = next((b for b in cold if b[0] <= a.ln <= b[1]), None)
+        if branch is not None and "w" not in a.status:
+            cold_reads.setdefault(name, set()).add(branch[2])
+        else:
+            host.add(name)
     report.host_accessed = [n for n in report.locals_needed if n in host]
+    report.cold_reads = {n: sorted(v) for n, v in cold_reads.items() if n not in host}
     return report
 
 
@@ -306,6 +327,12 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
     if device_only:
         out.append(Insertion(first_exec, [f"{ind}{TAG}: device storage of the local work arrays"]
                              + _wrap_directive(ind, "enter data create", device_only)))
+    at: dict[int, list[str]] = {}
+    for name in device_only:
+        for ln in report.cold_reads.get(name, []):
+            at.setdefault(ln, []).append(name)
+    for ln, names in sorted(at.items()):
+        out.append(Insertion(ln, _wrap_directive(_indent(lines[ln]), "update self", names), order=1))
     to_delete = device_only + [n for n in report.leaked if n not in device_only]
     if to_delete:
         ends = [st.lineno for st, _ in stmts if isinstance(st, A.ReturnStatement)] + [tree.end_ln]

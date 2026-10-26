@@ -331,3 +331,25 @@ def test_where_in_do_loop():
 def test_operator_precedence(line, expected):
     program = parse_statements(line)
     assert [str(s) for s in program.statements] == [expected]
+
+
+def test_if_construct_end_lines():
+    # end_ln ends the first branch; construct_end_ln is the `end if` (opt-in, new field)
+    from spel.scripts.fortran_parser.tests.test_Parser import parse_statements
+
+    src = """subroutine s(x, n)
+  real :: x(:)
+  integer :: n
+  if (n > 0) then
+     x(3) = 1.
+  else if (n < -5) then
+     x(2) = 1.
+  else
+     x(1) = 0.
+  end if
+  if (n > 3) x(2) = 1.
+end subroutine s"""
+    body = parse_statements(src).statements[0].body.statements
+    ifs = [st for st in body if type(st).__name__ == "IfConstruct"]
+    assert [(st.lineno, st.end_ln, st.construct_end_ln) for st in ifs] == [(3, 5, 9), (10, -1, -1)]
+
