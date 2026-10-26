@@ -42,11 +42,16 @@ from spel.transforms.acc_to_omp import LoopPlan, Note, format_directive, plan_co
 COARSER = {"column", "gridcell", "landunit", "topounit"}   # x%column(p): many fine elements -> one coarse
 
 
+# first member of a coarser element -> its member count (`p = col_pp%pfti(c) + pi - 1`)
+FIRST_MEMBER = {"pfti": "npfts", "coli": "ncolumns", "luni": "nlandunits", "topi": "ntopounits"}
+
+
 @dataclass
 class Alias:
     index: str          # the loop index this scalar derives from
     injective: bool     # one element per index value (filters, index arithmetic)
     via: str            # what it was read through
+    also: tuple = ()    # further loop indices it covers injectively, jointly with `index`
 
 
 @dataclass
@@ -115,9 +120,61 @@ class LoopProposal:
         return "\n".join(parts)
 
 
+def _terms(e, sign: int = 1):
+    """(sign, node) of the terms of a +/- expression."""
+    from spel.scripts.fortran_parser import spel_ast as A
+
+    if isinstance(e, A.InfixExpression) and e.operator.strip() in ("+", "-"):
+        yield from _terms(e.left_expr, sign)
+        yield from _terms(e.right_expr, sign if e.operator.strip() == "+" else -sign)
+    else:
+        yield sign, e
+
+
+def _member_offset(rhs, guards, indices: set[str], aliases: dict[str, "Alias"]) -> Optional[tuple[str, str]]:
+    """
+    `x%pfti(c) + pi - 1` under a guard `pi <= x%npfts(c)` (and the coli/luni/topi forms):
+    the members of distinct coarse elements are disjoint ranges, so the result is one
+    element per (c, pi). Returns (c, pi), or None.
+    """
+    from spel.scripts.fortran_parser import spel_ast as A
+
+    terms = list(_terms(rhs))
+    maps = [t for sg, t in terms if sg > 0 and isinstance(t, A.FuncExpression) and len(t.args) == 1
+            and str(t.function).lower().split("%")[-1] in FIRST_MEMBER]
+    idx = [t.value.lower() for sg, t in terms if sg > 0 and isinstance(t, A.Identifier)
+           and t.value.lower() in indices]
+    rest = [t for sg, t in terms if not (isinstance(t, A.FuncExpression) and any(t is m for m in maps))
+            and not (isinstance(t, A.Identifier) and t.value.lower() in idx)]
+    if len(maps) != 1 or len(idx) != 1 or not all(isinstance(t, A.IntegerLiteral) for t in rest):
+        return None
+    m, pi = maps[0], idx[0]
+    coarse = str(m.args[0]).lower()
+    if coarse not in aliases and coarse not in indices:
+        return None
+    holder, first = str(m.function).lower().rsplit("%", 1) if "%" in str(m.function) else ("", str(m.function).lower())
+    count = f"{holder}%{FIRST_MEMBER[first]}" if holder else FIRST_MEMBER[first]
+    for g in guards:
+        n = g.node
+        if g.negated or not isinstance(n, A.InfixExpression) or n.operator.strip() != "<=":
+            continue
+        left, right = n.left_expr, n.right_expr
+        if isinstance(left, A.Identifier) and left.value.lower() == pi and isinstance(right, A.FuncExpression) \
+                and str(right.function).lower() == count and len(right.args) == 1 \
+                and str(right.args[0]).lower() == coarse:
+            return coarse, pi
+    return None
+
+
 def _aliases(rec: SubroutineRecord, lo: int, hi: int, indices: set[str]) -> dict[str, Alias]:
     """Integer scalars assigned in lines lo..hi from a loop index (through filters, subgrid maps, arithmetic)."""
     out: dict[str, Alias] = {}
+    try:
+        from spel.scripts.registrations import line_guards
+
+        guards = line_guards(rec.tree.body)
+    except Exception:  # no parse tree: no guarded forms
+        guards = {}
     changed = True
     while changed:
         changed = False
@@ -136,7 +193,13 @@ def _aliases(rec: SubroutineRecord, lo: int, hi: int, indices: set[str]) -> dict
             direct = [n for n in names if n in indices]
             via_alias = [n for n in names if n in out]
             reads = [r for r in ev.reads if r.subscripts]
-            if reads:
+            member = _member_offset(ev.rhs, guards.get(ev.ln, ()), indices, out)
+            if member is not None:
+                coarse, pi = member
+                base_idx, inj = (coarse, True) if coarse in indices else (out[coarse].index, out[coarse].injective)
+                out[lhs.path] = Alias(base_idx, inj, rhs_text, also=(pi,))
+                changed = True
+            elif reads:
                 r = reads[0]
                 subs_names = _names(r.subscripts)
                 src = [n for n in subs_names if n in indices] + [n for n in subs_names if n in out]
@@ -195,7 +258,8 @@ def _cover_expr(e, aliases: dict[str, Alias], indices: set[str]) -> dict[str, bo
             if n in indices:
                 return {n: True}
             if n in aliases:
-                return {aliases[n].index: aliases[n].injective}
+                a = aliases[n]
+                return {a.index: a.injective, **{x: a.injective for x in a.also}}
             return {}
         case A.InfixExpression():
             d = merge(_cover_expr(e.left_expr, aliases, indices), _cover_expr(e.right_expr, aliases, indices))

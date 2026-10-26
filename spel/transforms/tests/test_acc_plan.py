@@ -144,3 +144,44 @@ def test_neighbour_element_read_is_carried():
     sweep, scale = propose(sub, AccessMapper({sub.id: sub}), source=SRC_SWEEP.splitlines())
     assert sweep.carried == {"j": ["conc"]} and sweep.kind == "interchange", (sweep.kind, sweep.carried)
     assert scale.kind == "elementwise" and not scale.carried  # the same element read and written
+
+
+SRC_MEMBERS = """
+subroutine members(num, filter, npfts, pfti, x, tot)
+  implicit none
+  integer, intent(in) :: num, filter(:)
+  integer, intent(in) :: npfts(:), pfti(:)
+  real(r8), intent(inout) :: x(:), tot(:)
+  integer :: fc, c, pi, p
+  do pi = 1, 4
+     do fc = 1, num
+        c = filter(fc)
+        if (pi <= col_pp%npfts(c)) then
+           p = col_pp%pfti(c) + pi - 1
+           x(p) = 2.0_r8 * x(p)
+           tot(c) = tot(c) + x(p)
+        end if
+     end do
+  end do
+  do pi = 1, 4
+     do fc = 1, num
+        c = filter(fc)
+        p = col_pp%pfti(c) + pi - 1
+        x(p) = 2.0_r8 * x(p)
+     end do
+  end do
+end subroutine members
+"""
+
+
+def test_patch_of_column_by_member_offset():
+    # p = pfti(c) + pi - 1 under `pi <= npfts(c)`: one patch per (column, pi), so the column
+    # sums make it an interchange (columns parallel, pi in order); without the guard p may run
+    # into the next column's patches
+    sub = StubSub(SRC_MEMBERS)
+    sub.filepath = None
+    props = propose(sub, AccessMapper({sub.id: sub}), source=SRC_MEMBERS.splitlines())
+    guarded, unguarded = props
+    assert guarded.kind == "interchange", guarded
+    assert guarded.carried == {"pi": ["tot"]}
+    assert unguarded.kind not in ("elementwise", "interchange", "column-parallel"), unguarded
