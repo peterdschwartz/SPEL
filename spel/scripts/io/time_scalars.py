@@ -116,5 +116,7 @@ def sync_lines(scalars: list[TimeScalar]) -> tuple[list[str], list[str]]:
         by_mod.setdefault(s.module, []).append(s.name)
     uses += [f"use {m}, only : {', '.join(n)}\n" for m, n in sorted(by_mod.items())]
     body = [f"   {s.from_array()}\n" for s in scalars]
-    body.append(f"   !$acc update device({', '.join(s.name for s in scalars)})\n")
+    # if_present: a scalar without an `!$acc declare` (no device kernel reads it, e.g.
+    # timeinfoMod::first) has no device copy, and a plain update of it aborts on a GPU
+    body.append(f"   !$acc update device({', '.join(s.name for s in scalars)}) if_present\n")
     return uses, body

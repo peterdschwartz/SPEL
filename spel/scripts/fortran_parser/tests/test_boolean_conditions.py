@@ -184,3 +184,31 @@ def test_simplify_reaches_fixed_point():
         )
     )
     assert simplify(branches) == NO_EXPECTATION
+
+
+def test_minimize_absorbs_and_merges():
+    from spel.scripts.fortran_parser.boolen_expression import (
+        AllOf, AnyOf, Expectation, NO_EXPECTATION, _evaluate, _atoms, minimize,
+    )
+    import itertools
+
+    cn, fates, c13 = (Expectation(v, "True") for v in ("use_cn", "use_fates", "use_c13"))
+    not_fates = Expectation("use_fates", "False")
+    spin = Expectation("spinup_state", ".eq. 1")
+    # absorption: c13_col_cf's guard in the device data layer
+    cond = AnyOf((cn, fates, AllOf((c13, AnyOf((fates, cn)))), AllOf((not_fates, c13, AnyOf((fates, cn))))))
+    assert minimize(cond) == AnyOf((cn, fates))
+    # merging: (a and b) or (a and not b) -> a; a or not a -> true
+    assert minimize(AnyOf((AllOf((cn, c13)), AllOf((cn, Expectation("use_c13", "False")))))) == cn
+    assert minimize(AnyOf((fates, not_fates))) == NO_EXPECTATION
+    # comparisons keep their operator; the result is equivalent on every assignment
+    cond = AnyOf((AllOf((spin, cn)), AllOf((negate_spin := Expectation("spinup_state", ".ne. 1"), cn)), c13))
+    m = minimize(cond)
+    assert m == AnyOf((cn, c13))
+    cond = AnyOf((AllOf((spin, fates)), AllOf((cn, c13)), AllOf((spin, cn, c13))))
+    m = minimize(cond)
+    keys = list(_atoms(cond, {}))
+    for bits in itertools.product((False, True), repeat=len(keys)):
+        vals = dict(zip(keys, bits))
+        assert _evaluate(cond, vals) == _evaluate(m, vals)
+    assert m.to_fortran().count(".and.") == 2

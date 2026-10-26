@@ -634,3 +634,101 @@ def _combine_complementary_terms(
 
     # (A && B && X) || (A && B && !X) -> A && B
     return AllOf(tuple(common))
+
+
+def _atom_key(e: Expectation) -> tuple[tuple[str, str], bool]:
+    """A boolean atom and the polarity of `e` in it: a logical flag (`x` / `.not. x`) or a
+    comparison paired with its negation (`n .eq. 1` / `n .ne. 1`) under one canonical form."""
+    if e.constraint in ("True", "False"):
+        return (e.variable, "True"), e.constraint == "True"
+    neg = negate(e).constraint
+    canon = min(e.constraint, neg)
+    return (e.variable, canon), e.constraint == canon
+
+
+def _evaluate(condition: ConditionExpectation, values: dict) -> bool:
+    match condition:
+        case Expectation():
+            key, positive = _atom_key(condition)
+            return values[key] == positive
+        case AllOf(items):
+            return all(_evaluate(i, values) for i in items)
+        case AnyOf(items):
+            return any(_evaluate(i, values) for i in items)
+    raise TypeError(f"Unknown condition type: {type(condition)}")
+
+
+def _atoms(condition: ConditionExpectation, out: dict) -> dict:
+    match condition:
+        case Expectation():
+            out.setdefault(_atom_key(condition)[0], None)
+        case AllOf(items) | AnyOf(items):
+            for i in items:
+                _atoms(i, out)
+    return out
+
+
+def minimize(condition: ConditionExpectation, max_atoms: int = 12) -> ConditionExpectation:
+    """
+    An equivalent minimal sum of products (Quine-McCluskey over the truth table of the
+    condition's atoms), e.g. `use_cn .or. use_fates .or. (use_c13 .and. use_cn)` ->
+    `use_cn .or. use_fates`. Comparisons count as independent atoms, so the result is
+    equivalent on every assignment (minimal up to their dependence). Conditions with
+    more than `max_atoms` atoms are returned unchanged.
+    """
+    keys = list(_atoms(condition, {}))
+    n = len(keys)
+    if n > max_atoms:
+        return condition
+    minterms = []
+    for bits in range(1 << n):
+        values = {k: bool(bits >> i & 1) for i, k in enumerate(keys)}
+        if _evaluate(condition, values):
+            minterms.append(tuple(bool(bits >> i & 1) for i in range(n)))
+    if not minterms:
+        return IMPOSSIBLE_EXPECTATION
+    if len(minterms) == 1 << n:
+        return NO_EXPECTATION
+    # prime implicants: merge terms that differ in one position (None = don't care)
+    terms = set(minterms)
+    primes: set[tuple] = set()
+    while terms:
+        merged: set[tuple] = set()
+        used: set[tuple] = set()
+        tl = list(terms)
+        for a, b in combinations(tl, 2):
+            diff = [i for i in range(n) if a[i] != b[i]]
+            if len(diff) == 1 and a[diff[0]] is not None and b[diff[0]] is not None:
+                merged.add(tuple(None if i == diff[0] else a[i] for i in range(n)))
+                used |= {a, b}
+        primes |= terms - used
+        terms = merged
+
+    def covers(p, m):
+        return all(p[i] is None or p[i] == m[i] for i in range(n))
+
+    # essential primes first, then greedily the prime covering most remaining minterms
+    left = set(minterms)
+    chosen: list[tuple] = []
+    for m in minterms:
+        cov = [p for p in primes if covers(p, m)]
+        if len(cov) == 1 and cov[0] not in chosen:
+            chosen.append(cov[0])
+    left -= {m for m in left if any(covers(p, m) for p in chosen)}
+    while left:
+        best = max(sorted(primes, key=str), key=lambda p: (sum(covers(p, m) for m in left), -sum(x is not None for x in p)))
+        chosen.append(best)
+        left -= {m for m in left if covers(best, m)}
+
+    def literal(key, positive: bool) -> Expectation:
+        var, constraint = key
+        if constraint == "True":
+            return Expectation(var, "True" if positive else "False")
+        e = Expectation(var, constraint)
+        return e if positive else negate(e)
+
+    products = []
+    for p in sorted(chosen, key=lambda p: (sum(x is not None for x in p), str(p))):
+        lits = [literal(keys[i], p[i]) for i in range(n) if p[i] is not None]
+        products.append(lits[0] if len(lits) == 1 else AllOf(tuple(lits)))
+    return products[0] if len(products) == 1 else AnyOf(tuple(products))

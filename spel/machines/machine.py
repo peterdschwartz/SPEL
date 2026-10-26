@@ -281,7 +281,12 @@ class Machine:
             joined = ":".join(tc.ld_library_path)
             lines.append(f'export LD_LIBRARY_PATH="{joined}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}"')
         for key, value in tc.env.items():
-            lines.append(f"export {key}={shlex.quote(value)}")
+            # defaults: a value already set wins (e.g. ACC_DEVICE_TYPE=nvidia for GPU runs
+            # over the toolchain's multicore default)
+            if re.fullmatch(r"[\w./:+-]*", value):
+                lines.append(f'export {key}="${{{key}:-{value}}}"')
+            else:
+                lines.append(f"export {key}={shlex.quote(value)}")
         lines.append(f"export SPEL_FC={shlex.quote(tc.fc)}")
         if self.make_jobs:
             lines.append(f'export MAKEFLAGS="${{MAKEFLAGS:--j{int(self.make_jobs)}}}"')

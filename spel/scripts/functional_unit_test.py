@@ -30,6 +30,7 @@ from spel.scripts.edit_files import header_types, macros
 from spel.scripts.fortran_modules import (
     FortranModule,
     declaration_source,
+    get_filename_from_module,
     get_module_name_from_file,
     imported_from,
 )
@@ -815,10 +816,24 @@ class FunctionalUnitTest:
             [f"{tabs}call write_elmtypes({out_arg_str})\n"],
         )
 
-        lines = insert_at_token(lines, "!#ACC_COPYIN", ["   call spel_acc_enter_data()\n"])
-        lines = insert_at_token(
-            lines, "!#ACC_UPDATE_HOST", ["       call spel_acc_update_host()\n"]
-        )
+        if cfg.options.device_data:
+            # the generated device data layer (spel device-data) instead of SpelAccDataMod's
+            # deep copy; the harness still builds the filters (spel_acc_update_filters)
+            lines = insert_at_token(
+                lines, "!#USE_START", ["use ElmDeviceDataMod, only: elm_device_copyin, elm_device_update\n"]
+            )
+            lines = insert_at_token(lines, "!#ACC_COPYIN", ["   call elm_device_copyin()\n"])
+            lines = insert_at_token(
+                lines, "!#ACC_UPDATE_HOST", ["       call elm_device_update(to_device=.false.)\n"]
+            )
+            lines = insert_at_token(
+                lines, "!#ACC_STEP_INPUTS", ["             call elm_device_update(to_device=.false.)\n"]
+            )
+        else:
+            lines = insert_at_token(lines, "!#ACC_COPYIN", ["   call spel_acc_enter_data()\n"])
+            lines = insert_at_token(
+                lines, "!#ACC_UPDATE_HOST", ["       call spel_acc_update_host()\n"]
+            )
 
         with open(self.case_dir / "main.F90", "w") as ofile:
             ofile.writelines(lines)
@@ -940,7 +955,7 @@ class FunctionalUnitTest:
                 [v for v in variables.values() if v.name not in pointer_vars], body_tabs
             )
         )
-        # Module pointers can't be in a declare directive: copy them in instead.
+        # Module pointers: a declare (if any) holds only the pointer; copy the target in.
         for name in sorted(pointer_vars):
             lines.extend(
                 [
@@ -2481,63 +2496,41 @@ def ensure_acc_declares(variables, case_dir: Path) -> tuple[set[str], set[str]]:
     """
     Add ``!$acc declare create`` to the case copies of the modules declaring
     ``variables`` so that ``update device`` and ``acc routine`` references work.
-    Returns the names of module pointer variables, which cannot be declared,
-    and of allocatable module variables.
+    Returns the names of module pointer variables (their targets must be copied in,
+    declared or not) and of allocatable module variables. Attributes and existing
+    declares come from the parsed module (module_spec), not from the text.
     """
-    mod_files: dict[str, Path] = {}
-    for path in Path(case_dir).glob("*.F90"):
-        with open(path) as ifile:
-            for line in ifile:
-                m = re.match(r"\s*module\s+(\w+)\s*(!.*)?$", line, re.IGNORECASE)
-                if m and m.group(1).lower() != "procedure":
-                    mod_files[m.group(1).lower()] = path
-                    break
+    from spel.scripts.fortran_parser.module_spec import ModuleSpecError, module_spec
 
+    case_dir = Path(case_dir)
     to_declare: dict[Path, list[str]] = {}
     pointer_vars: set[str] = set()
     alloc_vars: set[str] = set()
     for var in variables:
-        path = mod_files.get(var.declaration.lower())
-        if path is None:
+        path = case_dir / Path(get_filename_from_module(var.declaration) or "").name
+        if not path.is_file():
             continue
-        text = path.read_text()
-        name = re.escape(var.name)
-        decl = re.search(
-            rf"^\s*(?!.*\bparameter\b)([^!\n]*)::[^!\n]*\b{name}\b",
-            text,
-            re.IGNORECASE | re.MULTILINE,
-        )
-        attrs = decl.group(1) if decl else ""
-        if re.search(r"\ballocatable\b", attrs, re.IGNORECASE):
+        try:
+            spec = module_spec(path)
+        except ModuleSpecError as exc:
+            logging.getLogger("SPEL").warning(f"ensure_acc_declares: {exc}; {var.name} left as is")
+            continue
+        info = spec.variables.get(var.name.lower())
+        if info is None or "parameter" in info.attrs:
+            continue
+        if "allocatable" in info.attrs:
             alloc_vars.add(var.name)
-        declared = re.search(
-            rf"^\s*!\$acc\s+declare\s+\w+\s*\([^)]*\b{name}\b",
-            text,
-            re.IGNORECASE | re.MULTILINE,
-        )
-        if declared:
-            continue
-        if re.search(r"\bpointer\b", attrs, re.IGNORECASE):
+        if "pointer" in info.attrs:
+            # a declare gives device storage for the pointer only, not its target
             pointer_vars.add(var.name)
-        else:
+        elif var.name.lower() not in spec.declared:
             to_declare.setdefault(path, []).append(var.name)
 
     for path, names in to_declare.items():
+        spec = module_spec(path)
+        # the end of the specification part: the module's contains (or end module)
+        idx = spec.contains_ln if spec.contains_ln is not None else spec.end_ln
         lines = path.read_text().splitlines(keepends=True)
-        # The first module-level contains/end module ends the specification
-        # part; skip the contains of type-bound procedures.
-        in_type = False
-        idx = len(lines)
-        for i, line in enumerate(lines):
-            if re.match(r"\s*end\s*type\b", line, re.IGNORECASE):
-                in_type = False
-            elif re.match(r"\s*type\s*(,[^:]*)?(::)?\s*\w+\s*(!.*)?$", line, re.IGNORECASE):
-                in_type = True
-            elif not in_type and re.match(
-                r"\s*(contains|end\s+module)\b", line, re.IGNORECASE
-            ):
-                idx = i
-                break
         new = ["  ! Added by SPEL for OpenACC update_params_acc\n"]
         new.extend(f"  !$acc declare create({n})\n" for n in sorted(names))
         lines[idx:idx] = new

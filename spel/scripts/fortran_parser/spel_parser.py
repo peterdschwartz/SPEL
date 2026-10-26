@@ -2188,9 +2188,18 @@ class Parser:
             assert expr.operator == "=>", f"unexpected operator {self.lexer.input}"
             alias = expr.left_expr.value
             name = expr.right_expr.value
+        names = [name]
+        # a name list: `module procedure a, b` (interface blocks), `procedure(i), pointer :: p, q`
+        while not alias and self.peekTokenIs(Tok.COMMA):
+            self.next_token()
+            self.next_token()
+            if not self.curTokenIs(Tok.IDENT):
+                self.fatal(msg=f"expected a procedure name after ',' @{self.lineno}")
+            names.append(self.cur_token.literal)
         return ProcedureStatement(
             tok=tok,
             attr_spec=attr_spec,
             name=name,
             alias=alias,
+            names=names,
         )

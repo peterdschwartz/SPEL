@@ -410,6 +410,15 @@ def finalize_unit_test(
         # Clean-up
         os.system(f"rm {spel_output_dir}/*.F90")
 
+        if cfg.options.device_data:
+            # last: the layer parses the case's final sources (reduced elm_instMod, the
+            # declares ensure_acc_declares adds, the unittest_defs.h header they include)
+            from spel.transforms.device.generate import generate_for_unit_test
+
+            dd_files = generate_for_unit_test(unit_test)
+            unit_test.generate_cmake(files=file_list + dd_files)
+            logger.info(f"device data layer: {', '.join(dd_files)}")
+
     logger.info("Finished -- Pickling results")
 
     inst_types = unit_test.instance_to_type_map()

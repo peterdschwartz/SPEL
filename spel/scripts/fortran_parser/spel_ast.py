@@ -1984,13 +1984,21 @@ class TypeDef(Statement):
 
 class ProcedureStatement(Statement):
     def __init__(
-        self, tok: Token, attr_spec: Optional[AttributeSpec], name: str, alias: str
+        self,
+        tok: Token,
+        attr_spec: Optional[AttributeSpec],
+        name: str,
+        alias: str,
+        names: Optional[list[str]] = None,
     ):
         self.token = tok
         self.attrs = attr_spec
         # name => alias
         self.name = name
         self.alias = alias
+        # every name of a list (`module procedure a, b`, `procedure(i), pointer :: p, q`);
+        # `name` is the first
+        self.names: list[str] = names if names is not None else [name]
 
     def token_literal(self) -> str:
         return self.token.literal
@@ -2001,7 +2009,7 @@ class ProcedureStatement(Statement):
     def __str__(self) -> str:
         attrs = f",{self.attrs}" if self.attrs else ""
         alias = f"=> {self.alias}" if self.alias else ""
-        return f"procedure {attrs} :: {self.name} {alias}"
+        return f"procedure {attrs} :: {', '.join(self.names)} {alias}"
 
 
 class UseStatement(Statement):

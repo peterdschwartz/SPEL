@@ -231,7 +231,7 @@ def test_machine_from_toml_and_script(tmp_path: Path, monkeypatch):
 
     nv = m.toolchain_script()  # the default toolchain
     assert f"source {tmp_path}/nvhpc-env.sh" in nv
-    assert "export ACC_DEVICE_TYPE=multicore" in nv
+    assert 'export ACC_DEVICE_TYPE="${ACC_DEVICE_TYPE:-multicore}"' in nv  # a default: GPU runs override it
     assert 'export LD_LIBRARY_PATH="/opt/nvhpc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' in nv
     with pytest.raises(MachineError):
         m.toolchain("ifx")

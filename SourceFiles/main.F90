@@ -136,6 +136,10 @@ block
              call spel_prof_push('duplicate_sets')
              call duplicate_sets(nsets, bounds_io)
              call spel_prof_pop()
+             ! the generated device data layer: host code inside the routines reads
+             ! the host copy, so it mirrors the device's new inputs (as at a host/device
+             ! transition of elm_drv)
+             !#ACC_STEP_INPUTS
           end if
        end if
        if (io_inputs%end_run .or. step > max_step) then

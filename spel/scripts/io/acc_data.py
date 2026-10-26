@@ -24,7 +24,6 @@ with the same namelist guards.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -60,16 +59,24 @@ def _members(unit_test: FunctionalUnitTest):
     return active_instances, per_inst
 
 
-def _declared_instances(case_dir: Path, names) -> set[str]:
-    """Instances that already have device storage through an `!$acc declare`."""
-    text = "\n".join(p.read_text() for p in Path(case_dir).glob("*.F90"))
-    clauses = re.findall(
-        r"^\s*!\$acc\s+declare\s+\w+\s*\(([^)]*)\)", text, re.IGNORECASE | re.MULTILINE
-    )
-    declared = {
-        n.strip().lower() for c in clauses for n in c.replace("&", ",").split(",")
-    }
-    return {n for n in names if n.lower() in declared}
+def _declared_instances(case_dir: Path, active_instances, names) -> set[str]:
+    """Instances that already have device storage through an `!$acc declare` in the
+    case's copy of their module (parsed directives, module_spec)."""
+    from spel.scripts.fortran_modules import get_filename_from_module
+    from spel.scripts.fortran_parser.module_spec import ModuleSpecError, module_spec
+
+    out: set[str] = set()
+    for n in names:
+        var = active_instances.get(n)
+        if var is None:
+            continue
+        path = Path(case_dir) / Path(get_filename_from_module(var.declaration) or "").name
+        try:
+            if path.is_file() and n.lower() in module_spec(path).declared:
+                out.add(n)
+        except ModuleSpecError:
+            continue  # unknown: treated as not declared (enter data copyin)
+    return out
 
 
 def _use_lines(unit_test: FunctionalUnitTest, active_instances) -> list[str]:
@@ -119,13 +126,18 @@ def _filter_arrays(unit_test: FunctionalUnitTest) -> tuple[list[str], list[str]]
 
 
 def filters_built_on_device(case_dir: Path) -> bool:
-    """Whether the case's filterMod builds the filters in OpenACC compute regions."""
+    """Whether the case's setFilters builds the filters in OpenACC compute regions."""
+    from spel.scripts.fortran_parser.module_spec import ModuleSpecError, module_spec
+    from spel.transforms.acc_directives import find_directives
+
     path = Path(case_dir) / FILTER_MODULE_FILE
     if not path.exists():
         return False
-    return bool(
-        re.search(r"^\s*!\$acc\s+(parallel|kernels)\b", path.read_text(), re.I | re.M)
-    )
+    try:
+        return bool(module_spec(path).compute_routines & {"setfilters", "setfiltersonegroup"})
+    except ModuleSpecError:  # no routine ranges: any compute construct in the file
+        lines = path.read_text(errors="replace").split("\n")
+        return any(d.is_compute_region or d.is_compute_loop for d in find_directives(lines))
 
 
 def generate_acc_data_module(unit_test: FunctionalUnitTest) -> None:
@@ -153,7 +165,7 @@ def generate_acc_data_module(unit_test: FunctionalUnitTest) -> None:
     lines.append(f"{tabs}subroutine spel_acc_enter_data()\n")
     lines.append(f"{t2}integer :: i\n")
     lines.append("#ifdef _OPENACC\n")
-    declared = _declared_instances(unit_test.case_dir, per_inst)
+    declared = _declared_instances(unit_test.case_dir, active_instances, per_inst)
     for inst, fields in per_inst.items():
         lines.append(f"{t2}! {inst}\n")
         if inst in declared:

@@ -97,6 +97,8 @@ unit_test_files = [
 class Options:
     def __init__(self):
         self.db_mode: bool = False
+        # unit tests: the generated device data layer (spel device-data) moves the data
+        self.device_data: bool = False
         self.cfg_hash: str = ""
 
 options = Options()

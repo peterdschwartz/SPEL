@@ -20,6 +20,9 @@ SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 def create(args):
     from spel.scripts.UnitTestforELM import create_unit_test
 
+    import spel.scripts.config as cfg
+
+    cfg.options.device_data = args.device_data
     with profile_ctx(enabled=True, section="create") as pr:
         unit_test = create_unit_test(
             sub_names=args.subs,
@@ -53,8 +56,10 @@ def device_data(args):
     fut = load_analysis(reanalyze=args.reanalyze)
     srcroot = Path(E3SM_SRCROOT)
     if args.print_module:
-        text, p = generate(fut, srcroot)
-        print(text)
+        texts, p = generate(fut, srcroot)
+        for name, text in texts.items():
+            print(f"! ===== {name}")
+            print(text)
         for s in p.skipped:
             print("! skipped:", s)
         return
@@ -848,6 +853,12 @@ def main():
         help="Rebuild the cached elm_drv analysis first (e.g. after switching "
         "E3SM/SPEL branches or editing ELM); otherwise it is reused",
     )
+    create_parser.add_argument(
+        "--device-data",
+        action="store_true",
+        help="move the data with the generated device data layer (DeepCopy*Mod, ElmDeviceDataMod, as "
+        "`spel device-data` writes for the full model) instead of the harness's SpelAccDataMod deep copy",
+    )
     add_capture_args(create_parser, standalone=False)
     create_parser.set_defaults(func=create)
 
@@ -967,13 +978,13 @@ def main():
 
     device_parser = subparsers.add_parser(
         "device-data",
-        help="generate ElmDeviceDataMod (device init, first-step deep copy, whole-state updates) for a full OpenACC run",
+        help="generate ElmDeviceDataMod and the DeepCopy*Mod group modules (device init, first-step deep copy, whole-state updates) for a full OpenACC run",
     )
     device_parser.add_argument("--dry-run", action="store_true", help="report the plan and the edits, write nothing")
-    device_parser.add_argument("--print", dest="print_module", action="store_true", help="print the generated module")
+    device_parser.add_argument("--print", dest="print_module", action="store_true", help="print the generated modules")
     device_parser.add_argument(
         "-o", "--out-dir", default=None,
-        help="write the module and the edited driver files here (a case's SourceMods/src.elm) instead of in place",
+        help="write the modules and the edited driver files here (a case's SourceMods/src.elm) instead of in place",
     )
     device_parser.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
     device_parser.set_defaults(func=device_data)
