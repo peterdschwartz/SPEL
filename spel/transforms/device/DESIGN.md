@@ -217,3 +217,22 @@ spel device-data -o CASE/SourceMods/src.elm
 
 Debug and optimized builds use the same generated code (plain data directives, runtime
 guards, no reliance on optimization); the presence check runs in both.
+
+## Local variables in simpler forms (`spel/transforms/local_forms.py`)
+
+A report, made from the record and the parse tree's if guards; the edits are made by hand
+(NitrifDenitrif, 2026-10-26, was the model). Run it with `$SCRATCH/spelval/tools/eco_locals_forms.py
+[routine ...]`.
+
+- `scalar`: a local array whose every use is in one loop nest, always the same element made of
+  the surrounding loop indices (`r_min(fc,j)`), with a write before every read in the
+  iteration (same loops, enclosing ifs a prefix of the read's). It becomes a scalar, `private`
+  in the compute loop, so it needs no device storage.
+- `parameter`: an initializer that nothing writes, or a single unconditional assignment
+  from a constant expression outside loops, before every read (`pH(:) = 6.5` becomes a scalar
+  parameter). Findings with transcendental intrinsics are marked, because the compiler's
+  value may differ from the run time's in the last bit.
+- `dead`: written, never read.
+
+Actual-argument, pointer, allocation and `size` uses disqualify a variable. The walker
+records an initializer as an `init` write.
