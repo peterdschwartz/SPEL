@@ -98,7 +98,9 @@ CPU crop-performance runs, which moved here from Perlmutter. Recorded on 2026-10
 - Other `SourceFiles/*.F90` (`main.F90`, `elm_initializeMod.F90`, `nc_allocMod.F90`, ...) are
   templates/static files copied into each case; `!#...` markers in them are filled in by the generator.
 - `duplicateMod.F90`, `ReadWriteMod.F90` and the case's ELM sources are generated per case.
-  Everything under `unit-tests/<case>/` is overwritten by `spel create`; fix the generator, not the case.
+  Everything under `unit-tests/<case>/` is overwritten by `spel create`; fix generator output (harness
+  files) in the generator, not the case. ELM source changes are prototyped in the case and brought back
+  with `spel restore` (see "Prototype in an existing case" below).
   The case `CMakeLists.txt` comes from `generate_cmake` in `spel/scripts/functional_unit_test.py`.
 
 ## Testing
@@ -129,6 +131,15 @@ nvfortran -c -I$HOME/.local/netcdf-fortran/include SourceFiles/nc_io.F90 SourceF
 Do this in a scratch directory so `.mod`/`.o` files don't land in the repo.
 
 ## Building and running unit tests
+
+**Prototype in an existing case; don't regenerate it.** To try a source change (a directive, a loop
+rewrite, a kernel restructure), edit the case's copy (`unit-tests/<case>/<Module>.F90`) and rerun
+`spel run`/`spel profile`: `build/` is kept, so make recompiles only what changed (`make -j`). Bring the
+result back with `spel restore -c <case>` (it applies only your edits, diffed against the pristine
+copies `spel create` keeps in `<case>/.spel-orig/`, to the srcroot files, and refuses on conflicts).
+Run `spel create` only when the case itself must change (other routines, captured variables, IO,
+generator fixes): it deletes the case, `build/` included, and costs a full rebuild. Larger domains
+come from `nsets` (`spel run <case> 128`), not from a new capture.
 
 - Select the toolchain with env vars, which override `check_config.sh`:
   `SPEL_FC=nvfortran|gfortran SPEL_ACC=OFF|MULTICORE|GPU|OPENMP SPEL_DBG=ON|OFF spel run <case> [nsets]`.
@@ -332,6 +343,12 @@ feature that needs to know what a statement *is* or which names it uses must get
   `private`, and give local work arrays a `!$acc data create(...)` region.
 - `spel acc2omp --dry-run` doubles as a race check for OpenACC code: `added vs OpenACC` lists
   scalars the analysis privatizes but the OpenACC clauses don't.
+- `private` arrays need compile-time bounds: nvfortran `ACC=MULTICORE` corrupts the heap
+  (`free(): invalid pointer`, even on one thread) with automatic ones such as `x(-nlevsno+1:0)`.
+  Size them with a parameter (`elm_varpar::nlevsno_max`) and assign explicit sections
+  (`x(-nlevsno+1:0) = ...`). Private elements a thread never sets are NaN on the GPU but stale
+  finite values on the CPU, so a GPU-only NaN often means an uninitialized private or a local that
+  is never copied to the device.
 
 ## Verifying changes
 

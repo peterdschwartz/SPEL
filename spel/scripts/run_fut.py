@@ -79,7 +79,9 @@ def profile_command(
     if tool == "nsys":
         cmd = [
             find_nvidia_tool("nsys"), "profile",
-            "--trace=cuda,nvtx,openacc,osrt",
+            # SPEL_NSYS_TRACE=cuda,nvtx: without the OpenACC trace, whose per-event cost
+            # inflates the runtime's per-launch bookkeeping
+            f"--trace={os.environ.get('SPEL_NSYS_TRACE', 'cuda,nvtx,openacc,osrt')}",
             "--force-overwrite=true",
             f"--output={output}",
         ]

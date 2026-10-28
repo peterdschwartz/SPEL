@@ -198,21 +198,27 @@ def statements_with_next(block, end_ln: Optional[int] = None) -> Iterator[tuple[
     stmts = list(block.statements)
     for i, st in enumerate(stmts):
         nxt = stmts[i + 1].lineno if i + 1 < len(stmts) else end_ln
-        if isinstance(st, A.IfConstruct) or getattr(st, "end_ln", None) is not None:
+        if isinstance(st, A.IfConstruct):
+            # an if construct ends at its `end if` (its end_ln ends the first branch); a one-line
+            # if statement has neither
+            yield st, st.construct_end_ln + 1 if st.construct_end_ln >= 0 else nxt
+        elif getattr(st, "end_ln", None) is not None:
             yield st, st.end_ln + 1
         else:
             yield st, nxt
         for child, child_end in _child_blocks(st):
-            yield from statements_with_next(child, child_end)
+            yield from statements_with_next(child, nxt if child_end is not None and child_end < 0 else child_end)
 
 
 def _child_blocks(st) -> list[tuple[object, Optional[int]]]:
     if isinstance(st, A.IfConstruct):
-        out = [(st.consequence, None)]
-        out += [(e.consequence, None) for e in st.else_ifs]
+        # each branch ends at the next branch's header, the last one at the `end if`
+        branches = [st.consequence] + [e.consequence for e in st.else_ifs]
+        headers = [e.lineno for e in st.else_ifs]
         if st.else_ is not None:
-            out.append((st.else_.alternative, None))
-        return [(b, st.end_ln) for b, _ in out]
+            branches.append(st.else_.alternative)
+            headers.append(st.else_.lineno)
+        return list(zip(branches, headers + [st.construct_end_ln]))
     body = getattr(st, "body", None)
     if body is not None and hasattr(body, "statements"):
         return [(body, getattr(st, "end_ln", None))]

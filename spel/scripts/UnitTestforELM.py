@@ -109,6 +109,9 @@ def create_unit_test(
 
     others = [load_case(name) for name in capture_for]
     finalize_unit_test(unit_test, db_mode, capture_for=others)
+    from spel.scripts.restore_files import snapshot_case
+
+    snapshot_case(Path(unit_test.case_dir))  # the base of `spel restore`'s diffs
     return unit_test
 
 
@@ -337,10 +340,13 @@ def finalize_unit_test(
     from spel.scripts.init_hooks import INIT_HOOKS, hook_reads_and_allocs, hook_routines
 
     unit_test.init_hooks = []
+    # read at every step whatever the routines' guards: the hooks run unconditionally
+    unit_test.unguarded_reads = set()
     for hook, call in INIT_HOOKS.items():
         if hook not in unit_test.subroutine_dict:
             continue
         reads, allocs = hook_reads_and_allocs(hook_routines(unit_test.subroutine_dict, hook))
+        unit_test.unguarded_reads |= {r.lower() for r in reads}
         from spel.scripts.types import ReadWrite
 
         set_active_variables(
@@ -651,7 +657,7 @@ def process_subroutines_for_unit_test(
             and sub_dict[s].name != "setfilters"
             and sub_dict[s].module != DRIVER_MODULE
         ]
-        _, drv_bindings, unit_test.driver_sites = driver_callsites(roots, sub_dict, mod_dict)
+        _, drv_bindings, unit_test.driver_sites = driver_callsites(roots, sub_dict, mod_dict, type_dict)
         unit_test.driver_bindings = drv_bindings
         adopt_record_access(sub_dict, type_dict, fut_subs, drv_bindings)
 

@@ -76,6 +76,10 @@ def _path(sub) -> Path:
     return p if p.is_absolute() else Path(E3SM_SRCROOT) / p
 
 
+# character intrinsics with an allocated result: no device version in nvfortran
+STRING_INTRINSICS = {"trim", "adjustl", "adjustr", "repeat"}
+
+
 def call_tree(fut, roots: Iterable[str]) -> dict[str, object]:
     out: dict[str, object] = {}
     stack = [r for r in roots]
@@ -164,6 +168,7 @@ class _Facts:
         self._lines: dict[str, list[str]] = {}
         self._unsafe: dict[str, list[int]] = {}
         self._compute: dict[str, bool] = {}
+        self._device: dict[str, bool] = {}
         self._trees: dict[str, object] = {}
 
     def lines(self, sub) -> list[str]:
@@ -185,6 +190,13 @@ class _Facts:
             self._compute[sub.id] = any(d.is_compute_region or d.is_compute_loop for d in ds)
         return self._compute[sub.id]
 
+    def is_device_routine(self, sub) -> bool:
+        """`!$acc routine ...`: its loops run inside its callers' kernels (gang/vector/seq)."""
+        if sub.id not in self._device:
+            ds = find_directives(self.lines(sub), sub.startline, sub.endline)
+            self._device[sub.id] = any(d.construct == "routine" for d in ds)
+        return self._device[sub.id]
+
     def unsafe_lines(self, sub) -> list[int]:
         """Lines of statements a device cannot run: I/O and aborts (parse tree), aborts (record calls)."""
         if sub.id in self._unsafe:
@@ -205,6 +217,35 @@ class _Facts:
             out += [c.ln for c in rec.calls if str(c.name).split("%")[-1].lower() in ABORTS]
         self._unsafe[sub.id] = sorted(set(out))
         return self._unsafe[sub.id]
+
+    def string_intrinsic_lines(self, sub) -> list[int]:
+        """
+        Lines of statements that call a character intrinsic that allocates its result
+        (`trim(isotope) == 'bulk'`): nvfortran has no device version of them (S-1058
+        pgf90_trima). Each statement's own expressions are searched (conditions included),
+        not the statements nested in it.
+        """
+        from spel.scripts.fortran_parser import spel_ast as A
+        from spel.scripts.registrations import iter_statements
+
+        try:
+            tree = self.tree(sub)
+        except BaseException:
+            return list(range(sub.startline, sub.endline + 1))
+
+        def calls(node, top: bool) -> bool:
+            if isinstance(node, A.Statement) and not top:
+                return False  # a nested statement: reported at its own line
+            if isinstance(node, A.FuncExpression) and isinstance(node.function, A.Identifier) \
+                    and str(node.function.value).lower() in STRING_INTRINSICS:
+                return True
+            if isinstance(node, A.Node):
+                return any(calls(v, False) for v in vars(node).values())
+            if isinstance(node, (list, tuple)):
+                return any(calls(v, False) for v in node)
+            return False
+
+        return sorted({st.lineno for st, _ in iter_statements(tree.body) if calls(st, True)})
 
     def vector_subscript_lines(self, sub) -> list[int]:
         """
@@ -317,6 +358,28 @@ def _swappable(loop) -> bool:
     return loop.node.lineno == loop.start_ln and inner.node.lineno == inner.start_ln
 
 
+def _nest(prop):
+    """The perfect nest an interchange reorders (as many loops as `order` names), or None."""
+    try:
+        nest = prop.loop.perfect_nest(len(prop.order))
+    except ValueError:
+        return None
+    if sorted(lp.index for lp in nest) != sorted(prop.order):
+        return None
+    return nest
+
+
+def _reorderable(prop) -> bool:
+    """The planner's interchange can be applied: a perfect nest with one-line `do` headers
+    (the planner checked the bounds: the two-loop swap here, `_parallel_first` for a reorder)."""
+    nest = _nest(prop)
+    if nest is None:
+        return False
+    if len(nest) == 2 and not _swappable(prop.loop):
+        return False
+    return all(lp.node.lineno == lp.start_ln for lp in nest)
+
+
 def plan(fut, roots: Iterable[str]) -> PortPlan:
     from spel.scripts.record_access import AccessMapper
 
@@ -335,7 +398,7 @@ def plan(fut, roots: Iterable[str]) -> PortPlan:
                 visit(sub, p.children)
                 continue
             port = Port(sub.id, p)
-            if p.kind == "interchange" and _swappable(p.loop):
+            if p.kind == "interchange" and _reorderable(p):
                 port.interchange = True
             elif p.kind not in AUTO_KINDS:
                 port.blockers.append(f"{p.kind} {p.reason}".strip())
@@ -346,6 +409,8 @@ def plan(fut, roots: Iterable[str]) -> PortPlan:
             lo, hi = port.lines
             if any(lo <= ln <= hi for ln in facts.unsafe_lines(sub)):
                 port.blockers.append("device-unsafe statement (write/print/abort) in the loop")
+            if any(lo <= ln <= hi for ln in facts.string_intrinsic_lines(sub)):
+                port.blockers.append("character intrinsic (trim/adjustl/...) in the loop: hoist it")
             if any(lo <= ln <= hi for ln in facts.vector_subscript_lines(sub)):
                 port.blockers.append("assignment through a vector subscript in the loop")
             direct, missing = facts.callees_in(sub, lo, hi)
@@ -365,6 +430,8 @@ def plan(fut, roots: Iterable[str]) -> PortPlan:
     for sid, sub in sorted(tree.items()):
         if sub.record is None or not getattr(sub.record, "loop_nest", None):
             continue
+        if facts.is_device_routine(sub):
+            continue  # already a device routine (e.g. `routine vector`): no compute constructs inside
         visit(sub, propose(sub, mapper, source=facts.lines(sub), min_lines=1))
 
     # a routine called from inside a compute loop must not contain compute loops itself
@@ -444,21 +511,26 @@ def _descendants(loop):
 
 
 def _swap(p: Port, lines: list[str]) -> None:
-    """Interchange the loop with its tight inner loop: exchange the `do` lines and the `end do` lines."""
-    outer = p.proposal.loop
-    inner = outer.tight_child
-    for a, b in ((outer.start_ln, inner.start_ln), (outer.end_ln, inner.end_ln)):
-        lines[a], lines[b] = _indent(lines[a]) + lines[b].lstrip(), _indent(lines[b]) + lines[a].lstrip()
+    """Reorder the perfect nest to `order`: position k gets the `do` line (and the `end do`
+    line) of the loop over order[k], with position k's indentation."""
+    nest = _nest(p.proposal)
+    by_index = {lp.index: lp for lp in nest}
+    heads = {lp.index: lines[lp.start_ln].lstrip() for lp in nest}
+    ends = {lp.index: lines[lp.end_ln].lstrip() for lp in nest}
+    for pos, idx in zip(nest, p.proposal.order):
+        lines[pos.start_ln] = _indent(lines[pos.start_ln]) + heads[idx]
+        lines[pos.end_ln] = _indent(lines[pos.end_ln]) + ends[idx]
+    assert len(by_index) == len(nest)
 
 
 def _loop_edits(p: Port, lines: list[str]) -> list[Insertion]:
     prop = p.proposal
     directive = [l for l in prop.directive_lines() if "loop seq" not in l]
     out = [Insertion(prop.loop.start_ln, directive)]
-    if p.interchange:  # the inner loop (now the level loop) and everything in it run seq
-        inner = prop.loop.tight_child
-        return out + [Insertion(lp.start_ln, [f"{_indent(lines[lp.start_ln])}!$acc loop seq"])
-                      for lp in inner.walk()]
+    if p.interchange:  # the positions after the parallel ones, and every loop inside the nest, run seq
+        nest = _nest(prop)
+        seq = nest[prop.npar:] + [lp for ch in nest[-1].children for lp in ch.walk()]
+        return out + [Insertion(lp.start_ln, [f"{_indent(lines[lp.start_ln])}!$acc loop seq"]) for lp in seq]
     inner = _descendants(prop.nest[-1]) if prop.kind == "elementwise" else _descendants(prop.loop)
     for lp in inner:
         out.append(Insertion(lp.start_ln, [f"{_indent(lines[lp.start_ln])}!$acc loop seq"]))

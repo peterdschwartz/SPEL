@@ -1447,7 +1447,9 @@ class Parser:
         body = self.parse_block_statement(tok, [contains_tok, end_tok])
 
         contains: list[SubroutineDefinitionConstruct] = []
+        contains_ln = -1
         if self.curTokenIs(Tok.CONTAINS):
+            contains_ln = self.lineno
             self.next_token()
             internal = self.parse_block_statement(contains_tok, [end_tok])
             for stmt in internal.statements:
@@ -1479,6 +1481,7 @@ class Parser:
             contains=contains,
         )
         stmt.end_ln = end_ln
+        stmt.contains_ln = contains_ln
         return stmt
 
     @Trace.trace_decorator("parse_entity_list")
@@ -1668,9 +1671,12 @@ class Parser:
 
         self.next_token()
         blk = self.parse_block_statement(token, [Token(Tok.ENDDO, "enddo")])
+        end_ln = self.lineno
         self.next_token()  # consume ENDDO
 
-        return DoWhile(tok=token, cond=cond, body=blk)
+        loop = DoWhile(tok=token, cond=cond, body=blk)
+        loop.end_ln = end_ln
+        return loop
 
     @Trace.trace_decorator("parse_block_statement")
     def parse_block_statement(

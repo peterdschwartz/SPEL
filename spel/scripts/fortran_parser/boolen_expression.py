@@ -676,7 +676,7 @@ def minimize(condition: ConditionExpectation, max_atoms: int = 12) -> ConditionE
     equivalent on every assignment (minimal up to their dependence). Conditions with
     more than `max_atoms` atoms are returned unchanged.
     """
-    keys = list(_atoms(condition, {}))
+    keys = sorted(_atoms(condition, {}), key=str)  # input order must not change the result
     n = len(keys)
     if n > max_atoms:
         return condition

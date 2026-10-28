@@ -59,4 +59,5 @@ else
 fi
 
 
-make -C "$BUILD_DIR"
+# parallel build: CMake orders the Fortran modules (SPEL_MAKE_JOBS overrides the job count)
+make -C "$BUILD_DIR" -j "${SPEL_MAKE_JOBS:-$(nproc)}"

@@ -40,6 +40,16 @@ from spel.transforms.acc_directives import find_directives
 
 TAG = "! spel acc-sync"
 
+# Configuration switches whose branches the GPU target configurations mostly skip (FATES,
+# FAN, erosion, VIC, extra snow layers, plant hydraulic stress, PFLOTRAN, the ELM interface,
+# carbon isotopes, the ECA/RD nutrient competition). An if construct testing one of them is
+# treated like an error check: the syncs of its host code go inside its branches, so they run
+# only when a branch is taken (always correct; it only matters for the cost).
+OFF_BY_DEFAULT = frozenset({
+    "use_fates", "use_fan", "use_erosion", "ero_ccycle", "use_vichydro", "use_extrasnowlayers",
+    "use_hydrstress", "use_pflotran", "use_elm_interface", "use_c13", "use_c14", "nu_com",
+})
+
 
 @dataclass
 class Segment:
@@ -207,6 +217,7 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = ()) -> SyncPlan:
     facts = _Facts(fut)
     types = _Types(fut)
     mapper = AccessMapper(fut.subroutine_dict)
+    roots = list(roots)
     tree = {sid: s for sid, s in call_tree(fut, roots).items() if s.record is not None}
     out = SyncPlan()
     directives = {sid: find_directives(facts.lines(s), s.startline, s.endline) for sid, s in tree.items()}
@@ -241,10 +252,21 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = ()) -> SyncPlan:
             continue
         kernel_lines[sid] = _spans(directives[sid], s.record)
         calls = []
+        src = facts.lines(s)
         for c in s.record.calls:
             if any(kernels(i) for i in callees(s, c.ln)):
-                calls.append((c.ln, c.ln))
+                # the whole statement: the analysis records argument effects on its continuation lines
+                end = c.ln
+                while end + 1 < len(src) and src[end].split("!")[0].rstrip().endswith("&"):
+                    end += 1
+                calls.append((c.ln, end))
         device_lines[sid] = kernel_lines[sid] + calls
+
+    # a root that runs no device work (an error search keeps it on the host) still sits
+    # between device routines in elm_drv: its whole body is a host segment
+    for sid in roots:
+        if sid in tree and sid not in device_lines and sid not in out.seq:
+            device_lines[sid] = []
 
     # what device code writes (keys of _Types.resolve): in kernels (with the routine-seq
     # callees' effects on their call lines), then through the argument bindings: a dummy
@@ -389,8 +411,17 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
     aborts = abort_calls(node.body)
 
     def cold(st, hi: int) -> bool:
-        """An if construct that can abort (an error check): its syncs go inside its branches."""
-        return isinstance(st, A.IfConstruct) and any(st.lineno <= ln <= hi for ln in aborts)
+        """An if construct that can abort (an error check), that replays a check spel
+        defer-checks moved out of a loop (`if (spel_dc_k > 0)`), or that tests a switch that is
+        off by default (OFF_BY_DEFAULT): its syncs go inside its branches."""
+        from spel.scripts.db_export.trace import expr_names
+        from spel.transforms.defer_checks import PREFIX
+
+        if not isinstance(st, A.IfConstruct):
+            return False
+        names = {n.lower() for n in expr_names(st.condition)}
+        return (any(st.lineno <= ln <= hi for ln in aborts) or any(n.startswith(PREFIX) for n in names)
+                or bool(names & OFF_BY_DEFAULT))
 
     def returns_in(lo: int, hi: int) -> list[int]:
         return [st.lineno for st, _ in _walk(node.body) if isinstance(st, A.ReturnStatement) and lo <= st.lineno <= hi]
@@ -458,10 +489,15 @@ def _indent(line: str) -> str:
 
 def edits(plan_: SyncPlan, texts: dict[Path, list[str]]) -> dict[Path, list[tuple[int, int, list[str]]]]:
     """(line, order, lines to insert before it) per file."""
+    from spel.transforms.acc_locals import _above_directives
+
     by_file: dict[Path, list[tuple[int, int, list[str]]]] = {}
+    directives: dict[Path, list] = {}
     for rs in plan_.routines:
         lines = texts[rs.path]
         ins = by_file.setdefault(rs.path, [])
+        if rs.path not in directives:
+            directives[rs.path] = find_directives(lines, 0, len(lines) - 1)
         if rs.uses:
             ind = _indent(lines[rs.use_ln - 1])
             ins.append((rs.use_ln, 0, [f"{ind}use {m}, only : {', '.join(sorted(n))}  {TAG}"
@@ -470,14 +506,74 @@ def edits(plan_: SyncPlan, texts: dict[Path, list[str]]) -> dict[Path, list[tupl
             ind = _indent(lines[seg.first])
             before = sorted(seg.stale)
             if before:
-                ins.append((seg.first, 1, [f"{ind}{TAG}: device data this host code uses"]
+                # above a directive that belongs to the segment's first statement, not between them
+                ins.append((_above_directives(seg.first, directives[rs.path]), 1,
+                            [f"{ind}{TAG}: device data this host code uses"]
                             + _directive(ind, "update self", before)))
             if seg.writes and not seg.header_only:
                 w = sorted(seg.writes)
                 ins.append((seg.after, -1, _directive(ind, "update device", w)))
                 for r in seg.returns:
-                    ins.append((r, -1, _directive(_indent(lines[r]), "update device", w)))
+                    # after the segment's update self when the return is its first statement
+                    # (`if (lake) return`): before it, the update would push stale host data
+                    ins.append((r, 2, _directive(_indent(lines[r]), "update device", w)))
     return by_file
+
+
+def dedupe_sync_blocks(lines: list[str]) -> list[str]:
+    """
+    In every run of consecutive acc-sync lines (TAG comments and `!$acc update ...
+    if_present` statements with their `!$acc&` continuations, the text `edits` writes),
+    keep each statement once, in order, and the TAG comment once before the first
+    `update self`. Repeated runs of the sync (the analysis reads directives as comments,
+    so it plans them again) then leave the source as one run does.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+
+    def statement(j: int) -> tuple[int, list[str]] | None:
+        """(end, lines) of the acc-sync update statement starting at j."""
+        head = lines[j].lstrip().lower()
+        if not head.startswith("!$acc update"):
+            return None
+        k = j
+        while lines[k].rstrip().endswith("&") and k + 1 < n and lines[k + 1].lstrip().lower().startswith("!$acc&"):
+            k += 1
+        if not lines[k].rstrip().lower().endswith("if_present"):
+            return None
+        return k, lines[j:k + 1]
+
+    while i < n:
+        if lines[i].strip() != f"{TAG}: device data this host code uses" and statement(i) is None:
+            out.append(lines[i])
+            i += 1
+            continue
+        block: list[tuple[str, list[str]]] = []
+        while i < n:
+            if lines[i].strip() == f"{TAG}: device data this host code uses":
+                block.append(("tag", [lines[i]]))
+                i += 1
+            elif (st := statement(i)) is not None:
+                block.append(("upd", st[1]))
+                i = st[0] + 1
+            else:
+                break
+        seen: set[str] = set()
+        tag = next((b[1] for b in block if b[0] == "tag"), None)
+        tagged = False
+        for kind, text in block:
+            if kind == "tag":
+                continue
+            key = " ".join(t.strip() for t in text)
+            if key in seen:
+                continue
+            seen.add(key)
+            if tag is not None and not tagged and text[0].lstrip().lower().startswith("!$acc update self"):
+                out.extend(tag)
+                tagged = True
+            out.extend(text)
+    return out
 
 
 def apply(fut, plan_: SyncPlan, dry_run: bool = False) -> list[str]:
@@ -488,9 +584,14 @@ def apply(fut, plan_: SyncPlan, dry_run: bool = False) -> list[str]:
     log = []
     for path, ins in edits(plan_, texts).items():
         lines = texts[path]
+        done = 0
         for ln, _, new in sorted(ins, key=lambda x: (-x[0], -x[1])):
+            if lines[max(ln - len(new), 0):ln] == new or lines[ln:ln + len(new)] == new:
+                continue  # inserted by an earlier run (the analysis reads directives as comments)
             lines[ln:ln] = new
-        log.append(f"{path.name}: {len(ins)} insertions")
+            done += 1
+        lines[:] = dedupe_sync_blocks(lines)
+        log.append(f"{path.name}: {done} insertions")
         if not dry_run:
             path.write_text("\n".join(lines))
     return log

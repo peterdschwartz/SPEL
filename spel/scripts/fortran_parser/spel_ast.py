@@ -709,6 +709,7 @@ class DoWhile(Statement):
         self.token = tok
         self.condition = cond
         self.body: BlockStatement = body
+        self.end_ln: int = -1  # the `end do` line
 
     def statement_node(self) -> None:
         pass
@@ -1837,6 +1838,7 @@ class SubroutineDefinitionConstruct(Statement):
         self.body = body
         self.contains = contains
         self.end_ln: int = -1
+        self.contains_ln: int = -1  # the `contains` of internal subprograms (-1: none)
 
     def statement_node(self) -> None:
         pass

@@ -128,7 +128,8 @@ def _data_regions(directives: list[AccDirective]) -> list[tuple[int, int, set[st
     return out
 
 
-def check_routine(sub, device_routines: set[str], lines: list[str]) -> RoutineReport:
+def check_routine(sub, device_routines: set[str], lines: list[str],
+                  internal_uses: Optional[dict[str, set[str]]] = None) -> RoutineReport:
     """The local arrays of one analyzed routine that device code uses without storage."""
     rec = sub.record
     report = RoutineReport(sub.id, str(sub.filepath))
@@ -176,9 +177,13 @@ def check_routine(sub, device_routines: set[str], lines: list[str]) -> RoutineRe
             report.findings.append(Finding(sub.id, d.start_ln, name, "present" if default_present else "implicit",
                                            f"!$acc {d.construct}"))
             needed[name] = None
+    call_desc = getattr(sub, "sub_call_desc", None) or {}
     for call in rec.calls:
         callee = str(call.name).split("%")[-1].lower()
-        if callee not in device_routines:
+        # a generic name (`c2g`) runs kernels when the specific procedure it resolves to does
+        desc = call_desc.get(call.ln)
+        specific = str(getattr(desc, "fn", "") or "").split("::")[-1].lower()
+        if callee not in device_routines and specific not in device_routines:
             continue
         device_lines.append((call.ln, call.ln))
         passed = []
@@ -211,9 +216,27 @@ def check_routine(sub, device_routines: set[str], lines: list[str]) -> RoutineRe
             cold_reads.setdefault(name, set()).add(branch[2])
         else:
             host.add(name)
+    # internal subprograms (internal_uses: name -> host variables they use) run on the host:
+    # their accesses happen at the host-side call
+    for call in rec.calls:
+        uses = (internal_uses or {}).get(str(call.name).lower())
+        if uses and not any(lo <= call.ln <= hi for lo, hi in device_lines):
+            host |= uses & set(needed)
     report.host_accessed = [n for n in report.locals_needed if n in host]
     report.cold_reads = {n: sorted(v) for n, v in cold_reads.items() if n not in host}
     return report
+
+
+def _internal_uses(fut, sub) -> dict[str, set[str]]:
+    """The host variables each internal subprogram of `sub` uses (from its record)."""
+    from spel.scripts.fortran_parser.symbols import Origin
+
+    out: dict[str, set[str]] = {}
+    for isub in fut.subroutine_dict.values():
+        if getattr(isub, "is_internal", False) and getattr(isub, "host", None) is sub and isub.record is not None:
+            out[isub.name.split("::")[-1].lower()] = {
+                a.base.lower() for a in isub.record.accesses() if a.origin is Origin.HOST}
+    return out
 
 
 def check(fut, routines: Optional[set[str]] = None) -> list[RoutineReport]:
@@ -236,7 +259,7 @@ def check(fut, routines: Optional[set[str]] = None) -> list[RoutineReport]:
                 texts[str(path)] = path.read_text(errors="replace").split("\n")
             except OSError:
                 continue
-        r = check_routine(sub, device, texts[str(path)])
+        r = check_routine(sub, device, texts[str(path)], _internal_uses(fut, sub))
         if r.findings:
             out.append(r)
     return out
@@ -297,6 +320,18 @@ def first_executable(tree, rec) -> int:
     return tree.end_ln
 
 
+def _above_directives(ln: int, directives: list[AccDirective]) -> int:
+    """
+    The first line of the directives that end right above line `ln` (a `!$acc parallel
+    loop` and its continuations belong to the statement after them): inserting there
+    keeps them attached to it.
+    """
+    ends = {d.end_ln: d.start_ln for d in directives}
+    while ln - 1 in ends:
+        ln = ends[ln - 1]
+    return ln
+
+
 def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
     """
     Device storage for the routine's uncovered local arrays:
@@ -320,7 +355,7 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
     if tree is None:
         raise ValueError(f"{path.name}: routine {name} not found by the parser")
     stmts = list(statements_with_next(tree.body, tree.end_ln))
-    first_exec = first_executable(tree, rec)
+    first_exec = _above_directives(first_executable(tree, rec), find_directives(lines, sub.startline, sub.endline))
     ind = _indent(lines[first_exec])
     out: list[Insertion] = []
     device_only = [n for n in report.locals_needed if n not in report.host_accessed]
@@ -335,9 +370,11 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
         out.append(Insertion(ln, _wrap_directive(_indent(lines[ln]), "update self", names), order=1))
     to_delete = device_only + [n for n in report.leaked if n not in device_only]
     if to_delete:
-        ends = [st.lineno for st, _ in stmts if isinstance(st, A.ReturnStatement)] + [tree.end_ln]
+        # the end of the executable part: the routine's `contains` when it has internal subprograms
+        last = tree.contains_ln if getattr(tree, "contains_ln", -1) >= 0 else tree.end_ln
+        ends = [st.lineno for st, _ in stmts if isinstance(st, A.ReturnStatement)] + [last]
         for ln in ends:
-            out.append(Insertion(ln, _wrap_directive(_indent(lines[ln]) if ln != tree.end_ln else ind,
+            out.append(Insertion(ln, _wrap_directive(_indent(lines[ln]) if ln != last else ind,
                                                      "exit data delete", to_delete), order=-1))
     host = set(report.host_accessed)
     if host:

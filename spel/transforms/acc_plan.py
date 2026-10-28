@@ -13,7 +13,12 @@ accesses decide the shape (`spel accplan MODULE`):
   each element keeps its summation order.
 - interchange: a (level, column) nest whose column arrays accumulate over levels
   (`tot(c) = tot(c) + x(c,j)` under `do j` / `do fc`): swap to column-outer and
-  run the level loop `seq`. Same arithmetic order per column.
+  run the level loop `seq`. Same arithmetic order per column. More generally a
+  rectangular perfect nest whose carried loops sit between parallel ones (`do j /
+  do pi / do fc` summing patches into `x(c,j)`) is reordered: the loops that carry
+  nothing outermost and collapsed (`order`, `npar`), the carried ones inside in
+  their original order. Parallelizing only the outer level loop would run every
+  column in one thread.
 - scatter: a loop over a finer level writes arrays of a coarser one through a
   many-to-one alias (`c = veg_pp%column(p)` in a patch loop): parallelize over
   the coarser level with an inner loop over its members in filter order instead.
@@ -70,6 +75,8 @@ class LoopProposal:
     unsafe: list[tuple[int, str]] = field(default_factory=list)   # (1-based line, statement)
     private_arrays: list[str] = field(default_factory=list)       # local arrays written and read per iteration
     children: list["LoopProposal"] = field(default_factory=list)  # proposals for the inner loops of a host loop
+    order: list[str] = field(default_factory=list)  # interchange: the nest's indices in their new order
+    npar: int = 1  # interchange: how many of `order` are parallel (collapsed)
 
     @property
     def lines(self) -> tuple[int, int]:
@@ -87,6 +94,8 @@ class LoopProposal:
         clauses = ["gang", "vector"]
         if self.kind == "elementwise" and len(self.nest) > 1:
             clauses.append(f"collapse({len(self.nest)})")
+        elif self.kind == "interchange" and self.npar > 1:
+            clauses.append(f"collapse({self.npar})")
         clauses.append("default(present)")
         clauses.extend(c for c in self.plan.clauses() if not c.startswith("collapse"))
         if self.private_arrays:
@@ -164,6 +173,39 @@ def _member_offset(rhs, guards, indices: set[str], aliases: dict[str, "Alias"]) 
                 and str(right.args[0]).lower() == coarse:
             return coarse, pi
     return None
+
+
+def _parallel_first(nest, carried, scatter, same_value, aliases=None) -> Optional[tuple[list[str], int]]:
+    """
+    Order of a perfect nest with carried loops: the indices no dependence is carried over (and
+    that scatter or rewrite nothing) first and collapsed, then the carried ones in their
+    original order. A loop whose bounds use another nest index (directly or through an alias:
+    `do p = pfti(c), pftf(c)` with `c = filter(fc)`) must stay inside it, and the collapsed
+    loops must not depend on each other. None when fewer than two loops would be parallel and
+    the order does not change, or when the order is not valid.
+    """
+    aliases = aliases or {}
+    idx = [lp.index for lp in nest]
+    if len(nest) < 2 or any(lp.index is None for lp in nest):
+        return None
+    par = [i for i in idx if i not in carried and i not in scatter and i not in same_value]
+    seq = [i for i in idx if i not in par]
+    if not par or not seq or any(i in scatter or i in same_value for i in seq):
+        return None
+    if par + seq == idx and len(par) < 2:
+        return None  # the outer loop alone is parallel: column-parallel already
+    def deps(lp) -> set[str]:
+        names = {b.split("%")[0].lower() for b in lp.bound_paths}
+        return {n for n in names if n in idx} | {aliases[n].index for n in names if n in aliases} \
+            | {x for n in names if n in aliases for x in aliases[n].also}
+    order = par + seq
+    for lp in nest:
+        pos = order.index(lp.index)
+        if any(order.index(d) >= pos for d in deps(lp) if d in idx and d != lp.index):
+            return None  # its bounds would use an index set inside it
+        if pos < len(par) and deps(lp) & set(par) - {lp.index}:
+            return None  # collapse needs rectangular parallel loops
+    return order, len(par)
 
 
 def _aliases(rec: SubroutineRecord, lo: int, hi: int, indices: set[str]) -> dict[str, Alias]:
@@ -438,26 +480,41 @@ def _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines) 
         # shape
         outer = nest_idx[0]
         inner_carried = {i for i in carried if i != outer}
-        if outer in scatter:
+        # parallel loops first, carried ones inside: preferred over the two-loop swap when it
+        # gives more than one parallel loop (`do k / do j / do fc` -> (j, fc) parallel, k seq)
+        reorder = _parallel_first(nest, carried, scatter, same_value, aliases)
+        if reorder is not None and reorder[1] > 1 and outer not in scatter:
+            kind, reason = "interchange", (f"(reorder to `do {' / do '.join(reorder[0])}`: "
+                                           f"{', '.join(reorder[0][:reorder[1]])} parallel, "
+                                           f"{', '.join(reorder[0][reorder[1]:])} seq)")
+        elif outer in scatter:
             kind, reason = "scatter", f"(writes of coarser-level arrays through {', '.join(sorted({aliases[a].via for a in aliases if not aliases[a].injective}))}: parallelize over that level with an inner loop over its members)"
         elif outer in carried:
             if len(nest_idx) >= 2 and nest_idx[1] not in carried and nest_idx[1] not in scatter:
                 kind, reason = "interchange", f"(swap to `do {nest_idx[1]}` outer, parallel / `do {outer}` seq)"
+                reorder = None
             else:
                 kind, reason = "carried", "(dependence over the outer index: reduction, atomic or sequential)"
         elif outer in same_value and len(nest_idx) >= 2 and nest_idx[1] not in carried:
             kind, reason = "interchange", f"(same-value writes over {outer}; swap to `do {nest_idx[1]}` outer / `do {outer}` seq)"
+            reorder = None
         elif len(nest_idx) >= 2 and not inner_carried and not any(i in same_value for i in nest_idx) \
                 and not any(i in scatter for i in nest_idx[1:]):
             # (a scatter over an inner index rules out the collapse: column-parallel below runs
             # those loops seq, in order, per outer iteration)
             kind, reason = "elementwise", f"(collapse({len(nest_idx)}))"
+        elif reorder is not None:
+            order, npar = reorder
+            kind, reason = "interchange", (f"(reorder to `do {' / do '.join(order)}`: "
+                                           f"{', '.join(order[:npar])} parallel, {', '.join(order[npar:])} seq)")
         elif loop.children:
             kind, reason = "column-parallel", "(inner loops seq)"
         else:
             kind, reason = "elementwise", ""
         prop = LoopProposal(sub.name, fname, loop, nest if kind == "elementwise" else [loop], kind, reason,
                             carried, scatter, same_value, private_arrays=private_arrays)
+        if kind == "interchange":  # the two-loop swap, or the reorder
+            prop.order, prop.npar = reorder if reorder is not None else ([nest_idx[1], nest_idx[0]], 1)
         if kind == "carried" and loop.children:
             prop.reason = "(host loop stays sequential; proposals for its inner loops follow)"
             for child in loop.children:

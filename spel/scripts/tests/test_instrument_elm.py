@@ -659,3 +659,44 @@ def test_compact_fields_from_manifest_and_module():
     assert deactivate_runtime_components(type_dict) == ["vegetation_carbon_flux%core%cgrp_id", "vegetation_nutrient_flux%cgrp_id"]
     assert not carbon.components["core%cgrp_id"].active
     assert compact_fields(type_dict, active, None) == [] and hook_lines([]) == {}
+
+
+def test_widened_span():
+    lines = lines_of(
+        "do nc = 1, n\n"          # 0
+        "  if (x) then\n"         # 1
+        "    call a()\n"          # 2
+        "  end if\n"              # 3
+        "  call b()\n"            # 4
+        "  if (y) then\n"         # 5
+        "    call c()\n"          # 6
+        "  else\n"                # 7
+        "    call d()\n"          # 8
+        "  end if\n"              # 9
+        "end do\n"                # 10
+    )
+    assert ie._widened_span(lines, 2, 6) == (1, 9)    # whole sibling ifs of the loop body
+    assert ie._widened_span(lines, 4, 4) == (4, 4)
+    assert ie._widened_span(lines, 2, 4) == (1, 4)
+    assert ie._widened_span(lines, 6, 8) is None      # different branches of one if
+
+
+def test_run_case_with_local_runner(tmp_path, monkeypatch):
+    """SPEL_CASE_RUNNER: casegen only builds (no --submit), the runner runs in the case directory."""
+    casedir = tmp_path / "casedir"
+    casedir.mkdir()
+    xmlquery = casedir / "xmlquery"
+    xmlquery.write_text(f"#!/bin/bash\necho {tmp_path}/run\n")
+    xmlquery.chmod(0o755)
+    script = tmp_path / "casegen.sh"
+    script.write_text(f'#!/bin/bash\necho "$@" > {tmp_path}/args\necho CASEDIR={casedir}\n')
+    runner = tmp_path / "runner.sh"
+    runner.write_text("#!/bin/bash\npwd > ran_here\n")
+    monkeypatch.setenv("SPEL_CASE_RUNNER", str(runner))
+    assert ie.run_case(script, "mycase", tmp_path) == tmp_path / "run"
+    assert "--submit" not in (tmp_path / "args").read_text()
+    assert (casedir / "ran_here").read_text().strip() == str(casedir)
+
+    runner.write_text("#!/bin/bash\nexit 2\n")
+    with pytest.raises(ie.CaseRunError, match="exit code 2"):
+        ie.run_case(script, "mycase", tmp_path)

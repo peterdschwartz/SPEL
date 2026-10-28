@@ -59,6 +59,79 @@ def test_segments_and_edits():
     assert (18, ("     !$acc update device(y) if_present",)) in got
 
 
+EARLY_RETURN = """subroutine early(n, lake, x, y)
+  implicit none
+  integer, intent(in) :: n
+  logical, intent(in) :: lake
+  real(r8), intent(inout) :: x(:), y(:)
+  integer :: i
+  !$acc parallel loop default(present)
+  do i = 1, n
+     x(i) = 0.0_r8
+  end do
+  if (lake) return
+  do i = 1, n
+     x(i) = x(i) + y(i)
+  end do
+end subroutine early"""
+
+
+def test_return_update_follows_the_update_self():
+    # ch4_aere_columns: a kernel zeroes x, then `if (lake) return` starts the host segment;
+    # the return's update device must not run before the segment's update self (it would
+    # push stale host values over the kernel's zeros)
+    lines = EARLY_RETURN.split("\n")
+    sub = StubSub(EARLY_RETURN)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    spans = acc_sync._spans(find_directives(lines), sub.record)
+    entries = acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub))
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "x")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    node = parse_statements(EARLY_RETURN).statements[0]
+    acc_sync._segments(rs, sub, node, spans, entries, lines, acc_sync._Types(fut), out)
+
+    (seg,) = rs.segments
+    assert seg.first == 10 and seg.returns == [10] and seg.stale == {"x"} and seg.writes == {"x"}
+    ins = sorted(acc_sync.edits(acc_sync.SyncPlan(routines=[rs]), {None: lines})[None], key=lambda e: e[:2])
+    at_return = [new[-1].strip() for ln, _, new in ins if ln == 10]
+    assert at_return == ["!$acc update self(x) if_present", "!$acc update device(x) if_present"]
+
+
+FATES_BRANCH = """subroutine branchy(n, use_fates, x, y)
+  implicit none
+  integer, intent(in) :: n
+  logical, intent(in) :: use_fates
+  real(r8), intent(inout) :: x(:), y(:)
+  integer :: i
+  !$acc parallel loop default(present)
+  do i = 1, n
+     x(i) = 1.0_r8
+  end do
+  if (use_fates) then
+     do i = 1, n
+        y(i) = x(i)
+     end do
+  end if
+end subroutine branchy"""
+
+
+def test_off_by_default_branch_syncs_inside():
+    # ch4_aere_columns: the host FATES branch copied every input to the host on each call
+    lines = FATES_BRANCH.split("\n")
+    sub = StubSub(FATES_BRANCH)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    spans = acc_sync._spans(find_directives(lines), sub.record)
+    entries = acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub))
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "x")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    node = parse_statements(FATES_BRANCH).statements[0]
+    acc_sync._segments(rs, sub, node, spans, entries, lines, acc_sync._Types(fut), out)
+    (seg,) = rs.segments
+    assert seg.first == 11 and seg.stale == {"x"} and seg.writes == {"y"}   # the do loop inside the branch
+
+
 COLD = """subroutine check(n, x, nbad)
   implicit none
   integer, intent(in) :: n
@@ -89,3 +162,61 @@ def test_error_check_syncs_inside_the_branch():
                        acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub)), lines, acc_sync._Types(fut), out)
     (seg,) = rs.segments  # the loop inside `if (nbad > 0)`, not the whole if construct
     assert (seg.first, seg.after) == (11, 14) and seg.stale == {"x"}
+
+
+HOST_ONLY = """subroutine balance(n, x, y)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(in) :: x(:)
+  real(r8), intent(inout) :: y(:)
+  integer :: i
+  do i = 1, n
+     y(i) = x(i) - y(i)
+  end do
+end subroutine balance"""
+
+
+def test_host_only_root_is_one_host_segment():
+    lines = HOST_ONLY.split("\n")
+    sub = StubSub(HOST_ONLY)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    entries = acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub))
+    # x and y: written on the device by the routines before it (another root's kernels)
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "x"), ("#dummy", sub.id, "y")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    node = parse_statements(HOST_ONLY).statements[0]
+    acc_sync._segments(rs, sub, node, [], entries, lines, acc_sync._Types(fut), out)
+    (seg,) = rs.segments
+    assert (seg.first, seg.after) == (6, 9)
+    assert seg.stale == {"x", "y"} and seg.writes == {"y"}
+
+
+def test_apply_twice_inserts_once(tmp_path):
+    path = tmp_path / "m.F90"
+    path.write_text(SRC)
+    lines = SRC.split("\n")
+    sub = StubSub(SRC)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    entries = acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub))
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "x")})
+    rs = acc_sync.RoutineSync(sub.id, path)
+    acc_sync._segments(rs, sub, parse_statements(SRC).statements[0], acc_sync._spans(find_directives(lines), sub.record),
+                       entries, lines, acc_sync._Types(fut), out)
+    plan_ = acc_sync.SyncPlan(routines=[rs])
+    acc_sync.apply(fut, plan_)
+    once = path.read_text()
+    assert once != SRC
+    acc_sync.apply(fut, plan_)   # the same plan again (line numbers of the unedited source)
+    assert path.read_text().count("update self(x)") == once.count("update self(x)")
+
+
+def test_dedupe_sync_blocks():
+    tag = f"  {acc_sync.TAG}: device data this host code uses"
+    upd = ["  !$acc update self(a, &", "  !$acc&   b) if_present"]
+    lines = ["  x = 1", tag, *upd, tag, tag, *upd, "  !$acc update device(c) if_present",
+             "  !$acc update device(c) if_present", "  !$acc update self(d)", "  !$acc update self(d)", "  y = 2"]
+    assert acc_sync.dedupe_sync_blocks(lines) == [
+        "  x = 1", tag, *upd, "  !$acc update device(c) if_present",
+        "  !$acc update self(d)", "  !$acc update self(d)", "  y = 2"]   # hand-written updates are left alone

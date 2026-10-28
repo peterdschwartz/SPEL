@@ -23,6 +23,7 @@ for a single ELM build and run (`spel validate`).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -173,7 +174,8 @@ def _check_call_sites(lines: list[str], sites: DriverSites) -> tuple[int, int, s
     for call in calls:
         name = call.callee.split("::")[-1]
         line = lines[call.ln] if call.ln < len(lines) else ""
-        if not re.match(rf"^\s*call\s+{name}\b", strip_comment(line), re.I):
+        # a type-bound call (`call col_ns%Summary`) names its binding, not the routine
+        if not re.match(rf"^\s*call\s+({name}\b|[\w%]+%\w+\s*\()", strip_comment(line), re.I):
             raise InstrumentError(
                 f"{sites.path}:{call.ln + 1} is no longer `call {name}`; "
                 "it changed since `spel create` -- re-run create"
@@ -181,10 +183,13 @@ def _check_call_sites(lines: list[str], sites: DriverSites) -> tuple[int, int, s
     for callee, found in sites.calls.items():
         if len(found) > 1:
             print(f"Warning: {callee} is called {len(found)} times in {sites.routine}; capturing around all")
-    if missing := [c.callee for c in calls if c.bounds is None]:
-        raise InstrumentError(f"No bounds_type actual argument at the call(s) to {missing}")
+    # the captures need a bounds_type in scope: the first call that passes one (routines
+    # such as VegStructUpdate take only filters)
+    with_bounds = sorted((c for c in calls if c.bounds is not None), key=lambda c: c.ln)
+    if not with_bounds:
+        raise InstrumentError(f"No bounds_type actual argument at the call(s) to {[c.callee for c in calls]}")
     first = min(calls, key=lambda c: c.ln)
-    return first.ln, max(statement_end(lines, c.ln) for c in calls), first.bounds
+    return first.ln, max(statement_end(lines, c.ln) for c in calls), with_bounds[0].bounds
 
 
 def _first_calls_end(lines: list[str], sites: DriverSites) -> int:
@@ -219,6 +224,59 @@ def _same_block(lines: list[str], start: int, end: int) -> bool:
     return depth == 0
 
 
+def _construct_spans(lines: list[str]) -> tuple[dict[int, tuple[int, ...]], dict[int, int], dict[int, list[int]]]:
+    """
+    For every statement line, the opening lines of the constructs around it (outermost
+    first); each opener's closing line; each opener's else/case lines.
+    """
+    enclosing: dict[int, tuple[int, ...]] = {}
+    closer: dict[int, int] = {}
+    mids: dict[int, list[int]] = {}
+    stack: list[int] = []
+    ln = 0
+    while ln < len(lines):
+        text = statement_text(lines, ln)
+        if _BLOCK_CLOSE.match(text) and stack:
+            closer[stack.pop()] = ln
+            enclosing[ln] = tuple(stack)
+        elif _BLOCK_MID.match(text) and stack:
+            mids.setdefault(stack[-1], []).append(ln)
+            enclosing[ln] = tuple(stack)
+        else:
+            enclosing[ln] = tuple(stack)
+            if _BLOCK_OPEN.match(text):
+                stack.append(ln)
+        ln = statement_end(lines, ln) + 1
+    return enclosing, closer, mids
+
+
+def _widened_span(lines: list[str], start: int, end: int) -> Optional[tuple[int, int]]:
+    """
+    The smallest span around start..end made of whole statements and constructs of the
+    innermost construct that contains both (EcosystemDynLeaching inside `if (use_cn)`, then
+    balance checks at the clump-loop level, then SurfaceAlbedo inside `if (doalb)`): its
+    first line and the line closing it. None when it would cross an else/case line of that
+    construct, i.e. when the calls are in different branches.
+    """
+    enclosing, closer, mids = _construct_spans(lines)
+    # `end` may be a continuation line: the statement it belongs to
+    end = max((ln for ln in enclosing if ln <= end), default=-1)
+    if start not in enclosing or end < start:
+        return None
+    sa, ea = enclosing[start], enclosing[end]
+    k = 0
+    while k < min(len(sa), len(ea)) and sa[k] == ea[k]:
+        k += 1
+    new_start = sa[k] if k < len(sa) else start
+    new_end = closer.get(ea[k], end) if k < len(ea) else end
+    if k < len(ea) and ea[k] not in closer:
+        return None
+    common = sa[k - 1] if k > 0 else None
+    if common is not None and any(new_start < m <= new_end for m in mids.get(common, [])):
+        return None
+    return new_start, statement_end(lines, new_end)
+
+
 def instrument_lines(
     lines: list[str], groups: list[tuple[DriverSites, CaptureNames]]
 ) -> tuple[list[str], dict[str, str]]:
@@ -243,6 +301,12 @@ def instrument_lines(
             # then lake columns) is captured around its first call only: the
             # code in between isn't part of the unit test
             spans = [(first, _first_calls_end(lines, sites))]
+        elif all(len(found) == 1 for found in sites.calls.values()) and (
+            widened := _widened_span(lines, first, end)
+        ) is not None:
+            # several routines called once each, in sibling constructs of one block: one
+            # capture around the whole stretch
+            spans = [widened]
         else:
             # e.g. HydrologyDrainage in both branches of an if: capture around
             # each call, or the inputs capture sits in a branch that never runs
@@ -1132,12 +1196,18 @@ def run_case(
     srcroot: Path,
     extra_args: Optional[list[str]] = None,
 ) -> Path:
-    """Create/build/submit a case with the casegen script; return its RUNDIR."""
+    """
+    Create/build/submit a case with the casegen script; return its RUNDIR.
+    With SPEL_CASE_RUNNER set (e.g. ~/scripts/run_e3sm.sh), the case is only
+    built and then run in place by that script from the case directory (no
+    batch job: small cases run on the login or an interactive node).
+    """
+    runner = os.environ.get("SPEL_CASE_RUNNER")
     cmd = [
         "bash", str(casegen),
         "--case", case_name,
         "--srcroot", str(srcroot),
-        "--build", "--submit",
+        "--build", *([] if runner else ["--submit"]),
         *(extra_args or []),
     ]
     code, casedir = _stream(cmd)
@@ -1150,7 +1220,12 @@ def run_case(
         )
     if casedir is None:
         raise InstrumentError("casegen script didn't report CASEDIR")
-    wait_for_case_jobs(Path(casedir))
+    if runner:
+        code, _ = _stream(["bash", str(Path(runner).expanduser())], cwd=casedir)
+        if code:
+            raise CaseRunError(f"{runner} failed with exit code {code}", Path(casedir))
+    else:
+        wait_for_case_jobs(Path(casedir))
     return _rundir(Path(casedir))
 
 

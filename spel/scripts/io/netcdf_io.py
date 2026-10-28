@@ -59,9 +59,18 @@ def alloc_status(var: Variable) -> str | None:
     allocated()/associated() test for deferred-shape module arrays, which ELM may
     leave unallocated (e.g. AllocationMod::aroot is only allocated with crop_prog)
     """
+    if var.name in OPTIONAL_READS:
+        # a subgrid component (inst_pp%field: a pointer) the capture may lack
+        return f"associated({var.name})"
     if "%" in var.name or not is_deferred_shape(var):
         return None
     return f"associated({var.name})" if var.ptrscalar else f"allocated({var.name})"
+
+
+# spel_t_<name> arrays a capture may lack (time_scalars.TimeScalar.fallback)
+OPTIONAL_TIME_ARRAYS = {"spel_t_spel_step_size", "spel_t_spel_rad_step_size"}
+# inst%field inputs read only if the capture has them (the init hooks' reads)
+OPTIONAL_READS: set[str] = set()
 
 
 def if_block(lines: list[str], cond: str | None, indent: str) -> list[str]:
@@ -153,6 +162,7 @@ def generate_elmtypes_io_netcdf(unit_test: FunctionalUnitTest) -> None:
 
     dtype_vars: dict[str, Variable] = {}
     guards: dict[str, ConditionExpectation] = {}
+    OPTIONAL_READS.clear()  # per case
 
     for inst_var in active_instances.values():
         type_name = instance_to_type[inst_var.name]
@@ -168,6 +178,11 @@ def generate_elmtypes_io_netcdf(unit_test: FunctionalUnitTest) -> None:
             dtype_vars[new_var.name] = new_var
 
             condition = unit_test.guard_for_variable(field_var)
+            if new_var.name.lower() in getattr(unit_test, "unguarded_reads", ()):
+                # an init hook (init_subgrid_ave) reads it: read it whenever the capture has it
+                # (captures made before this was unguarded may lack it)
+                condition = None
+                OPTIONAL_READS.add(new_var.name)
             if inst_var.name == "params_inst":
                 unit_test.logger.info(f"{ condition }")
             if condition is not None:
@@ -735,8 +750,14 @@ def create_nc_read(
             f"{var.name}{time_str})\n"
         )
         # not written if it was unallocated in ELM (see alloc_status)
-        if alloc_status(var):
+        if var.name in OPTIONAL_READS:
             var_lines = if_block(var_lines, f"nc_has_var(ncid, '{varname}')", tabs)
+        elif alloc_status(var):
+            var_lines = if_block(var_lines, f"nc_has_var(ncid, '{varname}')", tabs)
+        elif var.name in OPTIONAL_TIME_ARRAYS:
+            # per-step scalars added after older captures: 0 means "use the fallback"
+            var_lines = if_block(var_lines, f"nc_has_var(ncid, '{varname}')", tabs)[:-1] + [
+                f"{tabs}else\n", f"{tabs}  {var.name} = 0\n", f"{tabs}end if\n"]
 
         lines.extend(
             guard_fortran_lines(
@@ -784,8 +805,12 @@ def create_inbuf_to_device(vars: dict[str, Variable]) -> list[str]:
     for n, _ in enumerate(_inbuf_vars(vars), start=1):
         lines.extend(
             [
+                # not empty ones: a zero-size array's address can lie inside another
+                # variable, which then is "partially present" on the device
                 f"{tabs}{tabs}if (allocated(ib_{n})) then\n",
-                f"{tabs}{tabs}   !$acc enter data copyin(ib_{n})\n",
+                f"{tabs}{tabs}   if (size(ib_{n}) > 0) then\n",
+                f"{tabs}{tabs}      !$acc enter data copyin(ib_{n})\n",
+                f"{tabs}{tabs}   end if\n",
                 f"{tabs}{tabs}end if\n",
             ]
         )
@@ -838,14 +863,17 @@ def create_nc_read_buffered(
             f"{t2}call nc_buf_load(ncid, '{varname}', shape({var.name}), ib_{n}, "
             f"inbuf_t0, inbuf_nt, inbuf_chunk, ib_sd({n}), ib_nfile({n}))\n"
         )
+        var_copy = [f"{tabs}call nc_buf_copy({var.name}, ib_{n}, it, ib_sd({n}), ib_nfile({n}))\n"]
+        if var.name in OPTIONAL_READS:
+            var_load = if_block(var_load, f"nc_has_var(ncid, '{varname}')", t2)
+            var_copy = if_block(var_copy, f"allocated(ib_{n})", tabs)
+        if var.name in OPTIONAL_TIME_ARRAYS:
+            # captured before the array was added: 0 means "use the fallback" (time_scalars)
+            var_load = if_block(var_load, f"nc_has_var(ncid, '{varname}')", t2)
+            var_copy = [f"{tabs}if (allocated(ib_{n})) then\n", f"  {var_copy[0]}",
+                        f"{tabs}else\n", f"{tabs}  {var.name} = 0\n", f"{tabs}end if\n"]
         load.extend(guard_fortran_lines(var_load, guards.get(var.name), t2))
-        copy.extend(
-            guard_fortran_lines(
-                [f"{tabs}call nc_buf_copy({var.name}, ib_{n}, it, ib_sd({n}), ib_nfile({n}))\n"],
-                guards.get(var.name),
-                tabs,
-            )
-        )
+        copy.extend(guard_fortran_lines(var_copy, guards.get(var.name), tabs))
 
     return [
         f"{tabs}if (io_inst%new_file .or. timestep < inbuf_t0 .or. timestep >= inbuf_t0 + inbuf_nt) then\n",
@@ -872,6 +900,13 @@ def get_dim_names(var: Variable, time: bool) -> str:
         len(dim_names) == var.dim
     ), f"(get_dim_names) Inconsistent dimensions\n name: {var.name}bounds: {var.bounds} dim: {var.dim}"
     dim_names = [f"'{hio.get_subgrid(dim)}'" for dim in dim_names]
+    # a module array declared `(:)` takes the subgrid dimensions of its allocation (inhemi:
+    # bounds%begp:bounds%endp -> 'patch'), so nsets duplicates it; other dimensions keep their names
+    alloc = getattr(var, "alloc_bounds", None)
+    if alloc and len(alloc.split(",")) == var.dim:
+        for i, b in enumerate(alloc.split(",")):
+            if hio.get_subgrid(b) in hio.SUBGRID_DIMS:
+                dim_names[i] = f"'{hio.get_subgrid(b)}'"
     # if time:
     #     dim_names.append("'time'")
 

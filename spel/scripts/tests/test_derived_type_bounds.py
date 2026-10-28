@@ -109,3 +109,22 @@ def test_bounds_text_has_only_the_needed_parentheses():
     (st,) = Parser(lines=[LineTuple(line=src, ln=0)]).parse_program().statements
     assert [text(a) for a in st.objects[0].args] == [
         "bounds%endp-bounds%begp+1", "-nlevsno+1:nlevgrnd", "a-(b-c)", "(a+b)*c", "a/(b*c)", "0:max(1,n-1)"]
+
+
+def test_module_array_takes_the_bounds_of_its_allocation():
+    """PhenologyMod's `integer, pointer :: inhemi(:)`: patch-sized, so nsets must duplicate it."""
+    mod, sd = module("phenologymod", {
+        "cropphenologyinit": """
+subroutine cropphenologyinit(bounds)
+  type(bounds_type), intent(in) :: bounds
+  integer :: work(:)
+  allocate( inhemi(bounds%begp:bounds%endp) )
+  allocate( work(bounds%begc:bounds%endc) )
+end subroutine cropphenologyinit
+"""}, gvars=[("inhemi", "integer"), ("work", "integer")])
+    mod.global_vars["inhemi"].dim, mod.global_vars["inhemi"].bounds = 1, "(:)"
+    mod.global_vars["work"].dim, mod.global_vars["work"].bounds = 1, "(:)"
+    scan_module(mod, sd, {})
+    assert mod.global_vars["inhemi"].alloc_bounds == "bounds%begp:bounds%endp"
+    assert mod.global_vars["inhemi"].bounds == "(:)"  # still deferred-shape: allocated at read time
+    assert not hasattr(mod.global_vars["work"], "alloc_bounds")  # a local of the same name is not the module's

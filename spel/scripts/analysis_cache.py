@@ -40,6 +40,7 @@ from spel.scripts.driver_callsites import (
     CallerRoutine,
     DriverSites,
     caller_sites,
+    type_bound_callee,
     call_path,
     call_statement,
     callers_of,
@@ -207,7 +208,7 @@ def driver_callees(unit_test: FunctionalUnitTest) -> dict:
     for e in rec.events:
         if not isinstance(e, CallEvent):
             continue
-        sub = mapper.callee(drv, rec, e)
+        sub = mapper.callee(drv, rec, e) or type_bound_callee(e, unit_test.module_dict, sub_dict, unit_test.type_dict)
         if sub is None or sub.library or sub.module == DRIVER_MODULE:
             continue
         callees[sub.id] = sub
@@ -324,6 +325,29 @@ def reset_active(unit_test: FunctionalUnitTest) -> None:
             inst.active = False
 
 
+def window_calls(calls: dict, logger: logging.Logger) -> dict:
+    """
+    Routines elm_drv calls at several places (`veg_cs%Summary`) keep only their calls inside
+    the window spanned by the selected routines it calls once, so that the capture brackets
+    one contiguous stretch of elm_drv. Without single-call routines, or with no call inside
+    the window, every call is kept.
+    """
+    single = [v[0].ln for v in calls.values() if len(v) == 1]
+    if not single:
+        return calls
+    lo, hi = min(single), max(single)
+    out = {}
+    for k, v in calls.items():
+        inside = [c for c in v if lo <= c.ln <= hi]
+        if len(v) > 1 and inside:
+            if len(inside) < len(v):
+                logger.info(f"{k}: capturing its call(s) at line(s) {[c.ln + 1 for c in inside]} only")
+            out[k] = inside
+        else:
+            out[k] = v
+    return out
+
+
 def call_sites(
     fut: FunctionalUnitTest, selected: dict, logger: logging.Logger
 ) -> tuple[DriverSites, list[ArgBinding]]:
@@ -338,15 +362,17 @@ def call_sites(
     if sites is None:
         sys.exit(f"Error- the cached analysis has no {DRIVER_ROUTINE} call sites; rebuild it")
     if all(s in direct for s in selected):
+        calls = window_calls({k: v for k, v in sites.calls.items() if k in selected}, logger)
+        kept = {(k, c.ln) for k, v in calls.items() for c in v}
         return (
             DriverSites(
                 module=sites.module,
                 routine=sites.routine,
                 path=sites.path,
-                calls={k: v for k, v in sites.calls.items() if k in selected},
+                calls=calls,
                 capture_lns=list(sites.capture_lns),
             ),
-            [b for b in fut.driver_bindings if b.callee in selected],
+            [b for b in fut.driver_bindings if (b.callee, b.ln) in kept],
         )
     if any(s in direct for s in selected):
         sys.exit(

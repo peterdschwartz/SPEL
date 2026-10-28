@@ -810,7 +810,7 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
         "and whole-state updates around the host-side sections of the driver. The",
         "per-type routines are in the DeepCopy*Mod group modules.",
     ], srcroot, commit)
-    L += ["  use elm_varctl, only : iulog"]
+    L += ["  use elm_varctl, only : iulog, elm_device_ready"]
     if spmd:
         L += ["  use spmdMod,    only : masterproc, iam"]
     for k in group_keys:
@@ -820,7 +820,7 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
         "  implicit none",
         "  private",
         "  public :: elm_device_init, elm_device_copyin, elm_device_update, elm_device_resident",
-        "  logical, public, save :: elm_device_resident = .false.  ! the state lives on the device",
+        "  logical, save :: elm_device_resident = .false.  ! the state lives on the device (public above)",
     ]
     if not spmd:  # unit tests: one process
         L += ["  logical, parameter :: masterproc = .true.", "  integer, parameter :: iam = 0"]
@@ -870,6 +870,9 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
         "       write(iulog,*) 'elm_device_copyin: every array of every instance is present on the device'",
         "    end if",
         "    elm_device_resident = .true.",
+        "    ! from now on the compute constructs (if(elm_device_ready)) run on the device",
+        "    elm_device_ready = .true.",
+        "    !$acc update device(elm_device_ready)",
         "#endif",
         "  end subroutine elm_device_copyin",
         "",
@@ -878,9 +881,20 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
         "    logical, intent(in) :: to_device",
         "#ifdef _OPENACC",
         "    if (.not. elm_device_resident) return",
+        "    ! the state already lives there (a transition inside a branch that was not taken, or",
+        "    ! two in a row): nothing to copy",
+        "    if (elm_device_ready .eqv. to_device) return",
     ]
     L += ["    call globals_update(to_device)"]
     L += [f"    call {k}_update(to_device)" for k in group_keys]
+    L += [
+        "    ! the state now lives where the next code runs: a host segment of elm_drv (to_device",
+        "    ! false) runs its compute constructs (if(elm_device_ready)) on the host too, so a routine",
+        "    ! the transitions treat as host code cannot leave results on the device that the next",
+        "    ! host -> device update overwrites",
+        "    elm_device_ready = to_device",
+        "    !$acc update device(elm_device_ready)",
+    ]
     L += ["#endif", "  end subroutine elm_device_update", "", f"end module {MODULE_NAME}"]
     return "\n".join(L) + "\n"
 
@@ -892,9 +906,16 @@ def _globals_module(gvars: list[GlobalVar], srcroot: Path, commit: str) -> str:
         "globals_update moves them with the rest of the state at the host/device",
         "transitions (the per-step time info changes every step).",
     ], srcroot, commit)
+    # two modules may declare variables of the same name (CanopyStateType and SoilMoistStressMod
+    # both have `perchroot`): those are imported under a module-qualified local name
+    counts: dict[str, int] = {}
+    for g in gvars:
+        counts[g.name] = counts.get(g.name, 0) + 1
+    local = {(g.module, g.name): (f"{g.name}_{g.module}" if counts[g.name] > 1 else g.name) for g in gvars}
     by_mod: dict[str, list[str]] = {}
     for g in gvars:
-        by_mod.setdefault(g.module, []).append(g.name)
+        ln = local[(g.module, g.name)]
+        by_mod.setdefault(g.module, []).append(g.name if ln == g.name else f"{ln} => {g.name}")
     for mod in sorted(by_mod):
         L += _wrap(f"  use {mod}, only : {', '.join(by_mod[mod])}")
     L += ["  implicit none", "  private", "  public :: globals_copyin, globals_update", "contains", ""]
@@ -908,15 +929,17 @@ def _globals_module(gvars: list[GlobalVar], srcroot: Path, commit: str) -> str:
 
     copy: list[str] = []
     for g in gvars:
-        copy += _guarded(guard(g), g.name, [f"!$acc update device({g.name}){tail(g)}"])
+        name = local[(g.module, g.name)]
+        copy += _guarded(guard(g), name, [f"!$acc update device({name}){tail(g)}"])
     L += ["  subroutine globals_copyin()", "#ifdef _OPENACC"] + (copy or ["    continue"])
     L += ["#endif", "  end subroutine globals_copyin", ""]
     L += ["  subroutine globals_update(to_device)", "    logical, intent(in) :: to_device", "#ifdef _OPENACC"]
     out: list[str] = []
     for g in gvars:
-        out += _guarded(guard(g), g.name, [
-            f"!$acc update device({g.name}) if(to_device){tail(g)}",
-            f"!$acc update self({g.name}) if(.not. to_device){tail(g)}",
+        name = local[(g.module, g.name)]
+        out += _guarded(guard(g), name, [
+            f"!$acc update device({name}) if(to_device){tail(g)}",
+            f"!$acc update self({name}) if(.not. to_device){tail(g)}",
         ])
     L += (out or ["    continue"]) + ["#endif", "  end subroutine globals_update", "", f"end module {GLOBALS_MODULE}"]
     return "\n".join(L) + "\n"
@@ -929,6 +952,10 @@ def generate(fut, srcroot: Path, only_instances: Optional[set[str]] = None, sour
     # components of private types are opaque to the generated code (no `use` possible)
     type_dict = {k.lower(): v for k, v in fut.type_dict.items() if k.lower() not in set(p.notes)}
     _ALIAS_CACHE.clear()
+    # allocated/associated tests of the components from the type definitions (the analysis's
+    # Variables do not record `allocatable`): without them allocatable components would be
+    # treated as inline and only updated, never copied in
+    _record_storage(type_dict, fut)
     try:
         commit = subprocess.run(
             ["git", "-C", str(srcroot), "rev-parse", "--short=10", "HEAD"], capture_output=True, text=True
@@ -938,6 +965,12 @@ def generate(fut, srcroot: Path, only_instances: Optional[set[str]] = None, sour
     groups = assign_groups(p, type_dict)
     if guards is None:
         guards = access_guards(fut, type_dict)
+        # full model: no per-component guards. They come from elm_drv's analysis, but code
+        # outside it uses components unconditionally too (the initialization's export state,
+        # lnd2atm_minimal, reads lnd2atm albd_grc, which elm_drv reads only with
+        # use_finetop_rad); a component guard only saves device memory
+        guards.notes.append(f"component guards dropped for the full model: {len(guards.components)}")
+        guards.components = {}
     _COMP_GUARDS.clear()
     _COMP_GUARDS.update(guards.components)
     p.notes_guards = {i.name: guards.instances[i.name.lower()] for i in p.instances if i.name.lower() in guards.instances}
@@ -1098,6 +1131,9 @@ NEUTRAL = {
     "endrun", "get_curr_date", "get_nstep", "is_end_curr_day", "is_end_curr_month", "get_step_size",
     "elm_device_update", "elm_device_copyin", "mpi_barrier", "shr_sys_abort",
 }
+# device routines run as host segments anyway: their kernels are not ported through
+# (dynSubgrid is left out of the first GPU port; its ZeroDWT/conservation kernels run on the host)
+HOST_SEGMENTS = {"dynsubgrid_driver"}
 
 
 def device_routines(fut) -> set[str]:
@@ -1138,38 +1174,32 @@ def device_routines(fut) -> set[str]:
 
 def _transition_edits(fut, drv: Path) -> tuple[list[Edit], list[str]]:
     """
-    Whole-state syncs at every host/device transition of elm_drv's call sequence:
-    `update self` before the first host routine after device routines, `update device`
-    before the first device routine after host routines. At the start of the step the
-    state counts as host-modified (coupler import, IO). Brute force; the refinement is
-    per-routine variable lists from the access analysis.
+    Whole-state syncs before every call of elm_drv: `update self` before each host routine,
+    `update device` before each device routine. elm_device_update does nothing when the state
+    already lives there, so only the actual host/device transitions copy, and a transition
+    inside a branch that is not taken cannot leave the next routine with the wrong copy
+    (calls in if blocks: the budgets, nstep > 0). Brute force; the refinement is per-routine
+    variable lists from the access analysis.
     """
-    sub = fut.subroutine_dict.get("elm_driver::elm_drv")
-    if sub is None:
+    if fut.subroutine_dict.get("elm_driver::elm_drv") is None:
         raise DeviceDataError("elm_driver::elm_drv not in the analysis")
     device = device_routines(fut)
-    from spel.scripts.fortran_parser import spel_ast as A
-    from spel.scripts.fortran_parser.module_spec import parse_modules, statements_with_next
+    from spel.scripts.fortran_parser.module_spec import callee_name, parse_modules, statements_with_next
 
+    # the calls and their lines come from the driver file being edited, not from the analysis:
+    # its line numbers go stale as soon as the driver is edited after `spel analyze`, and
+    # transitions placed by them land before the wrong calls
     mod = parse_modules(drv)[0]
     body = next(p for p in mod.subprograms if p.name.lower() == "elm_drv")
-    # lines where a call statement (or a one-line `if (...) call`) starts
-    starts = {st.lineno for st, _ in statements_with_next(body.body, body.end_ln)
-              if isinstance(st, (A.SubCallStatement, A.IfConstruct))}
+    calls = sorted({(st.lineno, name) for st, _ in statements_with_next(body.body, body.end_ln)
+                    if (name := callee_name(st)) is not None})
     edits: list[Edit] = []
     report: list[str] = []
     state = "host"
-    for call in sorted(sub.record.calls, key=lambda c: c.ln):
-        base = str(call.name).split("%")[-1].lower()
+    for ln, base in calls:
         if base in NEUTRAL:
             continue
-        kind = "device" if base in device else "host"
-        if kind == state:
-            continue
-        ln = call.ln
-        if ln not in starts:
-            report.append(f"  skipped transition at {ln + 1} ({call.name}): statement does not start there")
-            continue
+        kind = "device" if base in device and base not in HOST_SEGMENTS else "host"
         to_device = kind == "device"
         edits.append(
             Edit(
@@ -1177,13 +1207,13 @@ def _transition_edits(fut, drv: Path) -> tuple[list[Edit], list[str]]:
                 None,
                 [
                     "#ifdef _OPENACC",
-                    f"    call elm_device_update(to_device={'.true.' if to_device else '.false.'})  {TAG}: {'host -> device' if to_device else 'device -> host'} before {call.name}",
+                    f"    call elm_device_update(to_device={'.true.' if to_device else '.false.'})  {TAG}: {'host -> device' if to_device else 'device -> host'} before {base}",
                     "#endif",
                 ],
                 at_line=ln,
             )
         )
-        report.append(f"  {ln + 1}: {'update device' if to_device else 'update self  '} before {call.name}")
+        report.append(f"  {ln + 1}: {'update device' if to_device else 'update self  '} before {base}")
         state = kind
     return edits, report
 

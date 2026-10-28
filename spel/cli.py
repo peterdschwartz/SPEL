@@ -1300,8 +1300,8 @@ def main():
     # Parser for 'spel restore'
     restore_parser = subparsers.add_parser(
         "restore",
-        help="Remove the '!#py ' token from files changed in a unit-test "
-        "case and copy them back into E3SM_SRCROOT",
+        help="Apply the edits made in a unit-test case (against the copies 'spel create' wrote) "
+        "to its E3SM_SRCROOT files",
     )
     restore_parser.add_argument(
         "-c",

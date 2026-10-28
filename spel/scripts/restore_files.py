@@ -15,6 +15,15 @@ Files that originate from `SPEL/SourceFiles/` (netCDF-interface, decomposition
 and driver stubs written specifically for the unit-test harness) are never
 copied back -- they have no corresponding "real" counterpart in E3SM and
 blindly restoring them would corrupt the source tree.
+
+The copies also carry other harness edits (`use spel_timemod`, `private` ->
+`public`, `!$acc declare` lines for update_params_acc, ...), so a whole file is
+never copied back. `spel create` keeps a pristine copy of every case file in
+`<case>/.spel-orig/` (`snapshot_case`); `restore_case` takes the developer's
+changes as the diff between that copy and the edited file (both with the `!#py `
+tokens stripped) and applies the diff to the srcroot file with `patch`. Changed
+files are found by content, and a diff that does not apply leaves the file
+untouched and is reported.
 """
 
 from __future__ import annotations
@@ -22,7 +31,6 @@ from __future__ import annotations
 import json
 import re
 import subprocess as sp
-from collections import Counter
 from logging import Logger
 from pathlib import Path
 from typing import Optional
@@ -53,7 +61,23 @@ _UNITTEST_HEADER_RE = re.compile(r'^\s*#include\s+"unittest_defs\.h"\s*\n?$')
 GENERATED_ONLY_FILES = {
     "elm_instMod.F90",
     "duplicateMod.F90",
+    "ElmDeviceDataMod.F90",  # the unit-test variant of the device data layer (`--device-data`)
 }
+GENERATED_PREFIXES = ("DeepCopy",)  # DeepCopy*Mod: generated per case, also present in the srcroot
+ORIG_DIR = ".spel-orig"  # pristine copies of the case files as `spel create` wrote them
+
+
+def snapshot_case(case_dir: Path) -> None:
+    """Keep a pristine copy of every case .F90 file, the base of `restore_case`'s diffs."""
+    import shutil
+
+    orig = case_dir / ORIG_DIR
+    if orig.exists():
+        shutil.rmtree(orig)
+    orig.mkdir()
+    for f in case_dir.glob("*.F90"):
+        if f.is_file():
+            shutil.copy2(f, orig / f.name)
 
 
 def read_case_srcroot(case_dir: Path, logger: Logger) -> Path:
@@ -133,30 +157,36 @@ def source_files_exclude_set() -> set[str]:
     return exclude
 
 
-def find_changed_files(case_dir: Path, exclude_names: set[str]) -> list[Path]:
-    """
-    Identify files in `case_dir` that were modified by a developer after the
-    unit test was generated.
+def is_generated(name: str, exclude_names: set[str]) -> bool:
+    return name in exclude_names or name.startswith(GENERATED_PREFIXES)
 
-    All files are written/copied in a tight batch when `spel create` builds a
-    case, so the vast majority share one common mtime (to the nearest
-    second). Files touched afterwards by a developer end up with a distinct
-    mtime. We take the most common mtime as the "creation" baseline and treat
-    any `.F90` file with a different mtime as changed.
-    """
-    all_files = sorted(p for p in case_dir.glob("*.F90") if p.is_file())
-    if not all_files:
-        return []
 
-    mtimes = {p: int(p.stat().st_mtime) for p in all_files}
-    baseline, _ = Counter(mtimes.values()).most_common(1)[0]
+def changed_against_snapshot(case_dir: Path, exclude_names: set[str]) -> Optional[list[Path]]:
+    """Case files whose content differs from their `spel create` copy; None without a snapshot."""
+    orig = case_dir / ORIG_DIR
+    if not orig.is_dir():
+        return None
+    return [f for f in sorted(case_dir.glob("*.F90"))
+            if f.is_file() and not is_generated(f.name, exclude_names)
+            and (orig / f.name).is_file() and (orig / f.name).read_bytes() != f.read_bytes()]
 
-    changed = [
-        p
-        for p in all_files
-        if mtimes[p] != baseline and p.name not in exclude_names
-    ]
-    return changed
+
+def developer_patch(orig: Path, edited: Path, dest: Path) -> str:
+    """Unified diff of the developer's edits (pristine copy -> edited file), tokens stripped, aimed at dest."""
+    import difflib
+
+    a = remove_comment_token(orig.read_text()).splitlines(keepends=True)
+    b = remove_comment_token(edited.read_text()).splitlines(keepends=True)
+    return "".join(difflib.unified_diff(a, b, fromfile=str(dest), tofile=str(dest), n=3))
+
+
+def apply_patch(diff: str, dest: Path, dry_run: bool) -> tuple[bool, str]:
+    """`patch` the file with the diff (context matching absorbs the harness edits around it)."""
+    args = ["patch", "--forward", "--no-backup-if-mismatch", "-r", "-", str(dest)]
+    if dry_run:
+        args.insert(1, "--dry-run")
+    r = sp.run(args, input=diff, text=True, capture_output=True)
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
 
 
 def remove_comment_token(text: str) -> str:
@@ -195,7 +225,11 @@ def restore_case(
     shr_src = case_srcroot / "share/util/"
 
     exclude_names = source_files_exclude_set()
-    changed_files = find_changed_files(case_dir, exclude_names)
+    changed_files = changed_against_snapshot(case_dir, exclude_names)
+    if changed_files is None:
+        logger.error(f"{case_dir / ORIG_DIR} not found: the case predates restore snapshots. Whole-file "
+                     "copies would write the harness edits into the srcroot; re-run 'spel create' first.")
+        return []
 
     if not changed_files:
         logger.info(f"No modified files found in unit-test case '{casename}'")
@@ -236,21 +270,39 @@ def restore_case(
     for src, dest in plan:
         logger.info(f"  {src.name}  ->  {dest}")
 
+    # every patch must apply before anything is written
+    patches, failed = [], []
+    for src, dest in plan:
+        diff = developer_patch(case_dir / ORIG_DIR / src.name, src, dest)
+        if not diff:
+            continue
+        ok, out = apply_patch(diff, dest, dry_run=True)
+        (patches if ok else failed).append((src, dest, diff, out))
+    for src, dest, diff, out in failed:
+        logger.error(f"{src.name}: the edits do not apply to {dest}:\n{out}")
+    if failed:
+        logger.error("Nothing was restored; resolve the conflicts (the srcroot file changed since 'spel create'?)")
+        return []
+    for src, dest, diff, _ in patches:
+        n = sum(1 for l in diff.splitlines() if l[:1] in "+-" and not l.startswith(("+++", "---")))
+        logger.info(f"  {src.name}: {n} changed lines")
     if dry_run:
-        return [dest for _, dest in plan]
+        return [dest for _, dest, _, _ in patches]
 
     if not yes:
-        answer = input(f"Copy {len(plan)} file(s) back into {case_srcroot}? [y/N] ")
+        answer = input(f"Apply the edits of {len(patches)} file(s) to {case_srcroot}? [y/N] ")
         if answer.strip().lower() not in ("y", "yes"):
-            logger.info("Aborted -- no files were copied")
+            logger.info("Aborted -- nothing was written")
             return []
 
     restored: list[Path] = []
-    for src, dest in plan:
-        restored_text = remove_comment_token(src.read_text())
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(restored_text)
+    for src, dest, diff, _ in patches:
+        ok, out = apply_patch(diff, dest, dry_run=False)
+        if not ok:  # (checked above; a concurrent edit)
+            logger.error(f"{src.name}: {out}")
+            continue
         restored.append(dest)
-        logger.info(f"Restored {src.name} -> {dest}")
-
+        # the srcroot now holds these edits: the next restore diffs against this state
+        (case_dir / ORIG_DIR / src.name).write_bytes(src.read_bytes())
+        logger.info(f"Restored the edits of {src.name} -> {dest}")
     return restored

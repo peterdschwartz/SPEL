@@ -6,6 +6,7 @@ exit/cycle/return, select case, nullify, read, and function-like CPP macros.
 import pytest
 
 from spel.scripts.fortran_parser.spel_ast import (
+    DoWhile,
     CycleStatement,
     DoLoop,
     ExitStatement,
@@ -85,6 +86,21 @@ def test_named_do_loop(end):
     (stmt,) = loop.body.statements
     assert isinstance(stmt, IfConstruct)
     assert isinstance(stmt.consequence.statements[0], ExitStatement)
+
+
+@pytest.mark.parametrize("head,end", [("ITERATION : do while", "end do ITERATION"), ("do while", "enddo")])
+def test_do_while_end_line(head, end):
+    # end_ln is the `end do` line (acc-sync spans the loop with it)
+    txt = f"""
+  {head} (iter <= itmax .and. fncopy > 0)
+     iter = iter + 1
+
+     fncopy = fncopy - 1
+  {end}
+"""
+    loop = only_stmt(txt)
+    assert isinstance(loop, DoWhile)
+    assert (loop.lineno, loop.end_ln) == (1, 5)
 
 
 SELECT = """
@@ -353,3 +369,45 @@ end subroutine s"""
     ifs = [st for st in body if type(st).__name__ == "IfConstruct"]
     assert [(st.lineno, st.end_ln, st.construct_end_ln) for st in ifs] == [(3, 5, 9), (10, -1, -1)]
 
+
+
+def test_routine_contains_line():
+    from spel.scripts.fortran_parser.tests.test_Parser import parse_statements
+
+    src = """subroutine outer(n)
+  integer :: n
+  n = 1
+  call inner(n)
+contains
+  subroutine inner(m)
+    integer :: m
+    m = m + 1
+  end subroutine inner
+end subroutine outer"""
+    sub = parse_statements(src).statements[0]
+    assert sub.contains_ln == 4 and sub.end_ln == 9
+    assert sub.contains[0].contains_ln == -1
+
+
+def test_statements_with_next_if_branches():
+    from spel.scripts.fortran_parser.module_spec import statements_with_next
+    from spel.scripts.fortran_parser.tests.test_Parser import parse_statements
+
+    src = """subroutine s(a, b)
+  logical :: a
+  integer :: b
+  if (a) then
+     b = 1
+  else
+     b = 2
+     call foo(b)
+  end if
+  if (a) b = 3
+  b = 4
+end subroutine s"""
+    sub = parse_statements(src).statements[0]
+    nxt = {st.lineno: n for st, n in statements_with_next(sub.body, sub.end_ln)}
+    # last statement of the then-branch: before `else`; of the else-branch: before `end if`
+    assert nxt[4] == 5 and nxt[7] == 8
+    assert nxt[3] == 9           # after the whole construct
+    assert nxt[9] == 10          # one-line if statement

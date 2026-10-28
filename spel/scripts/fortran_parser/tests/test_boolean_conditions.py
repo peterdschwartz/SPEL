@@ -212,3 +212,13 @@ def test_minimize_absorbs_and_merges():
         vals = dict(zip(keys, bits))
         assert _evaluate(cond, vals) == _evaluate(m, vals)
     assert m.to_fortran().count(".and.") == 2
+
+
+def test_minimize_does_not_depend_on_the_input_order():
+    # the device data layer's guards were regenerated with their terms in a different order
+    from spel.scripts.fortran_parser.boolen_expression import AllOf, AnyOf, Expectation, minimize
+
+    lch4, vert, fates, cn = (Expectation(v, "True") for v in ("use_lch4", "use_vertsoilc", "use_fates", "use_cn"))
+    a = AnyOf((lch4, AllOf((vert, fates)), AllOf((vert, cn))))
+    b = AnyOf((AllOf((cn, vert)), lch4, AllOf((fates, vert))))
+    assert minimize(a).to_fortran() == minimize(b).to_fortran()

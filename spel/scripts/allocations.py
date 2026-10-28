@@ -38,7 +38,7 @@ INTRINSIC = {"integer", "real", "logical", "character", "complex", "double", "do
 
 @dataclass
 class Allocation:
-    owner: str  # type name
+    owner: str  # type name ("" for a variable of the scanned module itself)
     path: str  # component path in the owner: "leaf", "core%leaf"
     bounds: str  # "begp:endp,1:nlevdecomp"
     sub_id: str
@@ -111,6 +111,12 @@ def declared_types(tree) -> dict[str, str]:
     return out
 
 
+def declared_names(tree) -> set[str]:
+    """Every name the routine declares."""
+    return {e.token.literal.lower() for st in tree.body.statements if isinstance(st, VariableDecl)
+            for e in st.entities}
+
+
 def owners(names: list[str], base_type: Optional[str], types: dict[str, DerivedType]) -> list[tuple[str, str]]:
     """(type, component path) for every type on the designator `names` whose type is known."""
     out = []
@@ -129,6 +135,7 @@ def scan_routine(sub_id: str, tree, types: dict[str, DerivedType], module_types:
     allocs: list[Allocation] = []
     ptrs: list[PointerInit] = []
     local = declared_types(tree)
+    local_names = declared_names(tree)
 
     def base_type(name: str) -> Optional[str]:
         return local.get(name) or module_types.get(name)
@@ -144,6 +151,12 @@ def scan_routine(sub_id: str, tree, types: dict[str, DerivedType], module_types:
         if isinstance(st, AllocateStatement) and not st.is_deallocate:
             for obj in st.objects:
                 names, comps = path_of(obj)
+                if names and len(names) == 1 and comps[-1][1] and names[0] in module_types \
+                        and names[0] not in local_names:
+                    # an array of the module itself (`allocate(inhemi(bounds%begp:bounds%endp))`)
+                    bounds = ",".join(text(a) for a in comps[-1][1])
+                    allocs.append(Allocation("", names[0], bounds, sub_id, st.lineno))
+                    continue
                 if not names or len(names) < 2 or not comps[-1][1]:
                     continue
                 bounds = ",".join(text(a) for a in comps[-1][1])
@@ -179,6 +192,14 @@ def scan_module(mod, sub_dict: dict, types: dict[str, DerivedType]):
         a, p = scan_routine(sub_id, tree, types, module_types)
         allocs += a
         ptrs += p
+    # the module's own deferred-shape arrays record the bounds of their allocation (the last one
+    # wins) in `alloc_bounds`; `bounds` stays the declaration's (they are still allocated at
+    # read time). The unit-test IO names their subgrid dimension from it, so `nsets` duplicates
+    # patch-sized module arrays such as PhenologyMod's inhemi.
+    for a in allocs:
+        v = mod.global_vars.get(a.path) if not a.owner else None
+        if v is not None and getattr(v, "dim", 0) == rank(a.bounds):
+            v.alloc_bounds = a.bounds
     return allocs, ptrs
 
 
