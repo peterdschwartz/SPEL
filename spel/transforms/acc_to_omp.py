@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional
 
 from spel.scripts.fortran_parser.scope_walk import (
+    AssignEvent,
     CallEvent,
     FunctionRef,
     LoopInfo,
@@ -303,6 +304,60 @@ def _atomic_targets(maps: AccessMaps, atomics: list[AtomicRegion], lo: int, hi: 
     return targets
 
 
+INTRINSIC_TYPES = {"integer", "real", "logical", "character", "complex", "double precision", "doubleprecision"}
+
+
+def _integer_sum(rec, var: str, lo: int, hi: int) -> bool:
+    """
+    `var` is an integer scalar whose only uses in lines lo..hi are `var = var + expr` (expr
+    without var): a sum reduction, exact in any order (counts of elements with a property).
+    """
+    from spel.scripts.fortran_parser import spel_ast as A
+
+    decl = rec.declaration(var)
+    if decl is None or decl.dim or not decl.type.lower().startswith("integer"):
+        return False
+    sums = set()
+    for ev in rec.events:
+        if isinstance(ev, AssignEvent) and lo <= ev.ln <= hi and ev.lhs.path == var:
+            e = ev.rhs
+            if not (isinstance(e, A.InfixExpression) and e.operator.strip() == "+"):
+                return False
+            sides = [x for x in (e.left_expr, e.right_expr) if isinstance(x, A.Identifier) and x.value.lower() == var]
+            others = [r for r in ev.reads if r.path == var]
+            if len(sides) != 1 or len(others) != 1:
+                return False
+            sums.add(ev.ln)
+    uses = [a for a in rec.accesses() if lo <= a.ln <= hi and a.path == var]
+    return bool(sums) and all(a.ln in sums for a in uses)
+
+
+def _integer_max(rec, var: str, lo: int, hi: int) -> bool:
+    """
+    `var` is an integer scalar whose only uses in lines lo..hi are `var = max(var, expr)`
+    (expr without var): a max reduction, exact in any order (spel defer-checks records the
+    last element where a check held this way).
+    """
+    from spel.scripts.fortran_parser import spel_ast as A
+
+    decl = rec.declaration(var)
+    if decl is None or decl.dim or not decl.type.lower().startswith("integer"):
+        return False
+    maxes = set()
+    for ev in rec.events:
+        if isinstance(ev, AssignEvent) and lo <= ev.ln <= hi and ev.lhs.path == var:
+            e = ev.rhs
+            if not (isinstance(e, A.FuncExpression) and str(e.function).lower() == "max" and len(e.args) == 2):
+                return False
+            own = [a for a in e.args if isinstance(a, A.Identifier) and a.value.lower() == var]
+            others = [r for r in ev.reads if r.path == var]
+            if len(own) != 1 or len(others) != 1:
+                return False
+            maxes.add(ev.ln)
+    uses = [a for a in rec.accesses() if lo <= a.ln <= hi and a.path == var]
+    return bool(maxes) and all(a.ln in maxes for a in uses)
+
+
 def plan_compute_loop(
     sub,
     directive: AccDirective,
@@ -362,6 +417,7 @@ def plan_compute_loop(
         plan.if_clause = c.args
 
     inside, after = _region_accesses(maps, lo, hi)
+    call_lines = {c.ln for c in rec.calls}
     atomic = _atomic_targets(maps, atomics or [], lo, hi)
     for var, (kind, accesses) in sorted(inside.items(), key=lambda kv: kv[1][1][0]):
         if var in par_idx or var in red_vars:
@@ -373,6 +429,7 @@ def plan_compute_loop(
         # writes of the whole variable, not only of derived-type components
         whole = any("w" in s and path == var for _, s, path in accesses)
         is_array = decl is not None and decl.dim > 0
+        derived = decl is not None and decl.type.lower().split("(")[0].strip() not in INTRINSIC_TYPES
         if not written:
             if var in acc_private or var in acc_first:
                 plan.unneeded.append(var)
@@ -381,6 +438,16 @@ def plan_compute_loop(
             continue  # shared, updated atomically
         if var in acc_shared and var not in acc_private and not is_array:
             note("warn", f"scalar '{var}' is written but shared (OpenACC data clause): race unless atomic")
+            continue
+        if kind == "local" and not is_array and var not in acc_private and var not in acc_first \
+                and _integer_sum(rec, var, lo, hi):
+            plan.reductions.append(("+", [var]))   # an integer count: exact in any order
+            plan.added.append(var)
+            continue
+        if kind == "local" and not is_array and var not in acc_private and var not in acc_first \
+                and _integer_max(rec, var, lo, hi):
+            plan.reductions.append(("max", [var]))  # last element recorded: exact in any order
+            plan.added.append(var)
             continue
         if kind == "local" and (not is_array or var in acc_private or var in acc_first):
             first_ln, first_status, _ = accesses[0]
@@ -408,7 +475,10 @@ def plan_compute_loop(
         elif var in acc_private:
             plan.private.append(var)
             note("warn", f"{kind} '{var}' is privatized (OpenACC private)")
-        elif whole:
+        elif whole and not (derived and all(ln in call_lines for ln, st, path in accesses if "w" in st and path == var)):
+            # (a derived-type object passed whole to a callee: the callee's component writes are
+            # mapped as component paths; a whole-object status on a call line only repeats the
+            # dummy's intent when the callee does not touch it)
             note("warn", f"{kind} scalar '{var}' is written in the parallel loop (race)")
     for var in acc_private + acc_first:
         if var not in inside and var not in plan.unneeded:

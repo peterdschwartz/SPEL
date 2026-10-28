@@ -709,6 +709,7 @@ class DoWhile(Statement):
         self.token = tok
         self.condition = cond
         self.body: BlockStatement = body
+        self.end_ln: int = -1  # the `end do` line
 
     def statement_node(self) -> None:
         pass
@@ -907,7 +908,8 @@ class IfConstruct(Statement):
         self.consequence: BlockStatement = consequence
         self.else_ifs: list[ElseIf] = []
         self.else_: Optional[Else] = None
-        self.end_ln: int = -1
+        self.end_ln: int = -1  # end of the first branch (the `else if`/`else`/`end if` line)
+        self.construct_end_ln: int = -1  # the `end if` line (-1 for a one-line if statement)
 
     def statement_node(self) -> None:
         pass
@@ -1836,6 +1838,7 @@ class SubroutineDefinitionConstruct(Statement):
         self.body = body
         self.contains = contains
         self.end_ln: int = -1
+        self.contains_ln: int = -1  # the `contains` of internal subprograms (-1: none)
 
     def statement_node(self) -> None:
         pass
@@ -1984,13 +1987,21 @@ class TypeDef(Statement):
 
 class ProcedureStatement(Statement):
     def __init__(
-        self, tok: Token, attr_spec: Optional[AttributeSpec], name: str, alias: str
+        self,
+        tok: Token,
+        attr_spec: Optional[AttributeSpec],
+        name: str,
+        alias: str,
+        names: Optional[list[str]] = None,
     ):
         self.token = tok
         self.attrs = attr_spec
         # name => alias
         self.name = name
         self.alias = alias
+        # every name of a list (`module procedure a, b`, `procedure(i), pointer :: p, q`);
+        # `name` is the first
+        self.names: list[str] = names if names is not None else [name]
 
     def token_literal(self) -> str:
         return self.token.literal
@@ -2001,7 +2012,7 @@ class ProcedureStatement(Statement):
     def __str__(self) -> str:
         attrs = f",{self.attrs}" if self.attrs else ""
         alias = f"=> {self.alias}" if self.alias else ""
-        return f"procedure {attrs} :: {self.name} {alias}"
+        return f"procedure {attrs} :: {', '.join(self.names)} {alias}"
 
 
 class UseStatement(Statement):

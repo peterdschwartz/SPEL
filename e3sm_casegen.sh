@@ -86,7 +86,8 @@ Usage: $(basename "$0") [options]
                        Any t-lr25 case takes the t-lr25 domain file and MOSART
                        input from that directory when \$DIN_LOC_ROOT lacks them
   --finidat FILE       finidat in user_nl_elm (e.g. a spun-up restart)
-  --compact            apply the SPEL compact layout at build time: `spel compact rewrite
+  --compact            apply the SPEL compact layout at build time (COMPACT_ARGS env = extra
+                       options, e.g. "--roles"): `spel compact rewrite
                        --srcroot SRC --reanalyze -o CASE/SourceMods/src.elm` (adds .compact
                        to an --auto-name case name)
   --remove-zero-weight-urban
@@ -353,7 +354,8 @@ if [ "$keep" -eq 0 ] || [ ! -d "$casedir" ]; then
    if [ "$compact" -eq 1 ]; then
       # the compact layout is a generated transform applied per case, not kept in the sources
       command -v spel >/dev/null || { echo "--compact needs spel on PATH" >&2; exit 1; }
-      spel compact rewrite --srcroot "$src_path" --reanalyze -o "$casedir/SourceMods/src.elm" \
+      # COMPACT_ARGS (env): extra `spel compact rewrite` options, e.g. "--roles --type ..."
+      spel compact rewrite --srcroot "$src_path" --reanalyze -o "$casedir/SourceMods/src.elm" ${COMPACT_ARGS:-} \
          || { echo "spel compact rewrite failed" >&2; exit 1; }
    fi
 fi

@@ -11,6 +11,7 @@ elm_driver is parsed read-only, outside the unit test's module dictionary
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 from bisect import bisect_left
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +73,20 @@ class DriverCall:
     callee: str
     ln: int
     bounds: Optional[str]
+    # conditions of the enclosing ifs (CallGuard), outermost first
+    guards: tuple = ()
+
+
+@dataclass(frozen=True)
+class CallGuard:
+    """
+    An `if` condition around a driver call: Fortran text (`.not.(...)` for an
+    else branch) and the variable names it reads. `text` is None for a
+    condition that isn't a plain if (select case).
+    """
+
+    text: Optional[str]
+    names: frozenset
 
 
 @dataclass
@@ -188,6 +203,7 @@ def driver_callsites(
     roots: Iterable[Subroutine],
     sub_dict: dict[str, Subroutine],
     mod_dict: dict[str, FortranModule],
+    type_dict: Optional[dict] = None,
 ) -> tuple[dict[str, AccessDict], list[ArgBinding], DriverSites]:
     """
     Global accesses of each root routine at its elm_drv call sites,
@@ -200,8 +216,15 @@ def driver_callsites(
     scopes = ModuleScopes({**mod_dict, DRIVER_MODULE: drv_mod}, sub_dict)
     mapped = {k: s for k, s in sub_dict.items() if s.record_access is not None}
     mapper = AccessMapper(mapped, scopes)
-    dmaps = mapper.maps(drv)
     rec = drv.walk_syntax_tree(scopes)
+    # type-bound calls (`veg_cs%Summary`): the mapper resolves them through the call
+    # descriptions, which elm_drv (outside the unit test) doesn't have
+    for e in rec.events:
+        if isinstance(e, CallEvent) and e.ln not in drv.sub_call_desc:
+            bound = type_bound_callee(e, mod_dict, sub_dict, type_dict)
+            if bound is not None:
+                drv.sub_call_desc[e.ln] = SimpleNamespace(fn=bound.id)
+    dmaps = mapper.maps(drv)
 
     call_lines: dict[str, set[int]] = {}
     capture_lns: set[int] = set()
@@ -211,7 +234,7 @@ def driver_callsites(
         ):
             capture_lns.add(e.ln)
         if isinstance(e, (CallEvent, FunctionRef)):
-            callee = mapper.callee(drv, rec, e)
+            callee = mapper.callee(drv, rec, e) or type_bound_callee(e, mod_dict, sub_dict, type_dict)
             if callee is not None:
                 call_lines.setdefault(callee.id, set()).add(e.ln)
     access = {
@@ -226,6 +249,8 @@ def driver_callsites(
     def unmarked(ln: int) -> int:
         return ln - bisect_left(markers, ln)
 
+    guards = call_guards(rec)
+
     sites = DriverSites(
         module=DRIVER_MODULE,
         routine=DRIVER_ROUTINE,
@@ -236,7 +261,9 @@ def driver_callsites(
         ),
         calls={
             root.id: [
-                DriverCall(root.id, unmarked(ln), bounds_actual(root, dmaps.bindings, ln))
+                DriverCall(
+                    root.id, unmarked(ln), bounds_actual(root, dmaps.bindings, ln), guards.get(ln, ())
+                )
                 for ln in sorted(call_lines[root.id])
             ]
             for root in roots
@@ -245,6 +272,51 @@ def driver_callsites(
         capture_lns=sorted(unmarked(ln) for ln in capture_lns),
     )
     return access, dmaps.bindings, sites
+
+
+def call_guards(rec) -> dict[int, tuple[CallGuard, ...]]:
+    """Line -> the enclosing if conditions of the statement there (from the parse tree)."""
+    from spel.scripts.db_export.trace import expr_names
+    from spel.scripts.registrations import line_guards
+
+    tree = getattr(rec, "tree", None)
+    if tree is None:
+        return {}
+    out: dict[int, tuple[CallGuard, ...]] = {}
+    for ln, guards in line_guards(tree.body).items():
+        items = []
+        for g in guards:
+            if g.node is None:
+                items.append(CallGuard(None, frozenset()))
+                continue
+            text = str(g.node)
+            items.append(
+                CallGuard(f".not.({text})" if g.negated else text, frozenset(expr_names(g.node)))
+            )
+        out[ln] = tuple(items)
+    return out
+
+
+def type_bound_callee(
+    event, mod_dict: dict[str, FortranModule], sub_dict: dict[str, Subroutine],
+    type_dict: Optional[dict] = None,
+) -> Optional[Subroutine]:
+    """
+    The routine bound to `obj%name` when `obj` is a module variable (`veg_cs%Summary`
+    in elm_drv) declared in exactly one module with a type that binds `name`.
+    """
+    obj = getattr(event, "passed_object", None)
+    if not type_dict or not isinstance(event, CallEvent) or not obj or "%" in obj:
+        return None
+    name = event.name.rsplit("%", 1)[-1].lower()
+    found = [m.global_vars[obj.lower()] for m in mod_dict.values() if obj.lower() in m.global_vars]
+    if len(found) != 1:
+        return None
+    dtype = type_dict.get(found[0].type.lower())
+    if dtype is None:
+        return None
+    target = dtype.procedures.get(name)
+    return sub_dict.get(target) if target else None
 
 
 def call_statement(sites: DriverSites, call: DriverCall) -> str:

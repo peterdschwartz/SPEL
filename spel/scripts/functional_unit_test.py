@@ -30,6 +30,7 @@ from spel.scripts.edit_files import header_types, macros
 from spel.scripts.fortran_modules import (
     FortranModule,
     declaration_source,
+    get_filename_from_module,
     get_module_name_from_file,
     imported_from,
 )
@@ -389,6 +390,60 @@ class FunctionalUnitTest:
             out.append(line)
         return out, used
 
+    def _routine_use(self, sub: Subroutine, instance_to_type) -> str:
+        """
+        The use statement main.F90 needs to call `sub` as elm_drv does: the routine, or for a
+        type-bound call (`call veg_cs%Summary(...)`) the object it is bound to.
+        """
+        first = self._first_driver_call(sub)
+        if first is not None:
+            path, ln = first
+            text = path.read_text(errors="replace").splitlines()[ln]
+            m = re.match(r"^\s*call\s+(\w+)\s*%", text, re.I)
+            if m:
+                obj = m.group(1).lower()
+                if obj in instance_to_type:
+                    inst = self.type_dict[instance_to_type[obj]].instances[obj]
+                    return f"use {inst.declaration}, only : {obj}\n"
+                mod = next((m_ for m_, fm in self.module_dict.items() if obj in fm.global_vars), None)
+                if mod is not None:
+                    return f"use {mod}, only : {obj}\n"
+        return f"use {sub.module}, only : {sub.name}\n"
+
+    def _driver_guard(self, sub: Subroutine) -> Optional[tuple[str, set[str]]]:
+        """
+        The condition elm_drv tests before its call to `sub` when it depends on the
+        time step through elm_drv's scalar arguments (`if (use_cn .and. doalb)`): the
+        unit test must skip the call on the steps ELM skips it. Conditions on namelist
+        variables alone hold for the whole capture and are left out; a condition on
+        anything else main.F90 can't evaluate (clump filters) is left out with a warning.
+        """
+        sites = getattr(self, "driver_sites", None)
+        found = sites.calls.get(sub.id, []) if sites is not None else []
+        if not found:
+            return None
+        first = min(found, key=lambda c: c.ln)
+        dummies = self._driver_scalar_dummies()
+        known = set(dummies) | {
+            name
+            for fm in self.module_dict.values()
+            for name, var in fm.global_vars.items()
+            if not var.parameter
+        }
+        kept, names = [], set()
+        for guard in getattr(first, "guards", ()):
+            if guard.text is None or not guard.names & set(dummies):
+                continue
+            if guard.names - known:
+                self.logger.warning(
+                    "%s: elm_drv's guard `%s` reads %s, which the unit test lacks; calling it unguarded",
+                    sub.name, guard.text, sorted(guard.names - known),
+                )
+                continue
+            kept.append(guard.text)
+            names |= guard.names
+        return (" .and. ".join(kept), names) if kept else None
+
     def _first_driver_call(self, sub: Subroutine) -> Optional[tuple[Path, int]]:
         """(driver file, line) of elm_drv's first call to `sub`, if recorded."""
         sites = getattr(self, "driver_sites", None)
@@ -396,6 +451,22 @@ class FunctionalUnitTest:
         if not found:
             return None
         return Path(cfg.E3SM_SRCROOT) / sites.path, min(c.ln for c in found)
+
+    def _capture_globals(self, names) -> list[str]:
+        """
+        Use statements for the module variables among `names` (from a parsed
+        condition); they are added to the captured constants so the unit test
+        evaluates the condition as ELM did.
+        """
+        mods: list[str] = []
+        for name in sorted(names):
+            for mod, fm in self.module_dict.items():
+                var = fm.global_vars.get(name)
+                if var is not None and not var.parameter:
+                    self.active_global_vars.setdefault(name, var)
+                    mods.append(f"use {mod}, only : {name}\n")
+                    break
+        return mods
 
     def _capture_condition_globals(self, block: list[str]) -> list[str]:
         """
@@ -444,8 +515,16 @@ class FunctionalUnitTest:
                 idx, call_string = next(
                     (i, el) for i, el in enumerate(mod_lines) if el.ln == call_ln
                 )
-                calls.append(call_string.line)
                 args = getArguments(call_string.line)
+                guard = self._driver_guard(sub)
+                if guard is None:
+                    calls.append(call_string.line)
+                else:
+                    cond, names = guard
+                    calls.extend([f"if ({cond}) then\n", call_string.line, "end if\n"])
+                    mods_to_add.extend(
+                        m for m in self._capture_globals(names) if m not in mods_to_add
+                    )
             else:
                 cmd = (
                     f'grep -rin -E "^[[:space:]]*(call[[:space:]]* {name})\\b" '
@@ -713,7 +792,7 @@ class FunctionalUnitTest:
             lines = iofile.readlines()
 
         modules_to_add = [
-            f"use {subroutine.module}, only : {subroutine.name}\n"
+            self._routine_use(subroutine, instance_to_type)
             for subroutine in self.primary_subroutines.values()
         ]
 
@@ -782,11 +861,11 @@ class FunctionalUnitTest:
             self.type_dict
         )
 
-        # types rewritten by `spel compact rewrite`: pack/unpack around compute
-        from spel.transforms.compact.unit_test import compact_instances, hook_lines
+        # sources rewritten by `spel compact rewrite`: pack/unpack the compact fields
+        # around compute (SpelCompactMod, written by UnitTestforELM with the file list)
+        from spel.transforms.compact.unit_test import hook_lines
 
-        compact = compact_instances(self.type_dict, active_instances)
-        for token, hook in hook_lines(compact).items():
+        for token, hook in hook_lines(getattr(self, "compact_fields", [])).items():
             lines = insert_at_token(lines, token, hook)
 
         # time-step scalars: copied from the per-step inputs after every read
@@ -815,10 +894,28 @@ class FunctionalUnitTest:
             [f"{tabs}call write_elmtypes({out_arg_str})\n"],
         )
 
-        lines = insert_at_token(lines, "!#ACC_COPYIN", ["   call spel_acc_enter_data()\n"])
-        lines = insert_at_token(
-            lines, "!#ACC_UPDATE_HOST", ["       call spel_acc_update_host()\n"]
-        )
+        if cfg.options.device_data:
+            # the generated device data layer (spel device-data) instead of SpelAccDataMod's
+            # deep copy; the harness still builds the filters (spel_acc_update_filters)
+            lines = insert_at_token(
+                lines, "!#USE_START", ["use ElmDeviceDataMod, only: elm_device_copyin, elm_device_update\n",
+                                       "use elm_varctl, only: elm_device_ready\n"]
+            )
+            lines = insert_at_token(lines, "!#ACC_COPYIN", ["   call elm_device_copyin()\n"])
+            lines = insert_at_token(
+                lines, "!#ACC_UPDATE_HOST", ["       call elm_device_update(to_device=.false.)\n"]
+            )
+            lines = insert_at_token(
+                lines, "!#ACC_STEP_INPUTS", ["             call elm_device_update(to_device=.false.)\n",
+                                             "             ! the routines under test run on the device (the update\n",
+                                             "             ! above marked the state as host-side)\n",
+                                             "             elm_device_ready = .true.\n"]
+            )
+        else:
+            lines = insert_at_token(lines, "!#ACC_COPYIN", ["   call spel_acc_enter_data()\n"])
+            lines = insert_at_token(
+                lines, "!#ACC_UPDATE_HOST", ["       call spel_acc_update_host()\n"]
+            )
 
         with open(self.case_dir / "main.F90", "w") as ofile:
             ofile.writelines(lines)
@@ -940,7 +1037,7 @@ class FunctionalUnitTest:
                 [v for v in variables.values() if v.name not in pointer_vars], body_tabs
             )
         )
-        # Module pointers can't be in a declare directive: copy them in instead.
+        # Module pointers: a declare (if any) holds only the pointer; copy the target in.
         for name in sorted(pointer_vars):
             lines.extend(
                 [
@@ -1075,10 +1172,10 @@ def get_delta_from_dim(dim, delta):
     return newdim
 
 
-# ELM sources compiled without OpenACC in nvfortran OpenACC builds, as in the ELM build
-# (case Depends.*.nvidia.cmake): with -acc, SnowSnicarMod gives wrong snow albedos even on
-# one multicore thread, with or without its directives. Their routines are called from host code.
-NOACC_FILES = ["SnowSnicarMod.F90", "SurfaceAlbedoMod.F90"]
+# ELM sources compiled without OpenACC in nvfortran OpenACC builds. SnowSnicarMod and
+# SurfaceAlbedoMod used to be here (wrong snow albedos with -acc: SNICAR_AD_RT set its band
+# albedos inside `#ifndef _OPENACC`); both are ported since 2026-10-26.
+NOACC_FILES: list[str] = []
 
 
 def noacc_block(files: list[str]) -> str:
@@ -2481,63 +2578,41 @@ def ensure_acc_declares(variables, case_dir: Path) -> tuple[set[str], set[str]]:
     """
     Add ``!$acc declare create`` to the case copies of the modules declaring
     ``variables`` so that ``update device`` and ``acc routine`` references work.
-    Returns the names of module pointer variables, which cannot be declared,
-    and of allocatable module variables.
+    Returns the names of module pointer variables (their targets must be copied in,
+    declared or not) and of allocatable module variables. Attributes and existing
+    declares come from the parsed module (module_spec), not from the text.
     """
-    mod_files: dict[str, Path] = {}
-    for path in Path(case_dir).glob("*.F90"):
-        with open(path) as ifile:
-            for line in ifile:
-                m = re.match(r"\s*module\s+(\w+)\s*(!.*)?$", line, re.IGNORECASE)
-                if m and m.group(1).lower() != "procedure":
-                    mod_files[m.group(1).lower()] = path
-                    break
+    from spel.scripts.fortran_parser.module_spec import ModuleSpecError, module_spec
 
+    case_dir = Path(case_dir)
     to_declare: dict[Path, list[str]] = {}
     pointer_vars: set[str] = set()
     alloc_vars: set[str] = set()
     for var in variables:
-        path = mod_files.get(var.declaration.lower())
-        if path is None:
+        path = case_dir / Path(get_filename_from_module(var.declaration) or "").name
+        if not path.is_file():
             continue
-        text = path.read_text()
-        name = re.escape(var.name)
-        decl = re.search(
-            rf"^\s*(?!.*\bparameter\b)([^!\n]*)::[^!\n]*\b{name}\b",
-            text,
-            re.IGNORECASE | re.MULTILINE,
-        )
-        attrs = decl.group(1) if decl else ""
-        if re.search(r"\ballocatable\b", attrs, re.IGNORECASE):
+        try:
+            spec = module_spec(path)
+        except ModuleSpecError as exc:
+            logging.getLogger("SPEL").warning(f"ensure_acc_declares: {exc}; {var.name} left as is")
+            continue
+        info = spec.variables.get(var.name.lower())
+        if info is None or "parameter" in info.attrs:
+            continue
+        if "allocatable" in info.attrs:
             alloc_vars.add(var.name)
-        declared = re.search(
-            rf"^\s*!\$acc\s+declare\s+\w+\s*\([^)]*\b{name}\b",
-            text,
-            re.IGNORECASE | re.MULTILINE,
-        )
-        if declared:
-            continue
-        if re.search(r"\bpointer\b", attrs, re.IGNORECASE):
+        if "pointer" in info.attrs:
+            # a declare gives device storage for the pointer only, not its target
             pointer_vars.add(var.name)
-        else:
+        elif var.name.lower() not in spec.declared:
             to_declare.setdefault(path, []).append(var.name)
 
     for path, names in to_declare.items():
+        spec = module_spec(path)
+        # the end of the specification part: the module's contains (or end module)
+        idx = spec.contains_ln if spec.contains_ln is not None else spec.end_ln
         lines = path.read_text().splitlines(keepends=True)
-        # The first module-level contains/end module ends the specification
-        # part; skip the contains of type-bound procedures.
-        in_type = False
-        idx = len(lines)
-        for i, line in enumerate(lines):
-            if re.match(r"\s*end\s*type\b", line, re.IGNORECASE):
-                in_type = False
-            elif re.match(r"\s*type\s*(,[^:]*)?(::)?\s*\w+\s*(!.*)?$", line, re.IGNORECASE):
-                in_type = True
-            elif not in_type and re.match(
-                r"\s*(contains|end\s+module)\b", line, re.IGNORECASE
-            ):
-                idx = i
-                break
         new = ["  ! Added by SPEL for OpenACC update_params_acc\n"]
         new.extend(f"  !$acc declare create({n})\n" for n in sorted(names))
         lines[idx:idx] = new

@@ -23,6 +23,7 @@ for a single ELM build and run (`spel validate`).
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -173,7 +174,8 @@ def _check_call_sites(lines: list[str], sites: DriverSites) -> tuple[int, int, s
     for call in calls:
         name = call.callee.split("::")[-1]
         line = lines[call.ln] if call.ln < len(lines) else ""
-        if not re.match(rf"^\s*call\s+{name}\b", strip_comment(line), re.I):
+        # a type-bound call (`call col_ns%Summary`) names its binding, not the routine
+        if not re.match(rf"^\s*call\s+({name}\b|[\w%]+%\w+\s*\()", strip_comment(line), re.I):
             raise InstrumentError(
                 f"{sites.path}:{call.ln + 1} is no longer `call {name}`; "
                 "it changed since `spel create` -- re-run create"
@@ -181,10 +183,13 @@ def _check_call_sites(lines: list[str], sites: DriverSites) -> tuple[int, int, s
     for callee, found in sites.calls.items():
         if len(found) > 1:
             print(f"Warning: {callee} is called {len(found)} times in {sites.routine}; capturing around all")
-    if missing := [c.callee for c in calls if c.bounds is None]:
-        raise InstrumentError(f"No bounds_type actual argument at the call(s) to {missing}")
+    # the captures need a bounds_type in scope: the first call that passes one (routines
+    # such as VegStructUpdate take only filters)
+    with_bounds = sorted((c for c in calls if c.bounds is not None), key=lambda c: c.ln)
+    if not with_bounds:
+        raise InstrumentError(f"No bounds_type actual argument at the call(s) to {[c.callee for c in calls]}")
     first = min(calls, key=lambda c: c.ln)
-    return first.ln, max(statement_end(lines, c.ln) for c in calls), first.bounds
+    return first.ln, max(statement_end(lines, c.ln) for c in calls), with_bounds[0].bounds
 
 
 def _first_calls_end(lines: list[str], sites: DriverSites) -> int:
@@ -219,6 +224,59 @@ def _same_block(lines: list[str], start: int, end: int) -> bool:
     return depth == 0
 
 
+def _construct_spans(lines: list[str]) -> tuple[dict[int, tuple[int, ...]], dict[int, int], dict[int, list[int]]]:
+    """
+    For every statement line, the opening lines of the constructs around it (outermost
+    first); each opener's closing line; each opener's else/case lines.
+    """
+    enclosing: dict[int, tuple[int, ...]] = {}
+    closer: dict[int, int] = {}
+    mids: dict[int, list[int]] = {}
+    stack: list[int] = []
+    ln = 0
+    while ln < len(lines):
+        text = statement_text(lines, ln)
+        if _BLOCK_CLOSE.match(text) and stack:
+            closer[stack.pop()] = ln
+            enclosing[ln] = tuple(stack)
+        elif _BLOCK_MID.match(text) and stack:
+            mids.setdefault(stack[-1], []).append(ln)
+            enclosing[ln] = tuple(stack)
+        else:
+            enclosing[ln] = tuple(stack)
+            if _BLOCK_OPEN.match(text):
+                stack.append(ln)
+        ln = statement_end(lines, ln) + 1
+    return enclosing, closer, mids
+
+
+def _widened_span(lines: list[str], start: int, end: int) -> Optional[tuple[int, int]]:
+    """
+    The smallest span around start..end made of whole statements and constructs of the
+    innermost construct that contains both (EcosystemDynLeaching inside `if (use_cn)`, then
+    balance checks at the clump-loop level, then SurfaceAlbedo inside `if (doalb)`): its
+    first line and the line closing it. None when it would cross an else/case line of that
+    construct, i.e. when the calls are in different branches.
+    """
+    enclosing, closer, mids = _construct_spans(lines)
+    # `end` may be a continuation line: the statement it belongs to
+    end = max((ln for ln in enclosing if ln <= end), default=-1)
+    if start not in enclosing or end < start:
+        return None
+    sa, ea = enclosing[start], enclosing[end]
+    k = 0
+    while k < min(len(sa), len(ea)) and sa[k] == ea[k]:
+        k += 1
+    new_start = sa[k] if k < len(sa) else start
+    new_end = closer.get(ea[k], end) if k < len(ea) else end
+    if k < len(ea) and ea[k] not in closer:
+        return None
+    common = sa[k - 1] if k > 0 else None
+    if common is not None and any(new_start < m <= new_end for m in mids.get(common, [])):
+        return None
+    return new_start, statement_end(lines, new_end)
+
+
 def instrument_lines(
     lines: list[str], groups: list[tuple[DriverSites, CaptureNames]]
 ) -> tuple[list[str], dict[str, str]]:
@@ -243,6 +301,12 @@ def instrument_lines(
             # then lake columns) is captured around its first call only: the
             # code in between isn't part of the unit test
             spans = [(first, _first_calls_end(lines, sites))]
+        elif all(len(found) == 1 for found in sites.calls.values()) and (
+            widened := _widened_span(lines, first, end)
+        ) is not None:
+            # several routines called once each, in sibling constructs of one block: one
+            # capture around the whole stretch
+            spans = [widened]
         else:
             # e.g. HydrologyDrainage in both branches of an if: capture around
             # each call, or the inputs capture sits in a branch that never runs
@@ -584,16 +648,18 @@ def generate_capture_module(
     layout can read them. Without compact instances the module is unchanged.
     """
     parts = _capture_parts(names, instances)
-    compact_use, compact_pre, compact_post = _compact_capture_lines(compact)
+    compact_use, compact_decl, compact_pre, compact_post, compact_procs = _compact_capture_lines(compact)
     if subset is not None:
-        return _subset_capture_module(names, parts, freq, max_tpf, subset, compact_use, compact_pre, compact_post)
+        return _subset_capture_module(
+            names, parts, freq, max_tpf, subset, compact_use, compact_pre, compact_post, compact_decl, compact_procs
+        )
     inst_use, inst_args, rw, fc, pre, drv_dummies, drv_use, drv_decl, drv_copy = parts
     inst_use += compact_use
     return f"""module {names.module}
   !!! Auto-generated by SPEL: dump reference data for functional unit tests.
   !!! Inputs/outputs are captured every capture_freq model steps.
   use shr_kind_mod, only : r8 => shr_kind_r8
-  use decompMod, only : bounds_type
+  use decompMod, only : bounds_type, get_proc_bounds
   use elm_time_manager, only : get_nstep
   use nc_io, only : spel_io_type
   use {rw}, only : write_elmtypes{drv_use}
@@ -605,7 +671,7 @@ def generate_capture_module(
   integer, parameter :: max_tpf = {max_tpf}
   type(spel_io_type) :: io_constants, io_inputs, io_outputs
   logical :: capturing = .false.
-contains
+{compact_decl}contains
   subroutine {names.inputs}(bounds{drv_dummies})
     type(bounds_type), intent(in) :: bounds
 {drv_decl}{drv_copy}    if (.not. io_constants%created) then
@@ -626,68 +692,41 @@ contains
 {compact_pre}      call write_elmtypes(io_outputs, bounds{inst_args})
 {compact_post}    end if
   end subroutine {names.outputs}
-end module {names.module}
+{compact_procs}end module {names.module}
 """
 
 
-def _compact_capture_lines(compact: Sequence) -> tuple[str, str, str]:
+def _compact_capture_lines(compact: Sequence) -> tuple[str, str, str, str, str]:
     """
-    use lines, and the lines before/after a capture, for the compact
-    instances: (instance, subgrid, module) tuples of types with type-bound
-    Compact procedures, or CompactInstance records (an embedded holder's
-    plain procedures, `inst%<path>%cbuf`).
+    (use lines, declarations, lines before/after a capture, contained
+    procedures) for the compact fields (CompactField records of
+    spel.transforms.compact.unit_test): the capture gathers each field's full
+    layout through the inverse map and rebinds afterwards.
     """
     if not compact:
-        return "", "", ""
-    from spel.transforms.compact.index_forms import MAIN_FILTER
-    from spel.transforms.compact.unit_test import CompactInstance
+        return "", "", "", "", ""
+    from spel.transforms.compact.unit_test import capture_pieces
 
-    items: list[CompactInstance] = []
-    uses: dict[str, list[str]] = {}
-    for c in compact:
-        if isinstance(c, CompactInstance):
-            items.append(c)
-            uses.setdefault(c.module, []).append(c.instance)
-            if not c.bound:
-                procs = uses.setdefault(c.holder_module or c.module, [])
-                procs.extend(p for p in c.procedures if p not in procs)
-        else:
-            inst, sg, module = c
-            items.append(CompactInstance(inst, sg, module=module))
-            uses.setdefault(module, []).append(inst)
-    use = "".join(f"  use {m}, only : {', '.join(names)}\n" for m, names in sorted(uses.items()) if m)
-    use += "  use filterMod, only : filter\n"
-    pre = ["      ! compact layout (spel compact rewrite): capture the full layout of the clump\n"]
-    post = []
-    for ci in items:
-        main = MAIN_FILTER[ci.subgrid].split("%")[1]
-        f = f"filter(bounds%clump_index)%num_{main}, filter(bounds%clump_index)%{main}"
-        pre.append(f"      call {ci.prefix}%cbuf%unpack({f}, all=.true.)\n")
-        pre.append(f"      {ci.call('full')}\n")
-        post.append(f"      {ci.call('view')}\n")
-    return use, "".join(pre), "".join(post)
+    return capture_pieces(list(compact))
 
 
 def compact_capture_instances(fut: FunctionalUnitTest) -> list:
     """
-    The case's compact-layout instances: (instance, subgrid, declaring module)
-    tuples for types with type-bound Compact procedures, CompactInstance
-    records (with the instance's declaring module) for embedded holders.
+    The case's compact fields (CompactField records): the fields of the
+    sources' `.spel-compact.json` groups that belong to an active instance and
+    a component the case uses.
     """
-    from spel.transforms.compact.unit_test import compact_instances
+    from spel.scripts.config import E3SM_SRCROOT
+    from spel.transforms.compact.unit_test import compact_fields, load_manifest
 
     type_dict = getattr(fut, "type_dict", None)
     if not type_dict:
         return []
+    manifest = load_manifest(getattr(fut, "e3sm_srcroot", E3SM_SRCROOT))
+    if not manifest:
+        return []
     active_instances, _, _ = hio.get_var_usage_and_elm_inst_vars(type_dict)
-    out = []
-    for ci in compact_instances(fut.type_dict, active_instances):
-        decl = active_instances[ci.instance].declaration
-        if ci.bound:
-            out.append((ci.instance, ci.subgrid, decl))
-        else:
-            out.append(replace(ci, module=decl, holder_module=ci.module))
-    return out
+    return compact_fields(type_dict, active_instances, manifest)
 
 
 def _capture_parts(names: CaptureNames, instances: list[str]) -> tuple[str, ...]:
@@ -727,6 +766,8 @@ def _subset_capture_module(
     compact_use: str = "",
     compact_pre: str = "",
     compact_post: str = "",
+    compact_decl: str = "",
+    compact_procs: str = "",
 ) -> str:
     from spel.scripts.subset import capture_select_routine
 
@@ -756,7 +797,7 @@ def _subset_capture_module(
   integer :: spel_clump_begg = -1
   logical :: spel_writer = .false.
   logical :: capturing = .false.
-contains
+{compact_decl}contains
   subroutine {names.inputs}(bounds{drv_dummies})
     type(bounds_type), intent(in) :: bounds
 {drv_decl}{drv_copy}    if (.not. io_constants%created) then
@@ -787,7 +828,7 @@ contains
 {compact_post}    end if
   end subroutine {names.outputs}
 {capture_select_routine(subset, names.tag)}
-end module {names.module}
+{compact_procs}end module {names.module}
 """
 
 
@@ -1155,12 +1196,18 @@ def run_case(
     srcroot: Path,
     extra_args: Optional[list[str]] = None,
 ) -> Path:
-    """Create/build/submit a case with the casegen script; return its RUNDIR."""
+    """
+    Create/build/submit a case with the casegen script; return its RUNDIR.
+    With SPEL_CASE_RUNNER set (e.g. ~/scripts/run_e3sm.sh), the case is only
+    built and then run in place by that script from the case directory (no
+    batch job: small cases run on the login or an interactive node).
+    """
+    runner = os.environ.get("SPEL_CASE_RUNNER")
     cmd = [
         "bash", str(casegen),
         "--case", case_name,
         "--srcroot", str(srcroot),
-        "--build", "--submit",
+        "--build", *([] if runner else ["--submit"]),
         *(extra_args or []),
     ]
     code, casedir = _stream(cmd)
@@ -1173,7 +1220,12 @@ def run_case(
         )
     if casedir is None:
         raise InstrumentError("casegen script didn't report CASEDIR")
-    wait_for_case_jobs(Path(casedir))
+    if runner:
+        code, _ = _stream(["bash", str(Path(runner).expanduser())], cwd=casedir)
+        if code:
+            raise CaseRunError(f"{runner} failed with exit code {code}", Path(casedir))
+    else:
+        wait_for_case_jobs(Path(casedir))
     return _rundir(Path(casedir))
 
 

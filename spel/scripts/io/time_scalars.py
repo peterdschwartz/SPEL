@@ -6,9 +6,10 @@ components every step. The time-step state is module scalars, so it is
 captured separately, per step, through `spel_t_<name>(1)` arrays in
 ReadWriteMod (like elm_drv's scalar arguments, `spel_drv_<name>`):
 
-  * spel_timeMod's `spel_nstep` and `spel_first_restart_step`, behind the
-    unit-test is_first_step()/is_first_restart_step() (the capture module
-    sets them from elm_time_manager's get_nstep()/is_first_restart_step())
+  * spel_timeMod's `spel_nstep`, `spel_first_restart_step`, `spel_step_size`
+    and `spel_rad_step_size`, behind the unit-test stand-ins of
+    elm_time_manager's getters (TIME_SHIMS; the capture module sets them from
+    get_nstep(), is_first_restart_step(), get_step_size(), get_rad_step_size())
   * every scalar of the branch's timeInfoMod (nstep_mod, secs_curr, doalb, ...)
 
 The ELM capture module sets spel_t_<name>(1) before each capture; the unit
@@ -21,7 +22,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # elm_time_manager names a unit test gets from spel_timeMod instead
-TIME_SHIMS = {"is_first_step": "spel_timemod", "is_first_restart_step": "spel_timemod"}
+TIME_SHIMS = {
+    name: "spel_timemod"
+    for name in (
+        "is_first_step",
+        "is_first_restart_step",
+        "get_nstep",
+        "get_step_size",
+        "get_step_size_real",
+        "get_rad_step_size",
+        "is_end_curr_day",
+        "get_curr_date",
+    )
+}
 SHIM_MODULE = "spel_timeMod"
 TIME_MODULE = "timeinfomod"
 
@@ -33,6 +46,9 @@ class TimeScalar:
     type: str  # real | integer | logical
     capture: str  # its value in ELM's capture module
     capture_module: str  # module the capture expression comes from
+    # value when the capture lacks the array (captured before it was added): the unit test
+    # reads it only if present, and a non-positive value means "use the fallback"
+    fallback: str = ""
 
     @property
     def array(self) -> str:
@@ -66,7 +82,7 @@ def unit_test_time_scalars(unit_test) -> list[TimeScalar]:
 
 def time_scalars(module_dict: dict, globals_: dict | None = None, step_written=()) -> list[TimeScalar]:
     """
-    spel_timeMod's two, every timeInfoMod scalar, and the scalars among the
+    spel_timeMod's four, every timeInfoMod scalar, and the scalars among the
     case's globals (`globals_`) that something in the time step writes
     (`step_written`, e.g. dynSubgridControlMod's subgrid_weights_updated).
     The analyzed driver doesn't show timeInfoMod's writes (they come from
@@ -77,6 +93,10 @@ def time_scalars(module_dict: dict, globals_: dict | None = None, step_written=(
         TimeScalar(
             "spel_first_restart_step", SHIM_MODULE, "logical", "is_first_restart_step()", "elm_time_manager"
         ),
+        TimeScalar("spel_step_size", SHIM_MODULE, "integer", "get_step_size()", "elm_time_manager",
+                   fallback="nint(dtime_mod)"),
+        TimeScalar("spel_rad_step_size", SHIM_MODULE, "integer", "get_rad_step_size()", "elm_time_manager",
+                   fallback="nint(dtime_mod)"),
     ]
     mod = module_dict.get(TIME_MODULE)
     for name, var in sorted(getattr(mod, "global_vars", {}).items()):
@@ -116,5 +136,11 @@ def sync_lines(scalars: list[TimeScalar]) -> tuple[list[str], list[str]]:
         by_mod.setdefault(s.module, []).append(s.name)
     uses += [f"use {m}, only : {', '.join(n)}\n" for m, n in sorted(by_mod.items())]
     body = [f"   {s.from_array()}\n" for s in scalars]
-    body.append(f"   !$acc update device({', '.join(s.name for s in scalars)})\n")
+    # captures older than an array: fall back once the other scalars (dtime_mod) are set
+    body += [f"   if ({s.array}(1) <= 0) {s.name} = {s.fallback}\n" for s in scalars if s.fallback]
+    if any(s.fallback for s in scalars):
+        uses.append("use timeinfoMod, only : dtime_mod\n")
+    # if_present: a scalar without an `!$acc declare` (no device kernel reads it, e.g.
+    # timeinfoMod::first) has no device copy, and a plain update of it aborts on a GPU
+    body.append(f"   !$acc update device({', '.join(s.name for s in scalars)}) if_present\n")
     return uses, body

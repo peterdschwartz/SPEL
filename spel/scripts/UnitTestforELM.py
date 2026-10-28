@@ -109,6 +109,9 @@ def create_unit_test(
 
     others = [load_case(name) for name in capture_for]
     finalize_unit_test(unit_test, db_mode, capture_for=others)
+    from spel.scripts.restore_files import snapshot_case
+
+    snapshot_case(Path(unit_test.case_dir))  # the base of `spel restore`'s diffs
     return unit_test
 
 
@@ -337,10 +340,13 @@ def finalize_unit_test(
     from spel.scripts.init_hooks import INIT_HOOKS, hook_reads_and_allocs, hook_routines
 
     unit_test.init_hooks = []
+    # read at every step whatever the routines' guards: the hooks run unconditionally
+    unit_test.unguarded_reads = set()
     for hook, call in INIT_HOOKS.items():
         if hook not in unit_test.subroutine_dict:
             continue
         reads, allocs = hook_reads_and_allocs(hook_routines(unit_test.subroutine_dict, hook))
+        unit_test.unguarded_reads |= {r.lower() for r in reads}
         from spel.scripts.types import ReadWrite
 
         set_active_variables(
@@ -367,6 +373,11 @@ def finalize_unit_test(
         file_list = [get_filename_from_module(m) for m in ordered_mods]
         if builders_file := write_filter_builders_module(unit_test):
             file_list.append(builders_file)
+        from spel.transforms.compact.unit_test import write_compact_module
+
+        if compact_file := write_compact_module(unit_test):
+            file_list.append(compact_file)
+            logger.info(f"compact layout: {len(unit_test.compact_fields)} fields packed around compute ({compact_file})")
         unit_test.generate_cmake(files=file_list)
 
         # Generate/modify FORTRAN files needed to initialize and run Unit Test
@@ -404,6 +415,15 @@ def finalize_unit_test(
             os.system(cmd)
         # Clean-up
         os.system(f"rm {spel_output_dir}/*.F90")
+
+        if cfg.options.device_data:
+            # last: the layer parses the case's final sources (reduced elm_instMod, the
+            # declares ensure_acc_declares adds, the unittest_defs.h header they include)
+            from spel.transforms.device.generate import generate_for_unit_test
+
+            dd_files = generate_for_unit_test(unit_test)
+            unit_test.generate_cmake(files=file_list + dd_files)
+            logger.info(f"device data layer: {', '.join(dd_files)}")
 
     logger.info("Finished -- Pickling results")
 
@@ -637,7 +657,7 @@ def process_subroutines_for_unit_test(
             and sub_dict[s].name != "setfilters"
             and sub_dict[s].module != DRIVER_MODULE
         ]
-        _, drv_bindings, unit_test.driver_sites = driver_callsites(roots, sub_dict, mod_dict)
+        _, drv_bindings, unit_test.driver_sites = driver_callsites(roots, sub_dict, mod_dict, type_dict)
         unit_test.driver_bindings = drv_bindings
         adopt_record_access(sub_dict, type_dict, fut_subs, drv_bindings)
 

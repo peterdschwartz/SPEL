@@ -116,6 +116,7 @@ class FieldReport:
     verdict: str = ""
     reasons: list[str] = field(default_factory=list)
     lives_across_steps: bool = False
+    set_special: bool = False  # a history registration writes set_* values into the array
     read_before_zero: list[str] = field(default_factory=list)
     written_before_zero: list[str] = field(default_factory=list)
     first_after_zero: str = ""
@@ -126,6 +127,9 @@ class FieldReport:
     users: dict[str, list[str]] = field(default_factory=dict)
     # routine -> ["status line", ...], after the unpack point (bookkeeping copy)
     after_unpack: dict[str, list[str]] = field(default_factory=dict)
+
+
+HISTORY_MODULES = {"histcomputemod", "subgridaveviewmod"}  # the history readers (map-indexed for compact fields)
 
 
 class Tracer:
@@ -158,6 +162,10 @@ class Tracer:
     def run(self) -> list[Entry]:
         drv = self.sub_dict[DRIVER_ID]
         self.visit(drv, IndexContext(drv.id, drv.record, {}, {}), (DRIVER_ID,), "", -1)
+        # the history kernels read every registered field positionally (`values(c-beg+1)`);
+        # the compact layout serves them through the inverse map (histComputeMod), so those
+        # reads say nothing about a field's layout
+        self.entries = [e for e in self.entries if e.sub.split("::")[0] not in HISTORY_MODULES]
         return self.entries
 
     # --- per-routine caches ---
@@ -329,12 +337,21 @@ def unpack_line(sub_dict: dict, name: str) -> int:
     return max(lines)
 
 
+NO_UNPACK = 10**9  # "unpack point" after every line: the whole step is the window
+
+
 def build_inventory(
     fut,
     types=FLUX_TYPES,
     instances: Optional[list[str]] = None,
-    unpack_after: str = UNPACK_AFTER,
+    unpack_after: Optional[str] = None,
 ):
+    """
+    The reports of the fields the per-step zeroing writes, and the tracer.
+    `unpack_after` names an elm_drv call for the old two-window analysis
+    (accesses after it listed separately); by default the window is the whole
+    step after the zeroing (the compact layout has no unpack).
+    """
     sub_dict = fut.subroutine_dict
     type_dict = fut.type_dict
     inst_type: dict[str, str] = {}
@@ -357,7 +374,7 @@ def build_inventory(
 
     tracer = Tracer(sub_dict, type_dict, inst_type, zero_procs)
     entries = tracer.run()
-    unpack_ln = unpack_line(sub_dict, unpack_after)
+    unpack_ln = unpack_line(sub_dict, unpack_after) if unpack_after else NO_UNPACK
 
     regs = {t: type_registrations(sub_dict, type_dict[t], type_dict) for t in concrete}
 
@@ -438,6 +455,7 @@ def fill_report(r: FieldReport, es: list[Entry], regs: list[Registration], unpac
     r.classes = dict(Counter(e.cls for e in window))
 
     r.lives_across_steps = bool(r.read_before_zero or r.history or r.restart)
+    r.set_special = any(reg.kind == "hist" and reg.set_special for reg in regs)
     classes = set(r.classes)
     if not window and not later and not r.read_before_zero:
         r.verdict = "unused"

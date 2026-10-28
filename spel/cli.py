@@ -20,6 +20,9 @@ SPEL_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 def create(args):
     from spel.scripts.UnitTestforELM import create_unit_test
 
+    import spel.scripts.config as cfg
+
+    cfg.options.device_data = args.device_data
     with profile_ctx(enabled=True, section="create") as pr:
         unit_test = create_unit_test(
             sub_names=args.subs,
@@ -43,6 +46,33 @@ def create(args):
             _run_and_validate(unit_test.case_dir)
 
 
+def device_data(args):
+    from pathlib import Path
+
+    from spel.scripts.analysis_cache import load_analysis
+    from spel.scripts.config import E3SM_SRCROOT
+    from spel.transforms.device.generate import DeviceDataError, apply, generate
+
+    fut = load_analysis(reanalyze=args.reanalyze)
+    srcroot = Path(E3SM_SRCROOT)
+    if args.print_module:
+        texts, p = generate(fut, srcroot)
+        for name, text in texts.items():
+            print(f"! ===== {name}")
+            print(text)
+        for s in p.skipped:
+            print("! skipped:", s)
+        return
+    try:
+        p, report = apply(fut, srcroot, out_dir=Path(args.out_dir) if args.out_dir else None, dry_run=args.dry_run)
+    except DeviceDataError as exc:
+        sys.exit(f"device-data: {exc}")
+    for line in report:
+        print(("would write " if args.dry_run else "") + line)
+    for s in p.skipped:
+        print("skipped:", s)
+
+
 def compact(args):
     args.type_given = "--type" in sys.argv
     from spel.scripts.analysis_cache import load_analysis
@@ -58,9 +88,7 @@ def compact(args):
     if args.action == "rewrite":
         return compact_rewrite(fut, args)
     instances = args.instances.split(",") if args.instances else None
-    reports, tracer = build_inventory(
-        fut, types=FLUX_TYPES, instances=instances, unpack_after=args.unpack_after
-    )
+    reports, tracer = build_inventory(fut, types=FLUX_TYPES, instances=instances)
     print(summary(reports))
     for r in reports:
         if r.field in (args.field or []) or r.verdict in (args.verdict or []):
@@ -96,16 +124,42 @@ def compact_rewrite(fut, args):
             mapped += [r for r in role_types(nm, types) if r not in mapped]
         print(f"types: {', '.join(mapped)} (from .spel-nutrient.json)")
         types = mapped
+    if getattr(args, "no_map_sites", False):
+        import spel.transforms.compact.select as _sel
+
+        _sel.MAP_SITES = False
     sels = []
     for dtype in [] if args.loops_only else types:
-        sel = select_fields(fut, dtype, unpack_after=args.unpack_after)
+        sel = select_fields(fut, dtype)
+        if getattr(args, "exclude_fields", None):
+            for comp in args.exclude_fields.split(","):
+                if comp in sel.components:
+                    sel.components.pop(comp)
+                    sel.history.pop(comp, None)
+                    sel.levels.pop(comp, None)
+                    sel.restart.pop(comp, None)
+                    sel.excluded[comp] = "--exclude-fields"
+            drop = set(args.exclude_fields.split(","))
+            sel.sites = [st for st in sel.sites if st.components - drop]
+        if getattr(args, "fields", None):
+            keep = set(args.fields.split(","))
+            for comp in list(sel.components):
+                if comp not in keep:
+                    sel.components.pop(comp)
+                    sel.history.pop(comp, None)
+                    sel.levels.pop(comp, None)
+                    sel.excluded[comp] = "not in --fields"
+            sel.sites = [st for st in sel.sites if st.components & keep]
+            if not sel.components:
+                print(f"{dtype}: no selected field in --fields; skipped")
+                continue
         sels.append(sel)
         print(f"{dtype}: {len(sel.components)} fields, {len(sel.sites)} access sites")
         nested = [c for c, why in sel.excluded.items() if why.startswith("lives on")]
         if nested:
             print(f"  {len(nested)} shared fields live on an embedded holder; pass --type <that type> (see --excluded)")
         for comp, zc in sel.components.items():
-            print(f"  {comp:32s} zeroed: {zc:20s} unpack: {sel.unpack[comp]}")
+            print(f"  {comp:32s} zeroed: {zc:20s} history: {sel.history[comp]}")
         if args.excluded:
             for comp, why in sorted(sel.excluded.items()):
                 print(f"  excluded {comp:32s} {why}")
@@ -119,7 +173,7 @@ def compact_rewrite(fut, args):
     from spel.transforms.compact.inventory import FLUX_TYPES
 
     try:
-        rewriter.build(args.unpack_after, loop_types=FLUX_TYPES if args.setvalues_loops else ())
+        rewriter.build(loop_types=FLUX_TYPES if args.setvalues_loops else ())
     except RewriteError as err:
         raise SystemExit(f"compact rewrite: {err}")
     for note in rewriter.notes:
@@ -132,7 +186,7 @@ def compact_rewrite(fut, args):
     e3sm = git_state(Path(E3SM_SRCROOT))
     try:
         written = rewriter.apply(
-            manifest(rewriter, args.unpack_after, spel_commit, e3sm),
+            manifest(rewriter, spel_commit, e3sm),
             output=Path(args.output) if args.output else None,
             replace=args.replace,
         )
@@ -799,6 +853,12 @@ def main():
         help="Rebuild the cached elm_drv analysis first (e.g. after switching "
         "E3SM/SPEL branches or editing ELM); otherwise it is reused",
     )
+    create_parser.add_argument(
+        "--device-data",
+        action="store_true",
+        help="move the data with the generated device data layer (DeepCopy*Mod, ElmDeviceDataMod, as "
+        "`spel device-data` writes for the full model) instead of the harness's SpelAccDataMod deep copy",
+    )
     add_capture_args(create_parser, standalone=False)
     create_parser.set_defaults(func=create)
 
@@ -846,9 +906,10 @@ def main():
     compact_parser.add_argument(
         "--type",
         nargs="+",
-        default=["vegetation_carbon_flux", "vegetation_nitrogen_flux", "vegetation_phosphorus_flux"],
-        help="rewrite: the derived types (default: the patch-level C/N/P flux types; on nutrient-transformed "
-        "sources their family base type, vegetation_nutrient_flux)",
+        default=["vegetation_carbon_flux", "vegetation_nitrogen_flux", "vegetation_phosphorus_flux",
+                 "column_carbon_flux", "column_nitrogen_flux", "column_phosphorus_flux"],
+        help="rewrite: the derived types (default: the patch- and column-level C/N/P flux types; on "
+        "nutrient-transformed sources their family base types, vegetation_nutrient_flux and column_nutrient_flux)",
     )
     compact_parser.add_argument(
         "--roles",
@@ -867,11 +928,28 @@ def main():
         help="rewrite: only the SetValues loops, no compact layout (to measure the two separately)",
     )
     compact_parser.add_argument(
-        "--no-setvalues-loops",
+        "--setvalues-loops",
         dest="setvalues_loops",
-        action="store_false",
-        help="rewrite: keep the blocked associate loops in the flux types' SetValues "
-        "(default: make them do concurrent loops, also for types not compacted)",
+        action="store_true",
+        default=False,
+        help="rewrite: also turn the flux types' blocked SetValues loops (associate idx => filter(fi:...)) "
+        "into do concurrent loops, for all six types. Off by default: 7%% slower CNZero with Intel on the "
+        "stride-8 case (2026-10-24); it helped nvfortran",
+    )
+    compact_parser.add_argument(
+        "--no-setvalues-loops", dest="setvalues_loops", action="store_false", help="(the default)"
+    )
+    compact_parser.add_argument(
+        "--exclude-fields", dest="exclude_fields", default="",
+        help="rewrite: drop these components (comma-separated) from every selection, for bisecting",
+    )
+    compact_parser.add_argument(
+        "--fields", default="",
+        help="rewrite: keep only these components (comma-separated) of every selection, for bisecting",
+    )
+    compact_parser.add_argument(
+        "--no-map-sites", dest="no_map_sites", action="store_true",
+        help="rewrite: only filter-gathered sites (no x(compact_cidx_p(p)) for sub-filter or pfti-mapped members)",
     )
     compact_parser.add_argument(
         "--replace",
@@ -882,12 +960,6 @@ def main():
         "--instances",
         default="veg_cf,veg_nf,veg_pf,col_cf,col_nf,col_pf",
         help="comma-separated instances (default: the C12 flux instances)",
-    )
-    compact_parser.add_argument(
-        "--unpack-after",
-        dest="unpack_after",
-        default="ecosystemdynleaching",
-        help="elm_drv call after which compact fields are unpacked (default: ecosystemdynleaching)",
     )
     compact_parser.add_argument("--field", nargs="*", help="print the details of these instance%%fields")
     compact_parser.add_argument(
@@ -903,6 +975,19 @@ def main():
         "--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first"
     )
     compact_parser.set_defaults(func=compact)
+
+    device_parser = subparsers.add_parser(
+        "device-data",
+        help="generate ElmDeviceDataMod and the DeepCopy*Mod group modules (device init, first-step deep copy, whole-state updates) for a full OpenACC run",
+    )
+    device_parser.add_argument("--dry-run", action="store_true", help="report the plan and the edits, write nothing")
+    device_parser.add_argument("--print", dest="print_module", action="store_true", help="print the generated modules")
+    device_parser.add_argument(
+        "-o", "--out-dir", default=None,
+        help="write the modules and the edited driver files here (a case's SourceMods/src.elm) instead of in place",
+    )
+    device_parser.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
+    device_parser.set_defaults(func=device_data)
 
     nutrient_parser = subparsers.add_parser(
         "nutrient",
@@ -1215,8 +1300,8 @@ def main():
     # Parser for 'spel restore'
     restore_parser = subparsers.add_parser(
         "restore",
-        help="Remove the '!#py ' token from files changed in a unit-test "
-        "case and copy them back into E3SM_SRCROOT",
+        help="Apply the edits made in a unit-test case (against the copies 'spel create' wrote) "
+        "to its E3SM_SRCROOT files",
     )
     restore_parser.add_argument(
         "-c",

@@ -43,6 +43,7 @@ from spel.scripts.types import LineTuple
 HIST_CALLS = ("hist_addfld1d", "hist_addfld2d", "hist_addfld_decomp")
 HIST_POINTERS = ("ptr_patch", "ptr_col", "ptr_lunit", "ptr_gcell", "ptr_lnd", "ptr_atm")
 RESTART_CALL = "restartvar"
+SET_OPTIONS = ("set_lake", "set_nolake", "set_urb", "set_nourb", "set_spec", "set_noglcmec")
 REGISTRATION_RX = re.compile(r"\b(hist_addfld1d|hist_addfld2d|hist_addfld_decomp|restartvar)\b", re.I)
 
 
@@ -57,6 +58,7 @@ class Registration:
     base: str = "this"  # designator base: the passed object, an instance or a bare variable
     long_name: str = ""
     units: str = ""
+    set_special: bool = False  # history field registered with set_lake/set_urb/set_spec/... (writes into the array)
 
     @property
     def path(self) -> str:
@@ -314,6 +316,7 @@ def registrations(tree) -> list[Registration]:
                     base=base,
                     long_name=_text(kwargs.get("long_name")),
                     units=_text(kwargs.get("units")),
+                    set_special=any(k in kwargs for k in SET_OPTIONS),
                 )
             )
     return out

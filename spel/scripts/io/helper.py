@@ -24,6 +24,9 @@ def sanitize_netcdf_name(name: str):
     return sanitized
 
 
+SUBGRID_DIMS = ("patch", "column", "landunit", "topo", "gridcell")  # get_subgrid names
+
+
 def get_subgrid(dim_str: str) -> str:
     """
     Function to return generic name for subgrid names

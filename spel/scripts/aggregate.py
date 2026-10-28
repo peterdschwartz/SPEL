@@ -167,8 +167,14 @@ def set_bounds_active(type_dict: dict[str, DerivedType], inst_map: dict[str, str
 
 def activate_targets(field_var: Variable, type_dict: dict[str,DerivedType], inst_to_type_map: dict[str,str]):
     for target in field_var.pointer:
+        if "%" not in target:
+            continue
         inst, member_path = target.split("%",1)
         if re.match(r'(c13|c14)',inst):
+            continue
+        # not a module instance: e.g. a compact group buffer, `compact_groups(this%cgrp_id(k))%data(:, s)`
+        # (CompactLayoutMod, run-time state the unit test builds itself)
+        if "(" in inst or inst not in inst_to_type_map:
             continue
         inst_type = inst_to_type_map[inst]
         dtype = type_dict[inst_type]

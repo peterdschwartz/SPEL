@@ -274,3 +274,78 @@ def test_atomic_counter_stays_shared(tmp_path: Path):
     assert "!$omp atomic capture\n" in new and "!$omp end atomic\n" in new
     # `parallel loop seq` runs sequentially: no OpenMP directive
     assert new.count("!$omp parallel do") == 1 and "!$acc" not in new
+
+
+UNUSED_DUMMY = """
+subroutine untouched(p, obj, x)
+  implicit none
+  integer, intent(in) :: p
+  type(foo_type), intent(inout) :: obj
+  real(r8), intent(inout) :: x(:)
+  x(p) = 0._r8
+end subroutine untouched
+"""
+
+PASSES_OBJECT = """
+subroutine caller(n, f, obj, x)
+  implicit none
+  integer, intent(in) :: n, f(:)
+  type(foo_type), intent(inout) :: obj
+  real(r8), intent(inout) :: x(:)
+  integer :: fp, p
+  !$acc parallel loop gang vector default(present) private(p)
+  do fp = 1, n
+     p = f(fp)
+     call untouched(p, obj, x)
+  end do
+end subroutine caller
+"""
+
+
+def test_derived_type_passed_whole_is_not_a_scalar_race():
+    # the callee never touches obj: the mapper reports its intent (rw) for the whole object on
+    # the call line, which is not a write of a shared scalar
+    callee = Sub(UNUSED_DUMMY)
+    GLOBALS.append(Symbol("untouched", SymbolKind.PROCEDURE, Origin.GLOBAL, target=f"{MOD}::untouched"))
+    try:
+        sub = Sub(PASSES_OBJECT)
+    finally:
+        GLOBALS.pop()
+    mapper = AccessMapper({sub.id: sub, callee.id: callee})
+    d = find_directives(PASSES_OBJECT.split("\n"))[0]
+    plan, notes = plan_compute_loop(sub, d, sub.record.loop_at(8), mapper)
+    assert not [n.msg for n in notes if "race" in n.msg]
+    assert plan.private == ["p"]
+
+
+COUNTS = """
+subroutine counts(n, x, total)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(in) :: x(:)
+  real(r8), intent(out) :: total
+  integer :: i, nbad
+  real(r8) :: s
+  nbad = 0
+  s = 0._r8
+  !$acc parallel loop gang vector default(present)
+  do i = 1, n
+     if (x(i) < 0._r8) nbad = nbad + 1
+  end do
+  !$acc parallel loop gang vector default(present)
+  do i = 1, n
+     s = s + x(i)
+  end do
+  total = s + nbad
+end subroutine counts
+"""
+
+
+def test_integer_count_is_a_reduction_float_sum_is_not():
+    sub = Sub(COUNTS)
+    mapper = AccessMapper({sub.id: sub})
+    d1, d2 = [d for d in find_directives(COUNTS.split("\n")) if d.is_compute_loop]
+    plan, notes = plan_compute_loop(sub, d1, sub.record.loop_at(11), mapper)
+    assert plan.reductions == [("+", ["nbad"])] and not [n for n in notes if n.level == "warn"]
+    plan, notes = plan_compute_loop(sub, d2, sub.record.loop_at(15), mapper)
+    assert plan.reductions == [] and [n for n in notes if "'s'" in n.msg]   # reordered float sums: not bit-for-bit

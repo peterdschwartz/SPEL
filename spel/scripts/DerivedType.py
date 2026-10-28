@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess as sp
 import sys
@@ -309,7 +310,14 @@ def resolve_inheritance(type_dict: dict[str, "DerivedType"]) -> None:
             done.add(dtype.type_name)
             return
         parent = type_dict.get(dtype.parent)
-        assert parent is not None, f"{dtype.type_name} extends unknown type {dtype.parent}"
+        if parent is None:
+            # the parent lives in a module the analysis skips (dyn_file_type extends PIO's
+            # file_desc_t): keep the type's own components, nothing to inherit here
+            logging.getLogger("SPEL").warning(
+                f"{dtype.type_name} extends {dtype.parent}, which is not analyzed: no inherited components"
+            )
+            done.add(dtype.type_name)
+            return
         assert dtype.type_name not in seen, f"cyclic extends: {seen}"
         resolve(parent, seen + (dtype.type_name,))
         inherited = {n: v.copy() for n, v in parent.components.items()}

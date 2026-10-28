@@ -29,7 +29,8 @@ e3sm_compiler = "nvidia"
 description = "PrgEnv-nvidia; OpenACC multicore and GPU (GPU runs need a GPU node)"
 pkg_config_path = ["$CRAY_MPICH_DIR/lib/pkgconfig"]
 # without ACC_DEVICE_TYPE the OpenACC runtime may pick the login node's GPU and loop
-# forever printing "Failing in Thread:1"
+# forever printing "Failing in Thread:1". Defaults: on a GPU node set ACC_DEVICE_TYPE=nvidia
+# (with SPEL_ACC=GPU) to run on the GPU
 env = { ACC_DEVICE_TYPE = "multicore", MPICH_GPU_SUPPORT_ENABLED = "0" }
 
 [toolchains.ifx]
