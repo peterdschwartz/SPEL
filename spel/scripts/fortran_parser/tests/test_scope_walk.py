@@ -777,3 +777,50 @@ end subroutine s
     rec = walk(txt)
     assert ("w", "ok", 6) in acc(rec) and ("w", "n", 7) in acc(rec)
     assert not rec.accesses(path="is_contiguous")
+
+
+SELF_ASSIGN = """
+subroutine s(x, i)
+  implicit none
+  real(r8), intent(inout) :: x(:)
+  integer, intent(in) :: i
+  x(i) = x(i)
+  x(i) = x(i) + 1.0_r8
+end subroutine s
+"""
+
+
+def test_self_assignment_is_a_write_only():
+    """edit_files leaves `lhs = lhs` where the right-hand side used an excluded module: the
+    walker records the write and no read, so the access status is `w`, not `rw`."""
+    rec = walk(SELF_ASSIGN)
+    assert [(s, p) for s, p, ln in acc(rec, 5) if p == "x"] == [("w", "x")]
+    assert sorted((s, p) for s, p, ln in acc(rec, 6) if p == "x") == [("r", "x"), ("w", "x")]
+
+
+INQUIRY = """
+subroutine s(x, y)
+  implicit none
+  real(r8), intent(inout) :: x(:,:), y(:)
+  integer :: i
+  do i = lbound(x, 1), ubound(x, 1)
+     x(i, 1) = size(y) + 1.0_r8
+  end do
+  if (allocated(y)) y(1) = 0._r8
+end subroutine s
+"""
+
+
+def test_inquiry_intrinsic_arguments_are_not_value_reads():
+    """lbound(x,1), size(y), allocated(y) read the descriptor: context "inquiry", which the access
+    maps leave out (the planner saw `x` read beside its write and called the loop carried)."""
+    from spel.scripts.record_access import AccessMapper
+    from spel.scripts.tests.test_record_access import StubSub
+
+    rec = walk(INQUIRY)
+    inq = [(a.path, a.ln, a.context) for a in rec.accesses() if a.context == "inquiry"]
+    assert sorted(inq) == [("x", 5, "inquiry"), ("x", 5, "inquiry"), ("y", 6, "inquiry"), ("y", 8, "inquiry")]
+    sub = StubSub(INQUIRY)
+    maps = AccessMapper({sub.id: sub}).maps(sub)
+    assert [rw.status for rw in maps.args["x"]] == ["w"]        # only the element write on line 6
+    assert [rw.status for rw in maps.args["y"]] == ["w"]        # only y(1) = 0

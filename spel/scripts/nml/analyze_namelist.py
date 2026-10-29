@@ -152,7 +152,9 @@ def check_subs_for_nml_guarded_vars(
                 continue  # unguarded and not a shared component: nothing to clear
             var = get_component(instance_dict, inst, field)
         if var is None:
-            raise ValueError(f"Error: expected derived type of the for inst%field, Got {v}")
+            # an instance of a type the analysis does not know (alm_fates: the FATES interface
+            # module is excluded): nothing to guard, and no reason to drop every other guard
+            continue
         by_comp.setdefault(id(var), (var, []))[1].append(var_dict.get(v))
 
     temp = defaultdict(list)

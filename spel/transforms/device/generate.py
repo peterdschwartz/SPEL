@@ -1223,10 +1223,11 @@ NEUTRAL = {
     "elm_device_update", "elm_device_copyin", "mpi_barrier", "shr_sys_abort",
     "elm_device_pull_all", "elm_device_filters_update",
 }
-# device routines run as host segments anyway: their kernels are not ported through
-# (dynSubgrid is left out of the first GPU port; its ZeroDWT/conservation kernels run on the host).
+# device routines run as host segments anyway (their kernels not ported through). Empty since
+# 2026-10-29: dynSubgrid_driver runs its heat/water content and weight bookkeeping on the device
+# and acc-sync covers its host code (the weight-change path, inside `if (weights_updated)`).
 # The UpdateAccVars run on the device: accumulMod's update/extract are kernels (accumComputeMod).
-HOST_SEGMENTS = {"dynsubgrid_driver"}
+HOST_SEGMENTS: set[str] = set()
 
 
 def call_kind(base: str, device: set[str]) -> str:

@@ -117,6 +117,7 @@ class Access:
     via:    associate name used to reach path (None if accessed directly)
     context: "expr" | "assign" | "do" | "ptr-assign" | "allocate" | "deallocate"
              | "stat" | "errmsg" | "arg" | "nullify" | "read" | "iostat" | "iomsg" | "size"
+             | "inquiry" (an argument of lbound/size/allocated/...: the descriptor, not the values)
     subscripts: subscript expressions of the last component (x%y(i, j) -> (i, j));
              empty if it has none
     """
@@ -264,6 +265,9 @@ class SubroutineRecord:
         self.namelists: dict[str, list[str]] = {}
         # outermost DO loops; each LoopInfo links its nested loops
         self.loop_nest: list[LoopInfo] = []
+        # the record of the host routine of an internal subprogram (its declarations are visible
+        # here by host association: HydrologyNoDrainage's h2osoi_liq_saved in store_tsl_moisture)
+        self.host: Optional["SubroutineRecord"] = None
 
     # --- declarations ---
     @property
@@ -273,8 +277,13 @@ class SubroutineRecord:
             exclude.add(self.result.name)
         return {k: v for k, v in self.declarations.items() if k not in exclude}
 
-    def declaration(self, name: str) -> Optional[Declaration]:
-        return self.declarations.get(name)
+    def declaration(self, name: str, host: bool = False) -> Optional[Declaration]:
+        """The routine's declaration of `name`; with `host`, the host routine's when the
+        internal subprogram has none (host association)."""
+        d = self.declarations.get(name)
+        if d is None and host and self.host is not None:
+            return self.host.declaration(name, host=True)
+        return d
 
     def lookup(self, name: str) -> Optional[Symbol]:
         """Lookup in the routine scope (outside of any associate construct)."""
@@ -378,9 +387,21 @@ SKIPPED_STATEMENTS = (
 
 # io-control specifiers whose variable is written by the statement
 IO_OUTPUT_SPECS = {"iostat", "iomsg", "size"}
+# intrinsics that read an argument's descriptor, not its values (recorded with context "inquiry")
+INQUIRY_INTRINSICS = {"lbound", "ubound", "size", "shape", "allocated", "associated", "present", "len",
+                      "kind", "rank", "is_contiguous", "storage_size", "bit_size", "digits", "precision",
+                      "range", "huge", "tiny", "epsilon", "radix", "maxexponent", "minexponent"}
 
 LITERALS = (IntegerLiteral, FloatLiteral, StringLiteral, LogicalLiteral)
 
+
+
+def is_self_assignment(stmt: AssignmentStatement) -> bool:
+    """`x = x`, `a%b(i) = a%b(i)`: a no-op that reads nothing. edit_files writes one in place of
+    an assignment whose right-hand side used an excluded module, to keep the write of the
+    left-hand side in the analysis (pdep_interp's forc_pdep). Recorded as a write only."""
+    norm = lambda e: str(e).replace(" ", "").lower()
+    return norm(stmt.left) == norm(stmt.right)
 
 def walk_subroutine(
     tree: SubroutineDefinitionConstruct,
@@ -402,6 +423,7 @@ def walk_subroutine(
         scope = Scope("routine", resolver=resolver)
 
     rec = SubroutineRecord(tree, scope)
+    rec.host = host
     walker = _Walker(rec, resolver)
     walker.define_routine_symbols()
     walker.walk_block(tree.body)
@@ -489,7 +511,8 @@ class _Walker:
                 self.walk_statement(stmt.classify(self.scope))
             case AssignmentStatement():
                 first = len(self.rec.events)
-                self.walk_expr(stmt.right, ln)
+                if not is_self_assignment(stmt):
+                    self.walk_expr(stmt.right, ln)
                 reads = tuple(
                     e for e in self.rec.events[first:] if isinstance(e, Access)
                 )
@@ -832,8 +855,14 @@ class _Walker:
 
     def walk_function_call(self, node: FunctionCall, ln: int) -> None:
         if node.intrinsic:
+            inquiry = node.get_name().lower() in INQUIRY_INTRINSICS
             for a in node.args:
-                self.walk_expr(a, ln)
+                value = a.value if isinstance(a, KeywordArgument) else a
+                if inquiry and self.is_designator(value):
+                    # lbound(x, 1), size(x), allocated(x): the descriptor, not the values
+                    self.walk_designator(value, "r", ln, context="inquiry")
+                else:
+                    self.walk_expr(a, ln)
             args = [
                 CallArg(a.keyword if isinstance(a, KeywordArgument) else None, None, a)
                 for a in node.args

@@ -78,6 +78,12 @@ def _path(sub) -> Path:
 
 # character intrinsics with an allocated result: no device version in nvfortran
 STRING_INTRINSICS = {"trim", "adjustl", "adjustr", "repeat"}
+# edit_files' comment on an assignment whose right-hand side used an excluded module
+EXCLUDED_MARKER = "the right-hand side used an excluded module"
+# names the edit pass keeps for the unit tests although their module is excluded, and that a device
+# cannot run: shr_infnan's nan/inf are derived-type constants assigned through an overloaded `=`
+# (set_nan_0d_double; UpdateDaylength's `daylength = nan` failed to compile as a device routine)
+HOST_ONLY_NAMES = {"nan", "inf", "shr_infnan_nan", "shr_infnan_posinf", "shr_infnan_neginf"}
 
 
 def call_tree(fut, roots: Iterable[str]) -> dict[str, object]:
@@ -215,8 +221,28 @@ class _Facts:
         rec = sub.record
         if rec is not None:
             out += [c.ln for c in rec.calls if str(c.name).split("%")[-1].lower() in ABORTS]
+        out += self.excluded_lines(sub)
+        if rec is not None:  # shr_infnan's `x = nan`: an assignment(=) overload with no device version
+            out += [a.ln for a in rec.accesses() if a.path.lower() in HOST_ONLY_NAMES]
         self._unsafe[sub.id] = sorted(set(out))
         return self._unsafe[sub.id]
+
+    def excluded_lines(self, sub) -> list[int]:
+        """
+        Executable lines the analysis replaced because they use a module it excludes (`!#py`
+        statements, `lhs = lhs` stand-ins of edit_files): the source runs code the device has
+        no version of (shr_infnan's `nan` assignment, a stream advance, a time query).
+        UpdateDaylength's `daylength = nan` was ported as a kernel and failed to compile.
+        """
+        from spel.transforms.acc_locals import first_executable
+
+        lines = getattr(sub, "sub_lines", None) or []
+        try:
+            first = first_executable(self.tree(sub), sub.record)
+        except BaseException:
+            first = sub.startline
+        return [lt.ln for lt in lines
+                if lt.ln >= first and ("!#py" in lt.line or EXCLUDED_MARKER in lt.line)]
 
     def string_intrinsic_lines(self, sub) -> list[int]:
         """

@@ -185,3 +185,26 @@ def test_patch_of_column_by_member_offset():
     assert guarded.kind == "interchange", guarded
     assert guarded.carried == {"pi": ["tot"]}
     assert unguarded.kind not in ("elementwise", "interchange", "column-parallel"), unguarded
+
+
+BOUNDS = """
+subroutine zero(bounds, x)
+  implicit none
+  type(bounds_type), intent(in) :: bounds
+  real(r8), intent(inout) :: x(:)
+  integer :: p
+  do p = bounds%begp, bounds%endp
+     x(p) = 0._r8
+  end do
+end subroutine zero
+"""
+
+
+def test_bounds_dummy_read_in_the_loop_is_copied_in():
+    """A kernel that reads the `bounds` dummy needs copyin(bounds): a caller whose bounds variable is
+    not on the device otherwise fails with "data in PRESENT clause was not found: bounds"."""
+    sub = StubSub(BOUNDS)
+    sub.filepath = None
+    (p,) = propose(sub, AccessMapper({sub.id: sub}), source=BOUNDS.splitlines())
+    assert p.kind == "elementwise" and p.copyin == ["bounds"]
+    assert any("copyin(bounds)" in l for l in p.directive_lines())

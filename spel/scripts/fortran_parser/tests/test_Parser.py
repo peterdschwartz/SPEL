@@ -451,3 +451,14 @@ read(unit,*) (a(i), i=1,n)"""
     assert [type(e).__name__ for e in w3.exprs] == ["InfixExpression", "Identifier"]
     assert isinstance(p, PrintStatement) and isinstance(p.exprs[0], IOImpliedDo)
     assert isinstance(r, ReadStatement) and isinstance(r.items[0], IOImpliedDo)
+
+
+def test_section_bound_expressions():
+    """`x(n+1:m, a:b*2)`: the `:` binds loosest, so each bound is a whole expression."""
+    from spel.scripts.fortran_parser.spel_ast import BoundsExpression
+
+    tree = parse_statements("subroutine s(x)\n  x(n+1:m, a:b*2, :, k) = 0\nend subroutine s").statements[0]
+    args = tree.body.statements[0].expression.left_expr.args
+    assert [type(a).__name__ for a in args] == ["BoundsExpression", "BoundsExpression", "BoundsExpression", "Identifier"]
+    assert str(args[0]).replace(" ", "") == "(n+1):m" and str(args[1]).replace(" ", "") == "a:(b*2)"
+    assert args[2].start is None and args[2].end is None

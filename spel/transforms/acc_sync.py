@@ -203,7 +203,7 @@ def _entries(maps) -> list[tuple[str, str, int, str]]:
     on call lines, its callees' effects (global accesses, argument statuses)."""
     out = []
     for kind, dicts in (("global", (maps.elmtype, maps.globals, maps.child_elmtype, maps.child_globals)),
-                        ("dummy", (maps.args,))):
+                        ("dummy", (maps.args,)), ("local", (maps.locals,))):
         for d in dicts:
             for path, rws in d.items():
                 out += [(path, rw.status, rw.ln, kind) for rw in rws]
@@ -357,6 +357,40 @@ def _children(st) -> list:
     return []
 
 
+def _condition_vars(expr) -> list[tuple[str, bool]]:
+    """(base name, referenced with parentheses) of every name an expression uses: identifiers
+    and the names of array references and function calls (the parser cannot tell an array
+    element from a function result; the caller resolves the name)."""
+    from spel.scripts.fortran_parser import spel_ast as A
+
+    out: list[tuple[str, bool]] = []
+
+    def walk(node):
+        if isinstance(node, A.Identifier):
+            out.append((str(node.value).split("%")[0].lower(), False))
+            return
+        if isinstance(node, A.FuncExpression):
+            fn = node.function
+            if isinstance(fn, A.Identifier):
+                out.append((str(fn.value).split("%")[0].lower(), True))
+            else:
+                walk(fn)
+            for a in node.args or []:
+                walk(a)
+            return
+        if isinstance(node, A.Node):
+            for v in vars(node).values():
+                if isinstance(v, A.Node):
+                    walk(v)
+                elif isinstance(v, (list, tuple)):
+                    for x in v:
+                        if isinstance(x, A.Node):
+                            walk(x)
+
+    walk(expr)
+    return out
+
+
 def _header_lines(st) -> list[int]:
     from spel.scripts.fortran_parser import spel_ast as A
 
@@ -410,8 +444,8 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
             if r is None:
                 continue
             key, dim, kind, ok = r
-            if kind == "dummy" and "%" not in path and dim == 0:
-                continue  # scalar dummy: a host value
+            if kind in ("dummy", "local") and "%" not in path and dim == 0:
+                continue  # scalar dummy or local: a host value (firstprivate/private in a kernel)
             if kind == "global" and "%" not in path and key not in out.device_written and "w" not in status:
                 continue  # module variable the host only reads and no device code writes
             stale, written = key in out.device_written, "w" in status
@@ -430,10 +464,32 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
 
     aborts = abort_calls(node.body)
 
+    def flag_condition(cond) -> bool:
+        """Every variable of the condition is a scalar no device code writes: a control flag
+        (`weights_updated`, `create_glacier_mec_landunit`, `do_budgets`), a loop count, a
+        function result (`get_do_transient_pfts()` has no variable at all). The header needs
+        no sync, and the branches' host code syncs inside them, so a branch not taken costs
+        nothing. An element or a section of an array, or a derived-type object, is not one."""
+        for n, is_ref in _condition_vars(cond):
+            r = types.resolve(sub, n)
+            if r is None:
+                if is_ref:
+                    continue  # a function (intrinsic or not): no variable
+                return False
+            key, dim, kind, _ = r
+            if dim != 0:
+                return False
+            if kind == "local":
+                continue  # a local scalar holds a host value after a kernel (a reduction count: `nbad > 0`)
+            if key in out.device_written:
+                return False
+        return True
+
     def cold(st, hi: int) -> bool:
         """An if construct that can abort (an error check), that replays a check spel
-        defer-checks moved out of a loop (`if (spel_dc_k > 0)`), or that tests a switch that is
-        off by default (OFF_BY_DEFAULT): its syncs go inside its branches."""
+        defer-checks moved out of a loop (`if (spel_dc_k > 0)`), that tests a switch that is
+        off by default (OFF_BY_DEFAULT), or whose condition reads only host flags
+        (flag_condition): its syncs go inside its branches."""
         from spel.scripts.db_export.trace import expr_names
         from spel.transforms.defer_checks import PREFIX
 
@@ -441,7 +497,8 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
             return False
         names = {n.lower() for n in expr_names(st.condition)}
         return (any(st.lineno <= ln <= hi for ln in aborts) or any(n.startswith(PREFIX) for n in names)
-                or bool(names & OFF_BY_DEFAULT))
+                or bool(names & OFF_BY_DEFAULT)
+                or (st.construct_end_ln != -1 and flag_condition(st.condition)))  # a block if, not `if (c) return`
 
     def returns_in(lo: int, hi: int) -> list[int]:
         return [st.lineno for st, _ in _walk(node.body) if isinstance(st, A.ReturnStatement) and lo <= st.lineno <= hi]

@@ -236,3 +236,26 @@ A report, made from the record and the parse tree's if guards; the edits are mad
 
 Actual-argument, pointer, allocation and `size` uses disqualify a variable. The walker
 records an initializer as an `init` write.
+
+## 2026-10-29: the remaining host syncs
+
+- `generate.HOST_SEGMENTS` is empty: dynSubgrid_driver is a device call. Its heat/water content
+  (dynConsBiogeophysMod, TotalWaterAndHeatMod) and weight bookkeeping (set_prior/old/new_*_weights)
+  run on the device; the weight-change path (transient land use, dyn_cnbal_*) stays host code under
+  `if (weights_updated)`. `tools/scope.py` lists what stays out.
+- acc-sync `cold` has a fourth rule, `flag_condition`: a block `if` whose condition reads only host
+  flags (scalars no device code writes, or local scalars such as a reduction count) gets its syncs
+  inside its branches. `if (weights_updated)`, `if (create_glacier_mec_landunit)`, `if (nbad > 0)`
+  cost nothing when not taken. A condition on an array element or a derived-type object keeps the
+  whole construct as one segment.
+- `spel/transforms/section_loops.py`: array-section assignments outside kernels become explicit loop
+  nests (`x(begc:endc,1:n) = 0` -> `do spel_i2; do spel_i1; x(spel_i1,spel_i2) = 0`), which acc-apply
+  then ports. Runs before acc-apply in the pipeline (`tools/section_loops_apply.py`).
+- `edit_files` keeps the write of an assignment whose right-hand side used an excluded module as the
+  no-op `lhs = lhs` (the walker records a self-assignment as a write only): pdep_interp's
+  `forc_pdep_grc` write used to vanish with the statement, so nothing pushed it. ndepStreamMod is no
+  longer excluded; the whole-type `update_atm2lnd_type` around ndep_interp goes away.
+- An internal procedure's record links its host (`SubroutineRecord.host`); the planner resolves
+  host-associated arrays through it (store_tsl_moisture's `h2osoi_liq_saved` was a "host scalar race").
+- Write statements no longer block loops: PrecisionControl, ch4_tran and DivideExtraSnowLayers count
+  on the device and report on the host only when the count is non-zero (a cold branch).

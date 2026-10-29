@@ -59,6 +59,11 @@ class Alias:
     also: tuple = ()    # further loop indices it covers injectively, jointly with `index`
 
 
+# the device data layer's flag: a kernel runs on the host while it is false (initialization, host
+# segments of elm_drv in targeted mode); every compute construct of the port carries it
+DEVICE_FLAG = "elm_device_ready"
+
+
 @dataclass
 class LoopProposal:
     routine: str
@@ -74,6 +79,7 @@ class LoopProposal:
     notes: list[Note] = field(default_factory=list)
     unsafe: list[tuple[int, str]] = field(default_factory=list)   # (1-based line, statement)
     private_arrays: list[str] = field(default_factory=list)       # local arrays written and read per iteration
+    copyin: list[str] = field(default_factory=list)               # `bounds`: a dummy the loop reads (copyin of present data is a no-op)
     children: list["LoopProposal"] = field(default_factory=list)  # proposals for the inner loops of a host loop
     order: list[str] = field(default_factory=list)  # interchange: the nest's indices in their new order
     npar: int = 1  # interchange: how many of `order` are parallel (collapsed)
@@ -100,6 +106,9 @@ class LoopProposal:
         clauses.extend(c for c in self.plan.clauses() if not c.startswith("collapse"))
         if self.private_arrays:
             clauses.append(f"private({', '.join(self.private_arrays)})")
+        if self.copyin:
+            clauses.append(f"copyin({', '.join(self.copyin)})")
+        clauses.append(f"if({DEVICE_FLAG})")  # runs on the host until the device data layer is up (initialization)
         out = [l.replace("!$omp", "!$acc") for l in format_directive(indent, "parallel loop", clauses)]
         if self.kind in ("column-parallel", "interchange"):
             out.append(f"{indent}!$acc loop seq   ! on each inner loop")
@@ -433,13 +442,18 @@ def _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines) 
         nest = [loop]
         while nest[-1].tight_child is not None and nest[-1].tight_child.index:
             nest.append(nest[-1].tight_child)
+        if any(_covered_by_directive(l, directives, source) for l in nest[1:]):
+            # an inner loop of the nest already carries a directive (an earlier pass ported it
+            # while the outer loop was carried): collapsing over it would nest two compute loops
+            out.append(LoopProposal(sub.name, fname, loop, [loop], "has-directive"))
+            continue
         lo, hi = loop.start_ln, loop.end_ln
         indices = {l.index for l in loop.walk() if l.index}
         nest_idx = [l.index for l in nest]
         aliases = _aliases(rec, lo, hi, indices)
         by_path: dict[str, list] = {}
         for a in rec.accesses():
-            if lo <= a.ln <= hi and a.context not in ("do", "size"):
+            if lo <= a.ln <= hi and a.context not in ("do", "size", "inquiry"):
                 by_path.setdefault(a.path, []).append(a)
         carried: dict[str, list[str]] = {}
         scatter: dict[str, list[str]] = {}
@@ -513,6 +527,11 @@ def _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines) 
             kind, reason = "elementwise", ""
         prop = LoopProposal(sub.name, fname, loop, nest if kind == "elementwise" else [loop], kind, reason,
                             carried, scatter, same_value, private_arrays=private_arrays)
+        # a `bounds` dummy read in the loop (`do p = bounds%begp, bounds%endp`): the caller's variable is on
+        # the device only when someone entered it (elm_drv's bounds_clump is, other callers' locals are not)
+        if "bounds" in {d.name.lower() for d in rec.dummy_args} and any(
+                a.base.lower() == "bounds" and lo <= a.ln <= hi for a in rec.accesses()):
+            prop.copyin = ["bounds"]
         if kind == "interchange":  # the two-loop swap, or the reorder
             prop.order, prop.npar = reorder if reorder is not None else ([nest_idx[1], nest_idx[0]], 1)
         if kind == "carried" and loop.children:

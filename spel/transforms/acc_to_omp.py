@@ -422,7 +422,7 @@ def plan_compute_loop(
     for var, (kind, accesses) in sorted(inside.items(), key=lambda kv: kv[1][1][0]):
         if var in par_idx or var in red_vars:
             continue
-        decl = rec.declaration(var)
+        decl = rec.declaration(var, host=True)  # a host-associated array is an array, not a scalar
         if decl is not None and "parameter" in decl.attrs:
             continue
         written = any("w" in s for _, s, _ in accesses)

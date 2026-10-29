@@ -84,7 +84,6 @@ bad_modules = {
     "shr_mct_mod",
     "shr_pcdf_mod",
     "shr_pio_mod",
-    "ndepstreammod",
     "spmdgathscatmod",
     "perfmod_gpu",
     "dynpftfilemod",
@@ -460,7 +459,7 @@ def handle_bad_inst(state: ParseState, logger: Logger):
             start_index = state.get_start_index()
             _, _ = state.line_it.consume_until(regex_do_end, regex_do_start)
             state.line_it.comment_cont_block(index=start_index)
-        else:
+        elif not keep_lhs_write(state, l_cont):
             # simple statement just remove
             set_comment(state, logger)
     elif (
@@ -679,6 +678,62 @@ class NameSetPattern:
 
 def flat_names(names: set[str]) -> set[str]:
     return {n for el in names for n in el.split("|") if n}
+
+
+_NOT_ASSIGNMENT = re.compile(
+    r"^\s*(\w+\s*:\s*)?(if|do|call|where|forall|select|case|else|end|print|write|read|allocate|deallocate|"
+    r"nullify|return|cycle|exit|goto|go\s+to|stop|use|implicit|type|class|integer|real|logical|character)\b",
+    re.IGNORECASE,
+)
+_DESIGNATOR = re.compile(r"[A-Za-z_]\w*(\s*\([^=]*\))?(\s*%\s*[A-Za-z_]\w*(\s*\([^=]*\))?)*")
+
+
+def top_level_assignment(text: str) -> int | None:
+    """Index of the `=` of an assignment statement: at parenthesis depth 0, outside quotes,
+    not part of `==`, `/=`, `<=`, `>=` or `=>`."""
+    depth, quote = 0, ""
+    for i, c in enumerate(text):
+        if quote:
+            if c == quote:
+                quote = ""
+            continue
+        if c in "'\"":
+            quote = c
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == "=" and depth == 0:
+            if text[i + 1 : i + 2] in ("=", ">") or text[i - 1 : i] in ("=", "/", "<", ">"):
+                return None
+            return i
+    return None
+
+
+def keep_lhs_write(state: ParseState, l_cont: str) -> bool:
+    """
+    `lhs = <expression using a banned name>`: the statement cannot stay (the name is gone
+    from the unit test), but the analysis must keep the write of `lhs`. pdep_interp's
+    `atm2lnd_vars%forc_pdep_grc(g) = sdat%avs(1)%rAttr(1,ig) / ...` (sdat is a shr_strdata
+    type) was commented out whole, so no analysis saw forc_pdep written and the device data
+    layer never pushed it. The statement becomes the no-op `lhs = lhs`, which the scope
+    walker records as a write only (a self-assignment reads nothing). Returns False when the
+    statement is not such an assignment (the caller comments it out).
+    """
+    text = l_cont.split("!")[0].strip() if "'" not in l_cont and '"' not in l_cont else l_cont.strip()
+    if not text or _NOT_ASSIGNMENT.match(text):
+        return False
+    pos = top_level_assignment(text)
+    if pos is None:
+        return False
+    lhs = text[:pos].strip()
+    if not _DESIGNATOR.fullmatch(lhs):
+        return False
+    bad = flat_names(state.bad_names)
+    if any(n.lower() in bad for n in re.findall(r"[A-Za-z_]\w*", lhs)):
+        return False
+    rewrite_statement(state, f"{lhs} = {lhs}  ! spel: the right-hand side used an excluded module")
+    return True
 
 
 def split_top_level(text: str, sep: str = ",") -> list[str]:

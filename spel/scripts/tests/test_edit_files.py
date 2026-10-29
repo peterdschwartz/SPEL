@@ -301,3 +301,39 @@ def test_remove_cpp_directives_keeps_one_entry_per_line(tmp_path):
     assert [lt.ln for lt in lines] == [0, 1, 2, 3, 4]
     assert lines[2].commented and "shr_assert.h" in lines[2].line
     assert lines[3].line.strip() == "integer :: i"
+
+
+STREAM_USER = """module pdepstreammod
+  use shr_strdata_mod, only : shr_strdata_type
+  implicit none
+  type(shr_strdata_type) :: sdat
+contains
+  subroutine pdep_interp(bounds, atm2lnd_vars)
+    type(bounds_type), intent(in) :: bounds
+    type(atm2lnd_type), intent(inout) :: atm2lnd_vars
+    integer :: g, ig
+    real(r8) :: dayspyr
+    ig = 0
+    do g = bounds%begg, bounds%endg
+       ig = ig + 1
+       atm2lnd_vars%forc_pdep_grc(g) = sdat%avs(1)%rAttr(1,ig) / &
+            (secspday * dayspyr)
+    end do
+    sdat%nstreams = 0
+    if (sdat%nstreams == 0) ig = 1
+  end subroutine pdep_interp
+end module pdepstreammod
+"""
+
+
+def test_assignment_with_excluded_rhs_keeps_the_write():
+    """The write of the left-hand side stays in the analysis as a self-assignment; a
+    statement that writes the excluded object itself is still commented out."""
+    out = edit(STREAM_USER, "pdepstreammod")
+    kept = active(out)
+    assert "atm2lnd_vars%forc_pdep_grc(g) = atm2lnd_vars%forc_pdep_grc(g)" in kept
+    assert "rAttr" not in kept
+    i = next(i for i, l in enumerate(out) if "forc_pdep_grc(g) = atm2lnd_vars" in l)
+    assert out[i + 1].lstrip().startswith("!#py")  # the continuation line
+    assert "sdat%nstreams = 0" not in kept
+    assert "if (sdat%nstreams == 0)" not in kept

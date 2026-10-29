@@ -259,3 +259,78 @@ def test_targeted_strip_removes_an_application():
     src = ["  call a()", f"  !$acc update self(p, &", f"  !$acc&   q) if_present if({targeted.COND})",
            f"  call elm_device_pull_all()  {targeted.TAG}", "  !$acc update self(r) if_present", "  call b()"]
     assert targeted.strip(src) == ["  call a()", "  !$acc update self(r) if_present", "  call b()"]
+
+
+FLAG_BRANCH = """subroutine weights(n, x, y, updated)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(inout) :: x(:), y(:)
+  logical, intent(in) :: updated
+  integer :: i
+  !$acc parallel loop default(present)
+  do i = 1, n
+     x(i) = 1.0_r8
+  end do
+  if (updated) then
+     do i = 1, n
+        y(i) = x(i)
+     end do
+  end if
+  if (x(1) > 0.0_r8) then
+     y(1) = x(2)
+  end if
+end subroutine weights"""
+
+
+def test_flag_guarded_branch_syncs_inside():
+    """dynSubgrid_driver's `if (weights_updated)`: the condition reads a host flag, so the
+    host loop inside syncs inside the branch (nothing moves when the weights did not change).
+    A condition that reads device-written data keeps the whole construct as one segment."""
+    lines = FLAG_BRANCH.split("\n")
+    sub = StubSub(FLAG_BRANCH)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "x")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    acc_sync._segments(rs, sub, parse_statements(FLAG_BRANCH).statements[0],
+                       acc_sync._spans(find_directives(lines), sub.record),
+                       acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub)), lines, acc_sync._Types(fut), out)
+    firsts = sorted((s.first, s.after, s.header_only) for s in rs.segments)
+    assert (11, 14, False) in firsts          # the loop inside `if (updated)`, not the if at line 10
+    assert all(f != 10 for f, _, _ in firsts)
+    assert (15, 18, False) in firsts          # `if (x(1) > 0)`: x is device-written, one segment
+
+
+LOCAL_FILL = """subroutine divide(n, x, y)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(in) :: x(:)
+  real(r8), intent(inout) :: y(:)
+  real(r8) :: work(n)
+  integer :: i
+  !$acc enter data create(work)
+  do i = 1, n
+     work(i) = x(i) * 2.0_r8
+  end do
+  !$acc parallel loop default(present)
+  do i = 1, n
+     y(i) = work(i)
+  end do
+  !$acc exit data delete(work)
+end subroutine divide"""
+
+
+def test_local_array_filled_on_the_host_is_pushed():
+    """DivideSnowLayers: dzsno, swice, ... filled by a host loop, read by the next kernel
+    (created-but-unfilled device copies). The host segment pushes the local arrays it writes."""
+    lines = LOCAL_FILL.split("\n")
+    sub = StubSub(LOCAL_FILL)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "y")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    acc_sync._segments(rs, sub, parse_statements(LOCAL_FILL).statements[0],
+                       acc_sync._spans(find_directives(lines), sub.record),
+                       acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub)), lines, acc_sync._Types(fut), out)
+    (seg,) = rs.segments
+    assert seg.first == 8 and seg.writes == {"work"} and "i" not in seg.writes  # the scalar index is not synced

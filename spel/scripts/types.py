@@ -1131,18 +1131,19 @@ class Precedence(Enum):
     # Fortran operator precedence, lowest to highest
     LOWEST = 1
     ASSIGN = 2
-    OR = 3
-    AND = 4
-    NOT = 5
-    EQUALS = 6
-    LESSGREATER = 7
-    CONCAT = 8
-    SUM = 9
-    PRODUCT = 10
-    EXP = 11
-    PREFIX = 12
-    BOUNDS = 13
-    CALL = 14
+    SECTION = 3  # the `:` of a subscript triplet binds loosest: `n+1:m` is (n+1):m
+    OR = 4
+    AND = 5
+    NOT = 6
+    EQUALS = 7
+    LESSGREATER = 8
+    CONCAT = 9
+    SUM = 10
+    PRODUCT = 11
+    EXP = 12
+    PREFIX = 13
+    BOUNDS = 14
+    CALL = 15
 
 
 @dataclass

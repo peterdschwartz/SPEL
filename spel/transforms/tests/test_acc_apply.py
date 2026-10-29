@@ -130,12 +130,13 @@ def test_parallel_loops_first():
         for x in sorted(_loop_edits(port, lines), key=lambda x: (-x.ln, -x.order)):
             lines[x.ln:x.ln] = x.lines
     code = [l.strip() for l in lines if l.strip().startswith(("do ", "!$acc", "end do"))]
-    assert code[:4] == [code[0], "do j = 1, nlev", "do fc = 1, num", "!$acc loop seq"], code
+    assert code[1] == "!$acc   if(elm_device_ready)"  # the device data layer's flag, on every generated directive
+    assert code[2:5] == ["do j = 1, nlev", "do fc = 1, num", "!$acc loop seq"], code
     assert "collapse(2)" in code[0]
-    assert code[4] == "do pi = 1, 4"
+    assert code[5] == "do pi = 1, 4"
     k = code.index("do k = 1, ntrans")
     assert code[k + 1:k + 4] == ["do fc = 1, num", "!$acc loop seq", "do j = 1, nlev"]
-    assert "collapse(2)" in code[k - 1]
+    assert "collapse(2)" in code[k - 2]  # the directive; its if(elm_device_ready) continuation follows
 
 
 MEMBERS_INSIDE = """

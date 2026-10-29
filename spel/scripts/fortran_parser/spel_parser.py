@@ -91,7 +91,7 @@ precedences = {
     TokenTypes.SLASH: Precedence.PRODUCT,
     TokenTypes.ASTERISK: Precedence.PRODUCT,
     TokenTypes.LPAREN: Precedence.CALL,
-    TokenTypes.COLON: Precedence.BOUNDS,
+    TokenTypes.COLON: Precedence.SECTION,
     TokenTypes.PERCENT: Precedence.BOUNDS,
     TokenTypes.EXP: Precedence.EXP,
     TokenTypes.EQUIV: Precedence.EQUALS,
