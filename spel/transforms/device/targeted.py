@@ -281,11 +281,17 @@ def apply(fut, srcroot: Path, dry_run: bool = False) -> list[str]:
                             [f"{ind}call elm_device_filters_update(to_device=.false.)  {TAG}"]))
                 if not seg.header_only:
                     ins.append((seg.after, -2, [f"{ind}call elm_device_filters_update(to_device=.true.)  {TAG}"]))
-    sub = fut.subroutine_dict[DRV]
-    for c in sub.record.calls:
-        if c.name.split("%")[-1].lower() in PULL_ALL_BEFORE:
-            ind = acc_sync._indent(lines[c.ln])
-            ins.append((c.ln, 5, [f"{ind}call elm_device_pull_all()  {TAG}: restart writes read the whole state"]))
+    # restFile_write is in a module the analysis excludes (no call event): its call from the parse tree
+    from spel.scripts.fortran_parser.module_spec import callee_name, parse_modules, statements_with_next
+
+    mod = next(m for m in parse_modules(drv) if m.name.lower() == "elm_driver")
+    body = next(p for p in mod.subprograms if p.name.lower() == "elm_drv")
+    pulls = [st.lineno for st, _ in statements_with_next(body.body, body.end_ln) if callee_name(st) in PULL_ALL_BEFORE]
+    if not pulls:
+        raise DeviceDataError(f"{drv.name}: no call of {sorted(PULL_ALL_BEFORE)} in elm_drv")
+    for ln in pulls:
+        ind = acc_sync._indent(lines[ln])
+        ins.append((ln, 5, [f"{ind}call elm_device_pull_all()  {TAG}: restart writes read the whole state"]))
     # calls the analysis cannot see into: their derived-type arguments whole, pulled before and pushed after
     upd = _update_routines(srcroot)
     needed: dict[str, set[str]] = {}
