@@ -822,6 +822,8 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
     ], srcroot, commit)
     L += ["  use elm_varctl, only : iulog, elm_device_ready"]
     if spmd:
+        L += ["  use perf_mod,   only : t_startf, t_stopf"]
+    if spmd:
         L += ["  use spmdMod,    only : masterproc, iam"]
     for k in group_keys:
         L.append(f"  use {GROUP_MODULE[k]}, only : {k}_copyin, {k}_attach, {k}_check, {k}_update")
@@ -930,8 +932,12 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
         "         elm_device_fullsync .or. ntransitions <= full_until",
         "    if (elm_device_fullsync .or. ntransitions <= full_until) then",
     ]
+    if spmd:
+        L += ["       call t_startf(merge('device_push_whole', 'device_pull_whole', to_device))"]
     L += ["       call globals_update(to_device)"]
     L += [f"       call {k}_update(to_device)" for k in group_keys]
+    if spmd:
+        L += ["       call t_stopf(merge('device_push_whole', 'device_pull_whole', to_device))"]
     L += [
         "       ! host and device agree after the first whole push: targeted from here on",
         "       if (to_device) elm_device_fullsync = fullsync_requested",
@@ -954,8 +960,12 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
         "#ifdef _OPENACC",
         "    if (.not. elm_device_resident .or. elm_device_fullsync) return",
     ]
+    if spmd:
+        L += ["    call t_startf('device_pull_all')"]
     L += ["    call globals_update(.false.)"]
     L += [f"    call {k}_update(.false.)" for k in group_keys]
+    if spmd:
+        L += ["    call t_stopf('device_pull_all')"]
     L += ["#endif", "  end subroutine elm_device_pull_all", ""]
     L += [
         "  subroutine elm_device_filters_update(to_device)",

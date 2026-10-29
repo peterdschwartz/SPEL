@@ -15,7 +15,11 @@ sides) copy ~13 GB per step on the stride-8 case. Here the transitions only swit
 - the clump filters (arrays of derived types, which acc-sync cannot update member by
   member) through `elm_device_filters_update` around the segments that touch them;
 - the whole state before `restFile_write` (`elm_device_pull_all`): it reads the state
-  through the pointers registered by restartvar, which the analysis does not follow.
+  through the pointers registered by restartvar, which the analysis does not follow;
+- around elm_drv's calls into modules the analysis excludes (ndep_interp, VOCEmission: their
+  calls are removed before the analysis, so what they read and write is unknown): every
+  derived-type instance they are passed is pulled whole before and pushed whole after
+  (`update_<type>` of the device data layer).
   History needs nothing extra: hist_htapes_wrapup writes the hbuf (pulled in
   hist_compute_update_host) and ldomain/level constants the device never writes.
 
@@ -151,6 +155,59 @@ def check_lines(fut, drv: Path) -> None:
             f"(first: line {missing[0][0] + 1} {missing[0][1]}); strip, then `spel analyze` again")
 
 
+def excluded_calls(fut, drv: Path) -> list[tuple[int, int, list[tuple[str, str]]]]:
+    """
+    (first line, last line, [(instance, type)]) of elm_drv's calls of routines of modules the
+    analysis excludes (edit_files.bad_modules, through the use statements of elm_driver and
+    elm_drv), with the derived-type instances among their actual arguments.
+    """
+    from spel.scripts.edit_files import bad_modules
+    from spel.scripts.fortran_parser import spel_ast as A
+    from spel.scripts.fortran_parser.module_spec import callee_name, parse_modules, statements_with_next
+    from spel.scripts.registrations import _designator_parts
+    from spel.transforms.acc_sync import _Types, _end_of
+
+    mod = next(m for m in parse_modules(drv) if m.name.lower() == "elm_driver")
+    body = next(p for p in mod.subprograms if p.name.lower() == "elm_drv")
+    names: set[str] = set()
+    for st in list(getattr(mod.spec, "statements", [])) + list(body.body.statements):
+        if isinstance(st, A.UseStatement) and st.module.lower() in bad_modules and st.has_only:
+            names |= {str(o).split("=>")[0].strip().lower() for o in st.objs}
+    for skip in ("t_startf", "t_stopf", "endrun", "shr_sys_flush", "shr_sys_abort", "get_curr_date",
+                 "get_curr_time_string", "restfile_write", "restfile_filename", "hist_htapes_wrapup",
+                 "hist_update_hbuf", "elm_device_update", "elm_device_copyin"):
+        names.discard(skip)
+    types = _Types(fut)
+    sub = fut.subroutine_dict[DRV]
+    lines = drv.read_text().split("\n")
+    out = []
+    for st, _ in statements_with_next(body.body, body.end_ln):
+        name = callee_name(st)
+        if name is None or name not in names:
+            continue
+        insts = []
+        for arg in getattr(st.function, "args", []) or []:
+            parts = _designator_parts(arg)
+            if parts is None or parts[1]:
+                continue
+            b = types.base(sub, parts[0])
+            if b is not None and b[0] in types.types and b[1] == 0 and b[0] != "bounds_type":
+                insts.append((parts[0], b[0]))
+        out.append((st.lineno, _end_of(st, lines), insts))
+    return out
+
+
+def _update_routines(srcroot: Path) -> dict[str, str]:
+    """update_<type> -> the DeepCopy*Mod that has it (the generated device data layer)."""
+    out = {}
+    for f in sorted((srcroot / "components" / "elm" / "src" / "data_types").glob("DeepCopy*Mod.F90")):
+        for line in f.read_text(errors="replace").split("\n"):
+            t = line.strip().lower()
+            if t.startswith("subroutine update_") and t.endswith("(this, to_device)"):
+                out[t.split()[1].split("(")[0]] = f.stem
+    return out
+
+
 def plan(fut, drv: Path) -> Targeted:
     from spel.transforms import acc_sync
 
@@ -229,10 +286,25 @@ def apply(fut, srcroot: Path, dry_run: bool = False) -> list[str]:
         if c.name.split("%")[-1].lower() in PULL_ALL_BEFORE:
             ind = acc_sync._indent(lines[c.ln])
             ins.append((c.ln, 5, [f"{ind}call elm_device_pull_all()  {TAG}: restart writes read the whole state"]))
+    # calls the analysis cannot see into: their derived-type arguments whole, pulled before and pushed after
+    upd = _update_routines(srcroot)
+    needed: dict[str, set[str]] = {}
+    for first, last, insts in excluded_calls(fut, drv):
+        ind = acc_sync._indent(lines[first])
+        for inst, typ in insts:
+            r = f"update_{typ}"
+            if r not in upd:
+                t.report.append(f"excluded call at line {first + 1}: no {r} for {inst} (left unsynced)")
+                continue
+            needed.setdefault(upd[r], set()).add(r)
+            ins.append((first, 6, [f"{ind}if (.not. elm_device_fullsync) call {r}({inst}, .false.)  {TAG}: called code the analysis excludes"]))
+            ins.append((last + 1, -3, [f"{ind}if (.not. elm_device_fullsync) call {r}({inst}, .true.)  {TAG}"]))
+        t.report.append(f"excluded call at line {first + 1}: {', '.join(i for i, _ in insts) or 'no instances'}")
     use_ln = next((i for i, x in enumerate(lines) if x.lstrip().lower().startswith(f"use {MODULE_NAME.lower()}")), None)
     if use_ln is None:
         raise DeviceDataError(f"{drv.name}: no `use {MODULE_NAME}`")
-    ins.append((use_ln + 1, 0, [f"  use {MODULE_NAME}, only : {', '.join(USE_NAMES)}  {TAG}"]))
+    ins.append((use_ln + 1, 0, [f"  use {MODULE_NAME}, only : {', '.join(USE_NAMES)}  {TAG}"]
+                               + [f"  use {m}, only : {', '.join(sorted(rs))}  {TAG}" for m, rs in sorted(needed.items())]))
     for ln, _, new in sorted(ins, key=lambda x: (-x[0], -x[1])):
         lines[ln:ln] = new
     if not dry_run:
