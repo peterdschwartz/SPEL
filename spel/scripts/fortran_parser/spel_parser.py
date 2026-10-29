@@ -54,6 +54,7 @@ from spel.scripts.fortran_parser.spel_ast import (
     ModuleConstruct,
     NameListStatement,
     NullifyStatement,
+    ParameterStatement,
     PrefixExpression,
     PrintStatement,
     ProcedureStatement,
@@ -571,6 +572,8 @@ class Parser:
                 stmt = self.parse_access_or_save_statement()
             case Tok.IDENT if self.is_data_statement():
                 stmt = self.parse_data_statement()
+            case Tok.IDENT if self.is_parameter_statement():
+                stmt = self.parse_parameter_statement()
             case Tok.IDENT if stmt_label is not None and self.is_format_statement():
                 stmt = self.parse_format_statement()
             case _:
@@ -1030,6 +1033,39 @@ class Parser:
         # a DATA implied-do is followed by its value list, `(...) /`
         rest = self.text_after_peek_paren()
         return rest.startswith("/") and not rest.startswith("/=")
+
+    def is_parameter_statement(self) -> bool:
+        """
+        `parameter` is not reserved: `parameter (a=1, b=2)` with nothing after the
+        parentheses is a PARAMETER statement, `parameter(i) = x` an assignment.
+        """
+        return (
+            self.cur_token.literal.lower() == "parameter"
+            and self.peekTokenIs(Tok.LPAREN)
+            and self.text_after_peek_paren() == ""
+        )
+
+    @Trace.trace_decorator("parse_parameter")
+    def parse_parameter_statement(self) -> ParameterStatement:
+        """
+        parameter (name = expr [, name = expr]...)
+        Exit: cur_token is the closing ')'
+        """
+        tok = self.cur_token
+        self.expect_peek_and_advance(Tok.LPAREN)
+        constants = []
+        while True:
+            self.next_token()
+            self.cur_keyword_as_variable()
+            name = self.parse_identifier()
+            self.expect_peek_and_advance(Tok.ASSIGN)
+            self.next_token()
+            constants.append((name, self.parse_expression(Precedence.LOWEST)))
+            if not self.peekTokenIs(Tok.COMMA):
+                break
+            self.next_token()
+        self.expect_peek_and_advance(Tok.RPAREN)
+        return ParameterStatement(tok, constants)
 
     def is_format_statement(self) -> bool:
         """`<label> format (...)` with nothing after the parenthesized spec"""

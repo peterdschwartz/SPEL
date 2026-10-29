@@ -220,3 +220,42 @@ def test_dedupe_sync_blocks():
     assert acc_sync.dedupe_sync_blocks(lines) == [
         "  x = 1", tag, *upd, "  !$acc update device(c) if_present",
         "  !$acc update self(d)", "  !$acc update self(d)", "  y = 2"]   # hand-written updates are left alone
+
+
+def test_boundary_segments_and_cond():
+    """Accesses outside the routine (elm_drv's coupler): push what is written before at the first
+    statement, pull what is read after (and device-written) before `end subroutine`."""
+    lines = SRC.split("\n")
+    sub = StubSub(SRC)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    types = acc_sync._Types(fut)
+    spans = acc_sync._spans(find_directives(lines), sub.record)
+    entries = acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub))
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "x")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    node = parse_statements(SRC).statements[0]
+    acc_sync._segments(rs, sub, node, spans, entries, lines, types, out,
+                       boundary=([("y", "w"), ("x", "r")], [("x", "r"), ("y", "r")]))
+    start, end = rs.segments[0], rs.segments[-1]
+    # the first statement is the kernel loop (line 6): the push goes above its directive
+    assert (start.first, start.after, start.writes, start.stale) == (6, 6, {"y"}, set())
+    # y is not device-written: only x is pulled at the end
+    assert (end.first, end.header_only, end.stale) == (len(lines) - 1, True, {"x"})
+
+    by_file = acc_sync.edits(acc_sync.SyncPlan(routines=[rs]), {None: lines}, cond=".not. full")
+    got = {(ln, tuple(new)) for ln, _, new in by_file[None]}
+    assert (5, ("  !$acc update device(y) if_present if(.not. full)",)) in got
+    assert (len(lines) - 1, (acc_sync.TAG + ": device data this host code uses",
+                             "!$acc update self(x) if_present if(.not. full)")) in got
+    # the conditional updates are recognised as acc-sync blocks
+    block = ["  !$acc update self(x) if_present if(.not. full)"] * 2
+    assert acc_sync.dedupe_sync_blocks(block) == block[:1]
+
+
+def test_targeted_strip_removes_an_application():
+    from spel.transforms.device import targeted
+
+    src = ["  call a()", f"  !$acc update self(p, &", f"  !$acc&   q) if_present if({targeted.COND})",
+           f"  call elm_device_pull_all()  {targeted.TAG}", "  !$acc update self(r) if_present", "  call b()"]
+    assert targeted.strip(src) == ["  call a()", "  !$acc update self(r) if_present", "  call b()"]

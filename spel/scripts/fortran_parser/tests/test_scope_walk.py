@@ -118,6 +118,30 @@ def test_data_statement():
     assert not rec.accesses(path="j", origin=Origin.LOCAL)
 
 
+def test_parameter_statement():
+    # F77-style PARAMETER statement after the declarations (lnd_import's vapor-pressure
+    # constants); `parameter(i) = 1` stays an assignment to an array named parameter
+    txt = """
+subroutine s(x)
+  implicit none
+  real(r8), intent(out) :: x
+  real(r8) :: a0, a1
+  integer :: parameter(2)
+  parameter (a0=6.1_r8    , a1=4.4e-01_r8 &
+       )
+  parameter(1) = 2
+  x = a0 + a1
+end subroutine s
+"""
+    rec = walk(txt)
+    assert rec.last_decl_ln == 6
+    assert "parameter" in rec.declarations["a0"].attrs and "parameter" in rec.declarations["a1"].attrs
+    assert "parameter" not in rec.declarations["parameter"].attrs
+    assert not rec.accesses(path="a0", status="w")
+    assert ("w", "parameter", 8) in acc(rec)
+    assert ("r", "a0", 9) in acc(rec)
+
+
 def test_format_statement_is_skipped():
     txt = """
 subroutine s(x)

@@ -230,7 +230,10 @@ feature that needs to know what a statement *is* or which names it uses must get
   shows up there (e.g. `SemanticError: Undeclared symbol ...`) and `spel create` refuses it.
 - **Line numbers are 0-based indices** into the source file everywhere (`LineTuple.ln`,
   `Subroutine.startline`, the record's events and loops). Add 1 when printing file lines.
-  (Files with `#include "shr_assert.h"` used to be off by one; fixed in `remove_cpp_directives`.)
+  (Files with `#include "shr_assert.h"` used to be off by one; fixed in `remove_cpp_directives`.
+  Lines after a removed cpp block of about 8+ lines, which cpp collapses into one line marker, were
+  shifted until 2026-10-28; fixed in `modify_file`/`check_sections`. Edits placed by earlier analyses
+  in such files may be misplaced.)
 - `Subroutine.record` (`SubroutineRecord`, `scope_walk.py`) is the source of truth for a routine:
   declarations (rank, attributes, intent), every access with line, status and origin, calls,
   associate frames, and `loop_nest` (`LoopInfo`: extent, index, parent/children, variables read by

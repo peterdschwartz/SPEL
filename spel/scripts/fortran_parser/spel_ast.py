@@ -1283,6 +1283,29 @@ class SaveStatement(Statement):
         return {"Node": "SaveStatement", "Names": self.names}
 
 
+class ParameterStatement(Statement):
+    """parameter (name = expr [, name = expr]...): named constants declared earlier"""
+
+    def __init__(self, tok: Token, constants: list[tuple[Identifier, Expression]]):
+        self.token = tok
+        self.constants: list[tuple[Identifier, Expression]] = constants
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return "parameter (" + ", ".join(f"{n} = {v}" for n, v in self.constants) + ")"
+
+    def to_dict(self):
+        return {
+            "Node": "ParameterStatement",
+            "constants": [{"name": str(n), "value": v.to_dict()} for n, v in self.constants],
+        }
+
+
 class ModuleConstruct(Statement):
     """
     module name / specification part / [contains / subprograms] / end module.

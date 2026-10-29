@@ -1318,7 +1318,13 @@ def modify_file(
         parsed_lts = apply_comments(state.work_lines)
         write_lines = [line.line for line in parsed_lts]
 
-    parsed_lines = [line.line for line in parsed_lts]
+    # one entry per line of the file, at its own index: callers number the lines by position
+    # (unwrap_section), and cpp collapses longer runs of removed lines (an inactive #ifdef
+    # block) into one marker that remove_cpp_directives skips, so a compact list would shift
+    # every line after such a block (the routines' cpp_start/cpp_end are file lines too)
+    parsed_lines = [""] * max(len(state.orig_lines), max((lt.ln for lt in parsed_lts), default=-1) + 1)
+    for lt in parsed_lts:
+        parsed_lines[lt.ln] = lt.line
 
     if overwrite:
         out_fn = f"{case_dir}/{fn.name}"

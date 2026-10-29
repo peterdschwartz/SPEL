@@ -60,6 +60,7 @@ class Segment:
     stale: set[str] = field(default_factory=set)  # of those, what device code writes: update self first
     returns: list[int] = field(default_factory=list)  # lines of return statements inside
     header_only: bool = False  # the header reads of a construct holding kernels
+    skipped: set[str] = field(default_factory=set)  # paths it touches that cannot be updated
 
 
 @dataclass
@@ -209,8 +210,20 @@ def _entries(maps) -> list[tuple[str, str, int, str]]:
     return out
 
 
-def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = ()) -> SyncPlan:
-    """The host segments of the call tree's routines and what each must sync."""
+def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
+         device_spans: Optional[dict[str, list[tuple[int, int]]]] = None,
+         boundary: Optional[dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]]] = None) -> SyncPlan:
+    """
+    The host segments of the call tree's routines and what each must sync.
+
+    device_spans: routine id -> the line spans that run on the device, in place of the
+    ones derived from the routine's kernels and calls (elm_drv: the calls its device
+    transitions put on the device, which leave some kernel routines on the host).
+    boundary: root id -> (accesses before, accesses after) the root by code outside the
+    analysis, as (path, status) in the root's scope: what is written before is pushed at
+    the root's first statement, what is read after and written by device code is pulled
+    at its end (elm_drv: the coupler import and export around it).
+    """
     from spel.scripts.fortran_parser.module_spec import parse_modules
     from spel.scripts.record_access import AccessMapper
 
@@ -267,6 +280,9 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = ()) -> SyncPlan:
     for sid in roots:
         if sid in tree and sid not in device_lines and sid not in out.seq:
             device_lines[sid] = []
+    for sid, spans in (device_spans or {}).items():
+        if sid in tree:
+            device_lines[sid] = list(spans)
 
     # what device code writes (keys of _Types.resolve): in kernels (with the routine-seq
     # callees' effects on their call lines), then through the argument bindings: a dummy
@@ -306,7 +322,8 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = ()) -> SyncPlan:
         if node is None:
             continue
         rs = RoutineSync(sid, path)
-        _segments(rs, s, node, device_lines[sid], _entries(maps[sid]), facts.lines(s), types, out)
+        _segments(rs, s, node, device_lines[sid], _entries(maps[sid]), facts.lines(s), types, out,
+                  (boundary or {}).get(sid))
         if rs.segments:
             out.routines.append(rs)
     return out
@@ -349,7 +366,7 @@ def _header_lines(st) -> list[int]:
 
 
 def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries, lines: list[str],
-              types: _Types, out: SyncPlan) -> None:
+              types: _Types, out: SyncPlan, boundary=None) -> None:
     from spel.scripts.fortran_parser import spel_ast as A
     from spel.transforms.acc_locals import first_executable
 
@@ -368,9 +385,11 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
         if kind != "global":
             return True
         sym = sub.record.lookup(base)
-        if sym is not None:
-            return sym.origin in (Origin.GLOBAL, Origin.EXTERNAL)
         v = types.globals.get(base)
+        if sym is not None and not (sym.origin is Origin.EXTERNAL and v is not None):
+            return sym.origin in (Origin.GLOBAL, Origin.EXTERNAL)
+        # unknown here, or only through the external fallback (a whole `use` of a module outside
+        # the analysis): an analyzed module's variable is not visible without a use statement
         mod = str(getattr(v, "declaration", "") or "").lower()
         if v is None or not mod or not types.public(mod, base):
             return False
@@ -400,6 +419,7 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
                 continue
             if not ok or not in_scope(path, kind):
                 rs.skipped.add(path)
+                seg.skipped.add(path)
                 continue
             if written:
                 seg.writes.add(path)
@@ -462,6 +482,26 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
 
     block(node.body.statements)
 
+    if boundary is not None:
+        # accesses outside the routine, on lines no entry uses: before -> push at the first
+        # statement, after -> pull (what device code wrote) before `end subroutine`
+        BEFORE, AFTER = -2, -3
+        before, after = boundary
+        entries += [(p, st, BEFORE, "global") for p, st in before if "w" in st]
+        entries += [(p, st, AFTER, "global") for p, st in after if "r" in st]
+        seg = Segment(first_exec, first_exec)
+        sync_names(BEFORE, BEFORE, seg)
+        seg.stale.clear()
+        seg.reads.clear()
+        if seg.writes:
+            rs.segments.insert(0, seg)
+        end = node.end_ln
+        seg = Segment(end, end, header_only=True)
+        sync_names(AFTER, AFTER, seg)
+        seg.writes.clear()
+        if seg.stale:
+            rs.segments.append(seg)
+
 
 def _walk(blk):
     from spel.scripts.registrations import iter_statements
@@ -472,10 +512,11 @@ def _walk(blk):
 # --- applying ---------------------------------------------------------------------------
 
 
-def _directive(indent: str, head: str, names: list[str], width: int = 110) -> list[str]:
+def _directive(indent: str, head: str, names: list[str], width: int = 110, cond: Optional[str] = None) -> list[str]:
     out, cur = [], f"{indent}!$acc {head}("
+    tail = ") if_present" + (f" if({cond})" if cond else "")
     for i, n in enumerate(names):
-        piece = n + (", " if i + 1 < len(names) else ") if_present")
+        piece = n + (", " if i + 1 < len(names) else tail)
         if len(cur) + len(piece) > width and not cur.endswith("("):
             out.append(cur.rstrip() + " &")
             cur = f"{indent}!$acc&   "
@@ -487,8 +528,9 @@ def _indent(line: str) -> str:
     return line[: len(line) - len(line.lstrip())]
 
 
-def edits(plan_: SyncPlan, texts: dict[Path, list[str]]) -> dict[Path, list[tuple[int, int, list[str]]]]:
-    """(line, order, lines to insert before it) per file."""
+def edits(plan_: SyncPlan, texts: dict[Path, list[str]],
+          cond: Optional[str] = None) -> dict[Path, list[tuple[int, int, list[str]]]]:
+    """(line, order, lines to insert before it) per file; `cond` adds an if clause to every update."""
     from spel.transforms.acc_locals import _above_directives
 
     by_file: dict[Path, list[tuple[int, int, list[str]]]] = {}
@@ -509,14 +551,17 @@ def edits(plan_: SyncPlan, texts: dict[Path, list[str]]) -> dict[Path, list[tupl
                 # above a directive that belongs to the segment's first statement, not between them
                 ins.append((_above_directives(seg.first, directives[rs.path]), 1,
                             [f"{ind}{TAG}: device data this host code uses"]
-                            + _directive(ind, "update self", before)))
+                            + _directive(ind, "update self", before, cond=cond)))
             if seg.writes and not seg.header_only:
                 w = sorted(seg.writes)
-                ins.append((seg.after, -1, _directive(ind, "update device", w)))
+                # an empty segment (the boundary push at the first statement) goes above that
+                # statement's directives, like an update self
+                at = _above_directives(seg.after, directives[rs.path]) if seg.after == seg.first else seg.after
+                ins.append((at, -1, _directive(ind, "update device", w, cond=cond)))
                 for r in seg.returns:
                     # after the segment's update self when the return is its first statement
                     # (`if (lake) return`): before it, the update would push stale host data
-                    ins.append((r, 2, _directive(_indent(lines[r]), "update device", w)))
+                    ins.append((r, 2, _directive(_indent(lines[r]), "update device", w, cond=cond)))
     return by_file
 
 
@@ -540,7 +585,8 @@ def dedupe_sync_blocks(lines: list[str]) -> list[str]:
         k = j
         while lines[k].rstrip().endswith("&") and k + 1 < n and lines[k + 1].lstrip().lower().startswith("!$acc&"):
             k += 1
-        if not lines[k].rstrip().lower().endswith("if_present"):
+        last = lines[k].rstrip().lower()
+        if not (last.endswith("if_present") or ") if_present if(" in last):
             return None
         return k, lines[j:k + 1]
 

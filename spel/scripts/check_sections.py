@@ -118,6 +118,12 @@ def create_init_obj(
         )
         sys.exit(1)
 
+    # the cpp positions index the work lines; give them as lines of the original file, the
+    # line space of the module lines and of every record (cpp collapses longer runs of
+    # removed lines into one marker, so positions drift from file lines after one)
+    def file_ln(i):
+        return state.line_it.lines[i].ln if i is not None and 0 <= i < len(state.line_it.lines) else i
+
     init_obj = SubInit(
         name=sub_name,
         mod_name=state.module_name,
@@ -127,12 +133,12 @@ def create_init_obj(
         cpp_fn=new_fn,
         start=start_ln,
         end=end_ln,
-        cpp_start=cpp_start,
-        cpp_end=cpp_end,
+        cpp_start=file_ln(cpp_start),
+        cpp_end=file_ln(cpp_end),
         function=func_init,
         parent=parent,
         contains_ln=frame.contains_ln if frame else None,
-        cpp_contains_ln=frame.cpp_contains_ln if frame else None,
+        cpp_contains_ln=file_ln(frame.cpp_contains_ln) if frame else None,
     )
 
     state.sub_init_dict[f"{state.module_name}::{sub_name}"] = init_obj

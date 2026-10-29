@@ -65,6 +65,7 @@ from spel.scripts.fortran_parser.spel_ast import (
     MacroIf,
     NameListStatement,
     NullifyStatement,
+    ParameterStatement,
     PointerAssignment,
     PrefixExpression,
     PrintStatement,
@@ -563,6 +564,13 @@ class _Walker:
                 self.rec.selects.append((ln, stmt.end_ln))
             case AllocateStatement():
                 self.walk_allocate(stmt)
+            case ParameterStatement():
+                # named constants: the values are reads, the names read-only
+                for name, value in stmt.constants:
+                    self.walk_expr(value, ln)
+                    d = self.rec.declarations.get(name.value.lower())
+                    if d is not None and "parameter" not in d.attrs:
+                        d.attrs.append("parameter")
             case DataStatement():
                 for dset in stmt.sets:
                     for obj in dset.objects:
@@ -938,6 +946,7 @@ def spec_statements(block: BlockStatement):
                 NameListStatement,
                 IntrinsicStatement,
                 DataStatement,
+                ParameterStatement,
             ),
         ):
             yield stmt
