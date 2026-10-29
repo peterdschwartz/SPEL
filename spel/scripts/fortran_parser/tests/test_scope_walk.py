@@ -760,3 +760,20 @@ end subroutine s
     assert {("r", "a", 8), ("r", "n", 8), ("w", "i", 8), ("w", "j", 8)} <= set(acc(rec, 8))
     assert ("w", "b", 9) in acc(rec, 9) and ("r", "b", 9) not in acc(rec, 9)
     assert ("w", "i", 9) in acc(rec, 9) and ("r", "n", 9) in acc(rec, 9)
+
+
+def test_inquiry_intrinsics_f2018():
+    # is_contiguous / rank (Fortran 2018) are intrinsics, not undeclared names (lnd2atmAvgMod)
+    txt = """
+subroutine s(a, ok, n)
+  implicit none
+  real(r8), intent(in) :: a(:)
+  logical, intent(out) :: ok
+  integer, intent(out) :: n
+  ok = is_contiguous(a)
+  n = rank(a)
+end subroutine s
+"""
+    rec = walk(txt)
+    assert ("w", "ok", 6) in acc(rec) and ("w", "n", 7) in acc(rec)
+    assert not rec.accesses(path="is_contiguous")

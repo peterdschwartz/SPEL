@@ -230,7 +230,7 @@ FORTRAN_INTRINSICS: frozenset[str] = frozenset(
         "ubound", "unpack", "findloc",
         # pointer / allocation / misc inquiry
         "allocated", "associated", "null", "present", "transfer",
-        "is_iostat_end", "is_iostat_eor",
+        "is_iostat_end", "is_iostat_eor", "is_contiguous", "rank",
         # bit
         "btest", "iand", "ibclr", "ibits", "ibset", "ieor", "ior", "ishft",
         "ishftc", "not",
