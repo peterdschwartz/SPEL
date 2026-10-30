@@ -71,6 +71,8 @@ class RoutineSync:
     skipped: set[str] = field(default_factory=set)  # paths that cannot be updated (array of derived types, ...)
     uses: dict[str, set[str]] = field(default_factory=dict)  # module -> globals to use-associate (callees' data)
     use_ln: int = -1  # where the added use statements go
+    first_exec: int = -1  # the routine's first executable statement (pushes of specification-part writes go after
+    #                       the acc-locals `enter data` there, where the device copies exist)
 
 
 @dataclass
@@ -78,6 +80,9 @@ class SyncPlan:
     routines: list[RoutineSync] = field(default_factory=list)
     device_written: set[tuple[str, str]] = field(default_factory=set)
     seq: set[str] = field(default_factory=set)
+    # calls, inside routines that run device work, of routines the analysis excludes
+    # (edit_files.bad_modules): their effects are unknown, so nothing is synced around them
+    notes: list[str] = field(default_factory=list)
 
 
 class _Types:
@@ -210,6 +215,22 @@ def _entries(maps) -> list[tuple[str, str, int, str]]:
     return out
 
 
+def _data_entries(sub, maps) -> list[tuple[str, str, int, str]]:
+    """
+    `_entries` without the association contexts (`p => x`, nullify, allocate, deallocate):
+    they change a descriptor, not data. Counted as writes they made acc-sync pull a pointer
+    before `conc_o2 => ch4_vars%conc_o2_unsat_col` and push the stale host target after it
+    (ch4_tran, AllocationMod's *_ptr, CanopyFluxes' bsun/bsha, LakeFluxes' z0*: the GPU's O2
+    concentrations were zero, 2026-10-30), and pull/push around every deallocate.
+    """
+    from spel.scripts.record_access import ASSOCIATION_CONTEXTS
+
+    assoc = {(a.path.lower(), a.ln) for a in sub.record.accesses() if a.context in ASSOCIATION_CONTEXTS}
+    if not assoc:
+        return _entries(maps)
+    return [e for e in _entries(maps) if (e[0].lower(), e[2]) not in assoc]
+
+
 def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
          device_spans: Optional[dict[str, list[tuple[int, int]]]] = None,
          boundary: Optional[dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]]] = None) -> SyncPlan:
@@ -322,10 +343,43 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
         if node is None:
             continue
         rs = RoutineSync(sid, path)
-        _segments(rs, s, node, device_lines[sid], _entries(maps[sid]), facts.lines(s), types, out,
+        _segments(rs, s, node, device_lines[sid], _data_entries(s, maps[sid]), facts.lines(s), types, out,
                   (boundary or {}).get(sid))
         if rs.segments:
             out.routines.append(rs)
+        out.notes += excluded_calls_in(sid, path, node)
+    return out
+
+
+def excluded_calls_in(sid: str, path: Path, node) -> list[str]:
+    """
+    Notes on the calls `node` (a routine's parse tree) makes to routines of modules the
+    analysis excludes (edit_files.bad_modules), through its own or its module's use
+    statements. The analysis has no events for them, so the host writes of such a call
+    are never pushed: dynSubgrid_driver's `dyncrop_interp` (dyncropFileMod, excluded for
+    its genf90 dynVar modules) left the crop landunit/column weights and fertilizer
+    stale on the device (2026-10-30). Until the callee is analyzable, the caller needs
+    whole-state transitions around the call.
+    """
+    from spel.scripts.edit_files import bad_modules
+    from spel.scripts.fortran_parser import spel_ast as A
+    from spel.scripts.fortran_parser.module_spec import callee_name, parse_modules, statements_with_next
+
+    name = sid.split("::")[-1].lower()
+    mod = next((m for m in parse_modules(path) if any(p.name.lower() == name for p in m.subprograms)), None)
+    if mod is None:
+        return []
+    names: set[str] = set()
+    for st in list(getattr(mod.spec, "statements", [])) + list(node.body.statements):
+        if isinstance(st, A.UseStatement) and st.module.lower() in bad_modules and st.has_only:
+            names |= {str(o).split("=>")[0].strip().lower() for o in st.objs}
+    names -= {"t_startf", "t_stopf", "endrun", "shr_sys_flush", "shr_sys_abort", "get_curr_date",
+              "get_curr_time_string", "get_nstep", "get_step_size", "is_first_step", "is_first_restart_step"}
+    out = []
+    for st, _ in statements_with_next(node.body, node.end_ln):
+        c = callee_name(st)
+        if c is not None and c.lower() in names:
+            out.append(f"{sid}: line {st.lineno + 1}: call {c} into an excluded module; its effects are not synced")
     return out
 
 
@@ -407,6 +461,7 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
     from spel.scripts.fortran_parser.symbols import Origin
 
     first_exec = first_executable(node, sub.record)
+    rs.first_exec = first_exec
     use_stmts = [st for st in node.body.statements if isinstance(st, A.UseStatement)]
     rs.use_ln = (_end_of(use_stmts[-1], lines) if use_stmts else node.lineno) + 1
 
@@ -570,6 +625,13 @@ def _walk(blk):
 
 
 def _directive(indent: str, head: str, names: list[str], width: int = 110, cond: Optional[str] = None) -> list[str]:
+    if cond is None and head == "update self":
+        # a pull while the device does not hold the state (initialization, host segments of
+        # elm_drv) overwrites host results with uninitialized or stale device data (2026-10-28
+        # UpdateAccVars; 2026-10-29 garbage t_soisno at step 0 after a re-placement without it)
+        from spel.transforms.acc_plan import DEVICE_FLAG
+
+        cond = DEVICE_FLAG
     out, cur = [], f"{indent}!$acc {head}("
     tail = ") if_present" + (f" if({cond})" if cond else "")
     for i, n in enumerate(names):
@@ -583,6 +645,35 @@ def _directive(indent: str, head: str, names: list[str], width: int = 110, cond:
 
 def _indent(line: str) -> str:
     return line[: len(line) - len(line.lstrip())]
+
+
+def after_enter_data(lines: list[str], directives: list, first_exec: int) -> int:
+    """
+    The line after the `enter data` block (acc-locals' directives and their tag comments) of a
+    routine whose first executable statement is `first_exec`: a push of a local written in the
+    specification part (an initializer, a DATA statement) goes there, where its device copy
+    exists; before the block it is a no-op (`if_present`): SnowHydrology's dzmin, 2026-10-30.
+    The block is the first `enter data` at or after `first_exec` and before the first compute
+    construct (it may follow an `associate` header); without one, `first_exec`.
+    """
+    starts = {d.start_ln: d for d in directives if d.construct == "enter data"}
+    first_compute = min((d.start_ln for d in directives
+                         if d.start_ln >= first_exec and d.construct.split()[0] in ("parallel", "kernels", "serial")),
+                        default=len(lines))
+    block = [ln for ln in starts if first_exec <= ln < first_compute]
+    if not block:
+        return first_exec
+    ln = min(block)
+    while ln < len(lines):
+        if ln in starts:
+            ln = starts[ln].end_ln + 1
+            continue
+        t = lines[ln].strip()
+        if t.startswith("!") and not t.lower().startswith("!$acc"):
+            ln += 1  # a tag comment of the block
+            continue
+        break
+    return ln
 
 
 def edits(plan_: SyncPlan, texts: dict[Path, list[str]],
@@ -614,6 +705,9 @@ def edits(plan_: SyncPlan, texts: dict[Path, list[str]],
                 # an empty segment (the boundary push at the first statement) goes above that
                 # statement's directives, like an update self
                 at = _above_directives(seg.after, directives[rs.path]) if seg.after == seg.first else seg.after
+                if rs.first_exec >= 0 and seg.first < rs.first_exec:
+                    # written in the specification part: after the locals' `enter data`
+                    at = after_enter_data(lines, directives[rs.path], rs.first_exec)
                 ins.append((at, -1, _directive(ind, "update device", w, cond=cond)))
                 for r in seg.returns:
                     # after the segment's update self when the return is its first statement
@@ -698,3 +792,130 @@ def apply(fut, plan_: SyncPlan, dry_run: bool = False) -> list[str]:
         if not dry_run:
             path.write_text("\n".join(lines))
     return log
+
+
+@dataclass
+class StaleUpdate:
+    routine: str
+    directive: object      # the AccDirective
+    name: str              # normalized name in the clause
+    kind: str              # "push" (update device after a kernel write) | "pull" (update self after a host write)
+    write_ln: int          # the last write before the directive
+
+    def __str__(self) -> str:
+        what = ("update device(%s) but its last write (line %d) is in a compute construct: stale push"
+                if self.kind == "push" else
+                "update self(%s) but its last write (line %d) is host code: possibly stale pull")
+        return f"{self.routine}: line {self.directive.start_ln + 1}: " + what % (self.name, self.write_ln + 1)
+
+
+def stale_updates(sub, lines: list[str]) -> list[StaleUpdate]:
+    """
+    Update directives of one routine that contradict the record's last write of a name:
+
+    - `update device(x)` where the last write of `x` before the directive is inside a compute
+      construct and no `update self(x)` follows that write: the device already holds the value
+      and the host copy may never have been set; the push overwrites device results with
+      garbage (CombineSnowLayers' dzminloc and SurfaceAlbedo's case_aer, 2026-10-30: pushes
+      from before a pass moved the assignment into a kernel).
+    - `update self(x)` where the last write of `x` before the directive is host code and no
+      `update device(x)` follows that write: the pull overwrites a fresh host value with stale
+      device data (UpdateAccVars, 2026-10-28). Lower confidence (a routine run with the device
+      flag off makes it harmless).
+    Hand-written directives are invisible to the planner; this check sees them.
+    """
+    import re
+
+    from spel.transforms.acc_directives import split_top_level
+
+    rec = sub.record
+    if rec is None:
+        return []
+    directives = find_directives(lines, sub.startline, sub.endline)
+    spans = _spans(directives, rec)
+
+    def on_device(ln: int) -> bool:
+        return any(a <= ln <= b for a, b in spans)
+
+    def norm(x: str) -> str:
+        return re.sub(r"\(.*?\)", "", x).strip().lower()
+
+    from spel.scripts.record_access import ASSOCIATION_CONTEXTS
+
+    writes: dict[str, list[tuple[int, bool]]] = {}
+    deallocs: dict[str, list[int]] = {}
+    for a in rec.accesses():
+        if a.context == "deallocate":
+            deallocs.setdefault(norm(a.path), []).append(a.ln)
+        elif "w" in a.status and a.context != "inquiry" and a.context not in ASSOCIATION_CONTEXTS:
+            writes.setdefault(norm(a.path), []).append((a.ln, on_device(a.ln)))
+    updates: list[tuple[int, str, str]] = []  # (line, device|self, name)
+    for d in directives:
+        if d.construct != "update":
+            continue
+        for c in d.clauses:
+            if c.name in ("device", "self", "host") and c.args:
+                for arg in split_top_level(c.args):
+                    updates.append((d.start_ln, "self" if c.name == "host" else c.name, norm(arg)))
+    out: list[StaleUpdate] = []
+    for d in directives:
+        if d.construct != "update":
+            continue
+        for c in d.clauses:
+            if c.name not in ("device", "self", "host") or not c.args:
+                continue
+            kind = "self" if c.name == "host" else c.name
+            for arg in split_top_level(c.args):
+                name = norm(arg)
+                prior = [w for w in writes.get(name, []) if w[0] < d.start_ln]
+                if not prior:
+                    continue
+                last_ln, last_dev = max(prior)
+                other = "self" if kind == "device" else "device"
+                if any(last_ln < ln < d.start_ln and k == other and n == name for ln, k, n in updates):
+                    continue  # a round trip in between: consistent
+                if any(last_ln < ln < d.start_ln for ln in deallocs.get(name, [])):
+                    continue  # acc-sync's pull/push around a deallocate: the push is a no-op (not present)
+                if kind == "device" and last_dev:
+                    out.append(StaleUpdate(sub.id, d, name, "push", last_ln))
+                if kind == "self" and not last_dev:
+                    out.append(StaleUpdate(sub.id, d, name, "pull", last_ln))
+    return out
+
+
+def fix_stale_pushes(sub, lines: list[str], stale: list[StaleUpdate]) -> int:
+    """
+    Drop the stale names from their `update device` directives in `lines` (entries become
+    multi-line strings or None; a directive left without names is removed). Returns the
+    number of directives changed.
+    """
+    import re
+
+    from spel.transforms.acc_directives import split_top_level
+
+    by_dir: dict[int, set[str]] = {}
+    dirs = {}
+    for st in stale:
+        if st.kind == "push":
+            by_dir.setdefault(st.directive.start_ln, set()).add(st.name)
+            dirs[st.directive.start_ln] = st.directive
+    for ln, names in by_dir.items():
+        d = dirs[ln]
+        clauses = []
+        for c in d.clauses:
+            if c.name == "device" and c.args:
+                keep = [a.strip() for a in split_top_level(c.args)
+                        if re.sub(r"\(.*?\)", "", a).strip().lower() not in names]
+                if keep:
+                    clauses.append(f"device({', '.join(keep)})")
+            elif c.args is not None:
+                clauses.append(f"{c.name}({c.args})")
+            else:
+                clauses.append(c.name)
+        text = None
+        if any(cl.startswith("device(") for cl in clauses):
+            text = f"{d.indent}!$acc update " + " ".join(clauses)
+        lines[ln] = text if text is not None else None
+        for k in range(ln + 1, d.end_ln + 1):
+            lines[k] = None
+    return len(by_dir)

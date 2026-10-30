@@ -243,3 +243,125 @@ end subroutine s
     lines = facts.string_intrinsic_lines(SimpleNamespace(id="m::s", startline=0, endline=11))
     if_ln = next(i for i, l in enumerate(src.splitlines()) if "trim(isotope)" in l)
     assert lines == [if_ln]
+
+
+def test_call_tree_stops_at_excluded_routines():
+    """A routine reachable only through an excluded (host) caller stays out of the tree;
+    one also reached from a kept routine stays in."""
+    from types import SimpleNamespace
+
+    from spel.transforms.acc_apply import call_tree
+
+    def sub(sid, *children):
+        return SimpleNamespace(id=sid, child_subroutines={c: SimpleNamespace(id=c) for c in children})
+
+    fut = SimpleNamespace(subroutine_dict={
+        "d::driver": sub("d::driver", "u::set_old_weights", "d::hwcontent"),
+        "u::set_old_weights": sub("u::set_old_weights", "t::template"),
+        "t::template": sub("t::template", "t::template_one"),
+        "t::template_one": sub("t::template_one"),
+        "d::hwcontent": sub("d::hwcontent", "t::template_one"),
+    })
+    full = call_tree(fut, ["d::driver"])
+    assert set(full) == set(fut.subroutine_dict)
+    cut = call_tree(fut, ["d::driver"], exclude=lambda r: r.startswith("u::"))
+    assert set(cut) == {"d::driver", "d::hwcontent", "t::template_one"}
+    assert "t::template" not in cut  # only reachable through the host routine
+
+
+GUARDED = """
+subroutine upd(g0, g1, dt, use_fates, use_c13, use_cn)
+  implicit none
+  integer, intent(in) :: g0, g1
+  real(r8), intent(in) :: dt
+  logical, intent(in) :: use_fates, use_c13, use_cn
+  integer :: g
+  if (.not. use_fates) then
+     do g = g0, g1
+        col_pp%seed(g) = col_pp%seed(g) - dt
+        if (use_c13) then
+           veg_pp%seed(g) = veg_pp%seed(g) - dt
+        end if
+     end do
+  end if
+  if (use_c13 .and. use_cn) then
+     do g = g0, g1
+        veg_pp%seed(g) = 0.0_r8
+     end do
+  end if
+end subroutine upd
+"""
+
+
+def test_namelist_guarded_instances_get_no_create():
+    """An instance the device layer copies only under use_c13 .and. use_cn, named in a loop that
+    runs under use_cn .and. .not. use_fates, is listed; the loop known to run under use_c13 is
+    not; an instance always copied never is."""
+    from types import SimpleNamespace
+
+    from spel.scripts.fortran_parser.boolen_expression import AllOf, Expectation
+    from spel.transforms.acc_apply import guarded_instances, implies, kernel_condition, reach_conditions
+
+    sub = StubSub(GUARDED)
+    first, second = sub.record.loop_nest
+    c13, cn, fates = Expectation("use_c13", "True"), Expectation("use_cn", "True"), Expectation("use_fates", "False")
+    conds = {"veg_pp": AllOf((c13, cn))}  # col_pp: always on the device
+    assert guarded_instances(sub, first.start_ln, first.end_ln, conds, AllOf((cn, fates))) == ["veg_pp"]
+    assert guarded_instances(sub, second.start_ln, second.end_ln, conds, AllOf((cn, fates, c13))) == []
+    assert implies(AllOf((c13, cn)), AllOf((cn,))) and not implies(AllOf((cn,)), AllOf((c13, cn)))
+
+    # the condition at a kernel: how elm_drv reaches the routine, and the if around the loop
+    def routine(sid, calls=(), if_at=None):
+        return SimpleNamespace(id=sid, sub_call_desc={ln: SimpleNamespace(fn=fn) for ln, fn in calls},
+                               child_subroutines={fn: SimpleNamespace(id=f"m::{fn}") for _, fn in calls},
+                               namelist_if_at=lambda ln, if_at=if_at: if_at(ln) if if_at else None)
+
+    gate = SimpleNamespace(condtional_expectation=AllOf((cn,)))
+    fut = SimpleNamespace(subroutine_dict={
+        "elm_driver::elm_drv": routine("elm_driver::elm_drv", [(10, "eco"), (20, "alb")],
+                                       if_at=lambda ln: gate if ln == 10 else None),
+        "m::eco": routine("m::eco", [(5, "upd")]),
+        "m::alb": routine("m::alb"),
+        "m::upd": routine("m::upd"),
+    })
+    reach = reach_conditions(fut)
+    assert reach["m::upd"] == AllOf((cn,)) or implies(reach["m::upd"], AllOf((cn,)))
+    assert reach["m::alb"] == AllOf(())
+    assert implies(kernel_condition(fut.subroutine_dict["m::upd"], 0, reach), AllOf((cn,)))
+
+
+def test_no_create_clause_in_the_directive():
+    from spel.transforms.acc_plan import LoopProposal
+
+    sub = StubSub(GUARDED)
+    props = propose(sub, AccessMapper({sub.id: sub}), source=GUARDED.splitlines(), min_lines=1)
+    prop = next(p for p in props if p.plan is not None)
+    prop.no_create = ["c14_grc_cs"]
+    text = " ".join(prop.directive_lines())
+    assert "no_create(c14_grc_cs)" in text and "default(present)" in text
+
+
+def test_excluded_lines_come_from_the_record():
+    """A loop with a stand-in statement (`x = x`, the analysis' replacement of a statement that
+    used an excluded module) is device-unsafe even without the marker comment in sub_lines."""
+    from types import SimpleNamespace
+
+    from spel.transforms.acc_apply import _Facts
+
+    src = """subroutine interp(g0, g1, out)
+  implicit none
+  integer, intent(in) :: g0, g1
+  real(r8), intent(inout) :: out(:)
+  integer :: g, ig
+  ig = 0
+  do g = g0, g1
+     ig = ig + 1
+     out(g) = out(g)
+  end do
+end subroutine interp"""
+    sub = StubSub(src)
+    sub.sub_lines = [SimpleNamespace(ln=i, line=l) for i, l in enumerate(src.splitlines())]
+    sub.startline = 0
+    facts = object.__new__(_Facts)
+    facts.tree = lambda s: (_ for _ in ()).throw(RuntimeError("no tree"))
+    assert facts.excluded_lines(sub) == [8]

@@ -152,6 +152,9 @@ class AssignEvent:
     lhs: Access
     reads: tuple[Access, ...]
     rhs: Expression = field(compare=False, repr=False)
+    # `x = x`: edit_files' stand-in for an assignment whose right-hand side used an excluded
+    # module (a stream read, a time query): the real statement runs host-only code
+    stand_in: bool = False
 
 
 @dataclass(frozen=True)
@@ -511,14 +514,15 @@ class _Walker:
                 self.walk_statement(stmt.classify(self.scope))
             case AssignmentStatement():
                 first = len(self.rec.events)
-                if not is_self_assignment(stmt):
+                stand_in = is_self_assignment(stmt)
+                if not stand_in:
                     self.walk_expr(stmt.right, ln)
                 reads = tuple(
                     e for e in self.rec.events[first:] if isinstance(e, Access)
                 )
                 self.walk_designator(stmt.left, "w", ln, context="assign")
                 lhs = self.rec.events[-1]
-                self.rec.events.append(AssignEvent(ln, lhs, reads, stmt.right))
+                self.rec.events.append(AssignEvent(ln, lhs, reads, stmt.right, stand_in=stand_in))
             case PointerAssignment():
                 self.walk_pointer_assignment(stmt)
             case SubCallStatement():

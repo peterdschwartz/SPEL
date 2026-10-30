@@ -80,6 +80,9 @@ class LoopProposal:
     unsafe: list[tuple[int, str]] = field(default_factory=list)   # (1-based line, statement)
     private_arrays: list[str] = field(default_factory=list)       # local arrays written and read per iteration
     copyin: list[str] = field(default_factory=list)               # `bounds`: a dummy the loop reads (copyin of present data is a no-op)
+    no_create: list[str] = field(default_factory=list)            # global instances the device data layer copies only under a
+    #   namelist flag the loop's enclosing ifs do not test (c14_grc_cs under `if (use_c14)` inside the loop): the
+    #   kernel takes the host address when the copy is absent, and the flag keeps it from dereferencing it
     children: list["LoopProposal"] = field(default_factory=list)  # proposals for the inner loops of a host loop
     order: list[str] = field(default_factory=list)  # interchange: the nest's indices in their new order
     npar: int = 1  # interchange: how many of `order` are parallel (collapsed)
@@ -108,6 +111,8 @@ class LoopProposal:
             clauses.append(f"private({', '.join(self.private_arrays)})")
         if self.copyin:
             clauses.append(f"copyin({', '.join(self.copyin)})")
+        if self.no_create:
+            clauses.append(f"no_create({', '.join(self.no_create)})")
         clauses.append(f"if({DEVICE_FLAG})")  # runs on the host until the device data layer is up (initialization)
         out = [l.replace("!$omp", "!$acc") for l in format_directive(indent, "parallel loop", clauses)]
         if self.kind in ("column-parallel", "interchange"):

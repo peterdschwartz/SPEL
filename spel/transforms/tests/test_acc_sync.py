@@ -54,7 +54,7 @@ def test_segments_and_edits():
     by_file = acc_sync.edits(acc_sync.SyncPlan(routines=[rs]), {None: lines})
     got = {(ln, tuple(new)) for ln, _, new in by_file[None]}
     assert (9, ("  " + acc_sync.TAG + ": device data this host code uses",
-                "  !$acc update self(x) if_present")) in got
+                "  !$acc update self(x) if_present if(elm_device_ready)")) in got
     assert (12, ("  !$acc update device(y) if_present",)) in got
     assert (18, ("     !$acc update device(y) if_present",)) in got
 
@@ -95,7 +95,7 @@ def test_return_update_follows_the_update_self():
     assert seg.first == 10 and seg.returns == [10] and seg.stale == {"x"} and seg.writes == {"x"}
     ins = sorted(acc_sync.edits(acc_sync.SyncPlan(routines=[rs]), {None: lines})[None], key=lambda e: e[:2])
     at_return = [new[-1].strip() for ln, _, new in ins if ln == 10]
-    assert at_return == ["!$acc update self(x) if_present", "!$acc update device(x) if_present"]
+    assert at_return == ["!$acc update self(x) if_present if(elm_device_ready)", "!$acc update device(x) if_present"]
 
 
 FATES_BRANCH = """subroutine branchy(n, use_fates, x, y)
@@ -334,3 +334,123 @@ def test_local_array_filled_on_the_host_is_pushed():
                        acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub)), lines, acc_sync._Types(fut), out)
     (seg,) = rs.segments
     assert seg.first == 8 and seg.writes == {"work"} and "i" not in seg.writes  # the scalar index is not synced
+
+
+def test_excluded_calls_in_reports_calls_into_excluded_modules(tmp_path):
+    """A call into a module the analysis excludes has no events: the planner reports it."""
+    from spel.scripts.fortran_parser.module_spec import parse_modules
+    from spel.transforms.acc_sync import excluded_calls_in
+
+    src = tmp_path / "m.F90"
+    src.write_text(
+        "module m\n"
+        "  use dynFATESLandUseChangeMod, only : dynFatesLandUseInterp\n"
+        "  use perf_mod, only : t_startf\n"
+        "contains\n"
+        "  subroutine drv(bounds)\n"
+        "    type(bounds_type), intent(in) :: bounds\n"
+        "    call t_startf('x')\n"
+        "    if (use_fates_luh) then\n"
+        "       call dynFatesLandUseInterp(bounds)\n"
+        "    end if\n"
+        "    call other(bounds)\n"
+        "  end subroutine drv\n"
+        "end module m\n"
+    )
+    node = parse_modules(src)[0].subprograms[0]
+    notes = excluded_calls_in("m::drv", src, node)
+    assert len(notes) == 1 and "line 9" in notes[0] and "dynfateslanduseinterp" in notes[0].lower()
+
+
+def test_push_of_a_specification_part_write_goes_after_the_enter_data_block():
+    from spel.transforms.acc_directives import find_directives
+    from spel.transforms.acc_sync import after_enter_data
+
+    lines = [
+        "subroutine s(n)",
+        "  integer :: tab(4)",
+        "  data tab /1, 2, 3, 4/",
+        "  associate(y => x)",
+        "  ! spel acc-locals: device storage of the local work arrays",
+        "  !$acc enter data create(&",
+        "  !$acc tab(:))",
+        "  ! spel acc-locals: initialized in the specification part",
+        "  !$acc enter data copyin(x(:))",
+        "  !$acc parallel loop",
+        "  do i = 1, n",
+        "  end do",
+        "end subroutine s",
+    ]
+    ds = find_directives(lines, 0, len(lines) - 1)
+    assert after_enter_data(lines, ds, 3) == 9          # after the block that follows the associate header
+    assert after_enter_data(lines, ds, 9) == 9          # no block before the kernel: unchanged
+
+
+def test_stale_updates_flags_a_push_after_a_kernel_write(tmp_path):
+    from types import SimpleNamespace
+
+    from spel.scripts.fortran_parser.tests.test_scope_walk import walk
+    from spel.transforms.acc_sync import stale_updates
+
+    src = (
+        "subroutine s(n, x, y, z)\n"
+        "  integer, intent(in) :: n\n"
+        "  real(r8), intent(inout) :: x(:), y(:), z(:)\n"
+        "  integer :: i\n"
+        "  !$acc parallel loop\n"
+        "  do i = 1, n\n"
+        "     x(i) = 1._r8\n"
+        "  end do\n"
+        "  y(:) = 2._r8\n"
+        "  !$acc update device(x, y)\n"
+        "  z(:) = 3._r8\n"
+        "  !$acc update self(z)\n"
+        "  !$acc update self(x)\n"
+        "end subroutine s\n"
+    )
+    rec = walk(src)
+    lines = src.split("\n")
+    lns = [i for i, l in enumerate(lines) if l.strip()]
+    sub = SimpleNamespace(id="m::s", record=rec, startline=lns[0], endline=lns[-1])
+    notes = [str(n) for n in stale_updates(sub, lines)]
+    assert any("update device(x)" in n and "stale push" in n for n in notes)
+    assert not any("update device(y)" in n for n in notes)          # y: host write, push is right
+    assert any("update self(z)" in n and "stale pull" in n for n in notes)
+    assert not any("update self(x)" in n for n in notes)            # x: written on the device, pull is right
+    # the fix drops x from the push and keeps y
+    from spel.transforms.acc_sync import fix_stale_pushes
+    assert fix_stale_pushes(sub, lines, stale_updates(sub, lines)) == 1
+    assert lines[9] == "  !$acc update device(y)"
+    # a round trip in between is consistent: pull after the kernel, then push
+    src2 = src.replace("  y(:) = 2._r8\n", "  !$acc update self(x)\n  y(:) = 2._r8\n")
+    rec2 = walk(src2); lines2 = src2.split("\n")
+    sub2 = SimpleNamespace(id="m::s", record=rec2, startline=lns[0], endline=lns[-1] + 1)
+    assert not any(n.kind == "push" for n in stale_updates(sub2, lines2))
+
+
+def test_pointer_association_is_not_a_write():
+    from types import SimpleNamespace
+
+    from spel.scripts.fortran_parser.tests.test_scope_walk import walk
+    from spel.transforms.acc_sync import stale_updates
+
+    src = (
+        "subroutine s(n, t)\n"
+        "  integer, intent(in) :: n\n"
+        "  type(tt), intent(inout) :: t\n"
+        "  real(r8), pointer :: p(:)\n"
+        "  integer :: i\n"
+        "  !$acc parallel loop\n"
+        "  do i = 1, n\n"
+        "     t%x(i) = 1._r8\n"
+        "  end do\n"
+        "  p => t%x\n"
+        "  !$acc update device(p)\n"
+        "end subroutine s\n"
+    )
+    rec = walk(src)
+    lines = src.split("\n")
+    lns = [i for i, l in enumerate(lines) if l.strip()]
+    sub = SimpleNamespace(id="m::s", record=rec, startline=lns[0], endline=lns[-1])
+    # the association is not a write: nothing to say about the push through p
+    assert stale_updates(sub, lines) == []

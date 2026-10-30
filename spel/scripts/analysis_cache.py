@@ -64,6 +64,7 @@ from spel.scripts.logging_configs import get_logger
 ANALYSIS_PICKLE = "analysis.pkl"
 META_FILE = "meta.json"
 SRC_DIR = "src"
+GENF90_DIR = "genf90"  # modules generated from genf90 templates (spel.scripts.genf90)
 DRIVER_ID = f"{DRIVER_MODULE}::{DRIVER_ROUTINE}"
 SPEL_ROOT = Path(__file__).resolve().parents[2]
 
@@ -240,6 +241,12 @@ def build_analysis(logger: Optional[logging.Logger] = None) -> Path:
         shutil.rmtree(out)
     src = out / SRC_DIR
     src.mkdir(parents=True)
+    # modules E3SM generates from genf90 templates: dynVar*, ncdio_pio, restUtilMod, shr_*
+    from spel.scripts import dynamic_globals as dg
+    from spel.scripts.genf90 import generate as genf90_generate
+
+    generated = genf90_generate(out / GENF90_DIR, logger)
+    dg.genf90_dir = str(out / GENF90_DIR) if generated else None
 
     logger.info(f"Analyzing {DRIVER_ID} in {E3SM_SRCROOT} (cache: {out})")
     unit_test = FunctionalUnitTest(casedir=src, cfg=cfg.options, logger=logger)
@@ -285,6 +292,10 @@ def load_analysis(
                 f"Cached elm_drv analysis may be stale ({reason}); "
                 "use --reanalyze to rebuild it"
             )
+    from spel.scripts import dynamic_globals as dg
+
+    gen = cache_dir() / GENF90_DIR
+    dg.genf90_dir = str(gen) if gen.is_dir() else None  # module lookups after loading find the generated modules
     logger.info(f"Loading cached {DRIVER_ID} analysis from {path}")
     return _load_pickle(path)
 

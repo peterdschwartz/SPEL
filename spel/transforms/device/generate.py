@@ -248,6 +248,7 @@ class Guards:
     components: dict[int, str] = field(default_factory=dict)  # id(type component) -> Fortran condition
     cond_flags: dict[str, set[str]] = field(default_factory=dict)  # Fortran condition -> its flag names
     instances: dict[str, str] = field(default_factory=dict)  # instance (lower) -> Fortran condition
+    instance_conds: dict[str, object] = field(default_factory=dict)  # instance (lower) -> ConditionExpectation
     flags: dict[str, str] = field(default_factory=dict)  # flag name -> declaring module
     notes: list[str] = field(default_factory=list)
 
@@ -359,6 +360,7 @@ def access_guards(fut, type_dict) -> Guards:
         text = usable(cond)
         if text is not None:
             g.instances[inst] = text
+            g.instance_conds[inst] = cond
             names |= cond.variable_names()
     for n in sorted(names):
         mods = [m for m, mod in fut.module_dict.items() if n in {k.lower() for k in mod.global_vars}]
@@ -370,6 +372,7 @@ def access_guards(fut, type_dict) -> Guards:
     if missing:
         g.components = {k: v for k, v in g.components.items() if not g.cond_flags.get(v, set()) & missing}
         g.instances = {k: v for k, v in g.instances.items() if not g.cond_flags.get(v, set()) & missing}
+        g.instance_conds = {k: v for k, v in g.instance_conds.items() if k in g.instances}
     return g
 
 

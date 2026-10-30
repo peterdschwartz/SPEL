@@ -31,6 +31,10 @@ rest of the text, kind suffixes included, is kept as written. Left alone, and re
 statements inside a compute construct, strides, a right-hand side whose sections do not
 pair with the left-hand side's, or a reduction intrinsic over a section (`sum(x(:))`).
 The loop indices are new integers declared before the first executable statement.
+
+Follow-up pass: a nest the planner collapses must not keep `lbound`/`ubound` in its headers
+(nvfortran 25.9 runs such a kernel empty on the GPU): `collapse_bounds.apply` hoists them into
+scalars after `acc-apply` + `spel analyze` (see spel/transforms/device/DESIGN.md, 2026-10-30).
 """
 
 from __future__ import annotations

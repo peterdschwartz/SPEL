@@ -824,3 +824,23 @@ def test_inquiry_intrinsic_arguments_are_not_value_reads():
     maps = AccessMapper({sub.id: sub}).maps(sub)
     assert [rw.status for rw in maps.args["x"]] == ["w"]        # only the element write on line 6
     assert [rw.status for rw in maps.args["y"]] == ["w"]        # only y(1) = 0
+
+
+def test_stand_in_assignment_is_recorded():
+    """`x = x` (edit_files' stand-in for a statement that used an excluded module) is a write
+    only, and the event says so."""
+    from spel.scripts.fortran_parser.scope_walk import AssignEvent
+
+    rec = walk(
+        """subroutine s(y)
+  implicit none
+  real, intent(inout) :: y(:)
+  integer :: n
+  n = n
+  y(1) = y(1)
+  y(2) = y(1) + 1.0
+end subroutine s"""
+    )
+    evs = [e for e in rec.events if isinstance(e, AssignEvent)]
+    assert [e.stand_in for e in evs] == [True, True, False]
+    assert [a.status for a in rec.accesses(path="n")] == ["w"]

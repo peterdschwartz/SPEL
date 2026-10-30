@@ -259,3 +259,74 @@ records an initializer as an `init` write.
   host-associated arrays through it (store_tsl_moisture's `h2osoi_liq_saved` was a "host scalar race").
 - Write statements no longer block loops: PrecisionControl, ch4_tran and DivideExtraSnowLayers count
   on the device and report on the host only when the count is non-zero (a cold branch).
+
+## 2026-10-30: collapsed loops must not take their bounds from inquiry functions (`spel/transforms/collapse_bounds.py`)
+
+nvfortran 25.9 (cc80) runs `parallel loop collapse(n)` as an empty kernel on the GPU when a
+collapsed `do` header's bound is `lbound`/`ubound` of a pointer (a derived-type component,
+an associate name of one, or a module pointer): no error, nothing written. A 1-D loop with
+the same bounds runs, a collapsed nest with host-scalar bounds runs, and the device
+descriptor holds the right bounds (`$SCRATCH/spelval/assoc_test/t_assoc2.F90`); a module
+allocatable with `size()` bounds is fine (`t_alloc.F90`), so histComputeMod's hand-written
+`collapse(2)` over `size(snow_fields)` stays. The
+section-loop rewrite (`x(:,:) = y(:,:)` -> `do spel_i2 = lbound(x,2), ubound(x,2)` ...)
+produced 29 such nests; the first casualty was UrbanRadiation's `forc_solad_pp` copies,
+which left `top_af%solad_pp` = spval on the device and surfaced two routines later as
+"t_soisno > 400 K in urban columns" (a day of file-group bisecting; the probe method of
+memory `probe-in-elm-drv-not-bisect` found it in two runs).
+
+`collapse_bounds.apply(fut, routine_ids)` (tool: `spelval/tools/collapse_bounds_apply.py`)
+hoists every inquiry bound of a collapsed nest into `spel_lb<k>`/`spel_ub<k>` integer scalars
+assigned right before the directive, k counting the nest outer-first, and rebuilds the
+headers from the record's loop nodes. It needs the analysis of the sources it edits, so the
+pipeline is: section-loops -> acc-apply -> `spel analyze` -> collapse-bounds (then
+bounds_copyin / device_ready as before). Rule for hand-written kernels: the same.
+
+## 2026-10-30: calls into excluded modules inside device routines; genf90 templates
+
+A call to a routine of a module the analysis excludes (`edit_files.bad_modules`) has no events,
+so `acc_sync` syncs nothing around it. `dynSubgrid_driver`'s `dyncrop_interp` writes the crop
+landunit and column weights and the fertilizer patches on the host; once dynSubgrid_driver ran
+device kernels itself (the 10-29 host-sync removal), those writes never reached the device and
+the GPU restart diverged from the host (GDD accumulators, soil temperature). Two measures:
+
+- `acc_sync.plan` reports every such call (`SyncPlan.notes`, `excluded_calls_in`; printed by
+  `tools/tree_sync.py`). A note means the routine is not safe on the device until the callee is
+  analyzable.
+- `spel.scripts.genf90` generates the modules E3SM builds from genf90 templates (`dynVar*`,
+  `ncdio_pio`, `restUtilMod`, `shr_*`) into the analysis cache (`<cache>/genf90`, line markers
+  stripped) and the module lookup searches it, so `dyncropFileMod` and `dynpftFileMod` are
+  analyzed instead of excluded, and the sync planner sees their effects on the call lines.
+
+Rule learned the same day: a pull of data the device-data layer does not carry (the
+accumulators of accumComputeMod, the history buffers, the budget tables) at a point where the
+host takes over (restart write, a host-mode update) must be unconditional. `elm_device_ready`
+is already false there, so `if(elm_device_ready)` turns the pull into a no-op and the restart
+gets stale host copies (every accumulator was 10 steps short, 2026-10-30). The clause belongs
+only on acc-sync's own updates inside device routines, whose host copies are current whenever
+the flag is off.
+
+Same day, third rule: a local the host initializes in the specification part (an initializer
+or a DATA statement) and never writes again is `enter data copyin`, not `create`
+(`acc_locals.RoutineReport.host_initialized`): `create` hands the device an unfilled copy,
+and a push placed right after the DATA statement is a no-op because the device copy does
+not exist yet (acc_sync now puts pushes of specification-part writes after the enter-data
+block, `after_enter_data`). CombineSnowLayers' dzmin thresholds were zero on the device, so
+the GPU never combined thin snow layers (one extra layer in the worst columns, 2026-10-30).
+
+## 2026-10-30: what the four regressions of the host-sync removal have in common
+
+Residency (which copy of a variable is authoritative, where) is implicit in directive text
+spread over the tree; each pass (section-loops, acc-apply, acc-locals, acc-sync, targeted,
+the host-safe retrofit, hand edits) edits that text once, in sequence, nothing re-derives the
+whole from the analysis afterwards, and OpenACC's `if_present`, `create` and `if(flag)` turn
+every inconsistency into a wrong number instead of an abort. Rules that follow:
+
+1. Syncs are an output of the analysis, never maintained text: fixed pass order, `spel
+   analyze` between passes, `tools/sync_drift.py` (plan vs. present directives, per routine)
+   as a mandatory gate before any build. It found 9 drifted routines in a minute.
+2. Hand-written syncs are invisible to the planner: tag them or let the planner own them all.
+3. Debug build to make the silences loud: no `if_present` on generated updates, NaN-fill of
+   created locals, device-lint = collapse-bounds + host-initialized-locals + sync-drift.
+4. Validate per pass group (10-step host-vs-GPU restart, 15 min), compare the restarts first
+   (per landunit, per layer, pattern of the difference), then probe the driver.

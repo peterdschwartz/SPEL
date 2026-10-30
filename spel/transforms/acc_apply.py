@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from spel.transforms.acc_directives import find_directives
 from spel.transforms.acc_plan import LoopProposal, propose
@@ -65,6 +65,7 @@ class PortPlan:
     blocked: list[Port] = field(default_factory=list)  # candidates kept on the host, with the reasons
     manual: list[Port] = field(default_factory=list)  # carried / scatter / interchange loops
     routine_seq: set[str] = field(default_factory=set)  # routine ids that get `!$acc routine seq`
+    notes: list[str] = field(default_factory=list)  # what the plan could not determine
     declares: dict[str, set[str]] = field(default_factory=dict)  # module -> module variables to declare
     private_globals: set[str] = field(default_factory=set)  # module variables a generated module cannot update
 
@@ -86,12 +87,21 @@ EXCLUDED_MARKER = "the right-hand side used an excluded module"
 HOST_ONLY_NAMES = {"nan", "inf", "shr_infnan_nan", "shr_infnan_posinf", "shr_infnan_neginf"}
 
 
-def call_tree(fut, roots: Iterable[str]) -> dict[str, object]:
+def call_tree(fut, roots: Iterable[str],
+              exclude: Optional[Callable[[str], bool]] = None) -> dict[str, object]:
+    """The routines reachable from `roots` through `child_subroutines`.
+
+    `exclude(routine_id)` cuts the tree: an excluded routine is left out together with
+    everything reachable only through it. A routine kept on the host keeps its callees on
+    the host: a kernel in such a callee finds the host routine's data absent (2026-10-29:
+    template_col_from_natveg_array, called only by the host set_old_column_weights)."""
     out: dict[str, object] = {}
     stack = [r for r in roots]
     while stack:
         sid = stack.pop()
         if sid in out or sid not in fut.subroutine_dict:
+            continue
+        if exclude is not None and exclude(sid):
             continue
         sub = fut.subroutine_dict[sid]
         out[sid] = sub
@@ -234,6 +244,7 @@ class _Facts:
         no version of (shr_infnan's `nan` assignment, a stream advance, a time query).
         UpdateDaylength's `daylength = nan` was ported as a kernel and failed to compile.
         """
+        from spel.scripts.fortran_parser.scope_walk import AssignEvent
         from spel.transforms.acc_locals import first_executable
 
         lines = getattr(sub, "sub_lines", None) or []
@@ -241,8 +252,14 @@ class _Facts:
             first = first_executable(self.tree(sub), sub.record)
         except BaseException:
             first = sub.startline
-        return [lt.ln for lt in lines
-                if lt.ln >= first and ("!#py" in lt.line or EXCLUDED_MARKER in lt.line)]
+        out = {lt.ln for lt in lines
+               if lt.ln >= first and ("!#py" in lt.line or EXCLUDED_MARKER in lt.line)}
+        # the record knows the stand-ins (`sub_lines` drops the marker comment: pdep_interp's
+        # stream read was ported as a kernel, with its running index as a sum reduction)
+        if sub.record is not None:
+            out |= {ev.ln for ev in sub.record.events
+                    if isinstance(ev, AssignEvent) and getattr(ev, "stand_in", False)}
+        return sorted(out)
 
     def string_intrinsic_lines(self, sub) -> list[int]:
         """
@@ -374,6 +391,103 @@ def _closure(facts: _Facts, start: set[str]) -> tuple[set[str], list[str]]:
     return seen, missing
 
 
+def reach_conditions(fut, root: str = "elm_driver::elm_drv") -> dict[str, object]:
+    """Routine id -> namelist condition under which `root`'s call tree reaches it: the or over
+    its call sites of (the caller's condition and the namelist if enclosing the call), as the
+    device data layer's guards are composed (`nml_guards`). Routines the tree does not reach
+    are absent (callers treat that as "always")."""
+    from spel.scripts.fortran_parser.boolen_expression import AllOf, AnyOf, simplify
+
+    always = AllOf(())
+    if root not in fut.subroutine_dict:
+        return {}
+    callers: dict[str, list[tuple[str, int]]] = {}
+    seen: set[str] = set()
+    stack = [root]
+    while stack:
+        sid = stack.pop()
+        if sid in seen:
+            continue
+        seen.add(sid)
+        sub = fut.subroutine_dict[sid]
+        for ln, desc in getattr(sub, "sub_call_desc", {}).items():
+            child = getattr(sub, "child_subroutines", {}).get(desc.fn)
+            if child is None or child.id not in fut.subroutine_dict:
+                continue
+            callers.setdefault(child.id, []).append((sid, ln))
+            stack.append(child.id)
+    memo: dict[str, object] = {root: always}
+
+    def reach(sid: str, active: frozenset) -> object:
+        if sid in memo:
+            return memo[sid]
+        conds = []
+        for caller, ln in callers.get(sid, ()):
+            if caller in active:
+                continue
+            if_ = fut.subroutine_dict[caller].namelist_if_at(ln)
+            local = if_.condtional_expectation if if_ is not None else always
+            conds.append(AllOf((reach(caller, active | {sid}), local)))
+        out = simplify(AnyOf(tuple(dict.fromkeys(conds)))) if conds else always
+        memo[sid] = out
+        return out
+
+    for sid in seen:
+        reach(sid, frozenset())
+    return memo
+
+
+def implies(premise, conclusion, max_atoms: int = 14) -> bool:
+    """premise -> conclusion for every assignment of their namelist atoms (truth table);
+    False, i.e. "not known to hold", when there are too many atoms."""
+    from itertools import product
+
+    from spel.scripts.fortran_parser.boolen_expression import _atoms, _evaluate
+
+    atoms = list(_atoms(conclusion, _atoms(premise, {})))
+    if len(atoms) > max_atoms:
+        return False
+    for vals in product((True, False), repeat=len(atoms)):
+        v = dict(zip(atoms, vals))
+        if _evaluate(premise, v) and not _evaluate(conclusion, v):
+            return False
+    return True
+
+
+def kernel_condition(sub, ln: int, reach: dict[str, object]):
+    """The namelist condition under which the loop at line `ln` (0-based) of `sub` runs: how
+    elm_drv's tree reaches the routine, and the namelist if enclosing the loop."""
+    from spel.scripts.fortran_parser.boolen_expression import AllOf
+
+    always = AllOf(())
+    if_at = getattr(sub, "namelist_if_at", None)
+    if_ = if_at(ln) if if_at is not None else None
+    local = if_.condtional_expectation if if_ is not None else always
+    return AllOf((reach.get(sub.id, always), local))
+
+
+def guarded_instances(sub, lo: int, hi: int, instance_conds: dict[str, object], kernel_cond) -> list[str]:
+    """Global derived-type instances accessed in lines lo..hi (0-based) whose device copy exists
+    only under a namelist condition (`instance_conds`, the device data layer's guards: c14_grc_cs
+    under use_c14) that `kernel_cond` (see `kernel_condition`) does not imply. A `default(present)`
+    kernel that names such an instance aborts at launch when the copy is absent, even if the
+    access sits in an `if (use_c14)` inside the loop (2026-10-29: CarbonStateUpdateDynPatch).
+    They get `no_create`: the host address when absent, never dereferenced because the same flag
+    guards the statements."""
+    from spel.scripts.fortran_parser.symbols import Origin
+
+    out: list[str] = []
+    for a in sub.record.accesses(origin=Origin.GLOBAL):
+        if not lo <= a.ln <= hi:
+            continue
+        inst = a.base.lower()
+        cond = instance_conds.get(inst)
+        if cond is None or inst in out or implies(kernel_cond, cond):
+            continue
+        out.append(inst)
+    return sorted(out)
+
+
 def _swappable(loop) -> bool:
     """A perfect two-loop nest whose inner bounds don't use the outer index (one-line headers)."""
     inner = loop.tight_child
@@ -406,12 +520,14 @@ def _reorderable(prop) -> bool:
     return all(lp.node.lineno == lp.start_ln for lp in nest)
 
 
-def plan(fut, roots: Iterable[str]) -> PortPlan:
+def plan(fut, roots: Iterable[str], exclude: Optional[Callable[[str], bool]] = None) -> PortPlan:
+    """Compute-loop ports for the call trees of `roots`. `exclude` keeps routines, and
+    whatever is reachable only through them, off the device (see `call_tree`)."""
     from spel.scripts.record_access import AccessMapper
 
     facts = _Facts(fut)
     mapper = AccessMapper(fut.subroutine_dict)
-    tree = call_tree(fut, roots)
+    tree = call_tree(fut, roots, exclude)
     out = PortPlan()
     candidates: list[Port] = []
 
@@ -475,6 +591,23 @@ def plan(fut, roots: Iterable[str]) -> PortPlan:
     out.ports = [p for p in candidates if not p.blockers]
     out.blocked = [p for p in candidates if p.blockers]
     out.routine_seq = set().union(*[p.callees for p in out.ports]) if out.ports else set()
+
+    # instances the device data layer copies only under a namelist flag: `no_create` on the kernels
+    # that name them outside that flag's ifs
+    try:
+        from spel.transforms.device.generate import access_guards
+
+        guards = access_guards(fut, fut.type_dict)
+        out.notes += guards.notes
+    except Exception as exc:  # the stub analyses of tests have no elm_drv
+        guards = None
+        out.notes.append(f"no device-layer guards ({exc}): no_create clauses not planned")
+    if guards is not None and guards.instance_conds:
+        reach = reach_conditions(fut)
+        for p in out.ports:
+            sub = fut.subroutine_dict[p.routine]
+            p.proposal.no_create = guarded_instances(sub, *p.lines, guards.instance_conds,
+                                                     kernel_condition(sub, p.lines[0], reach))
 
     # module variables read in the new compute loops and the routine-seq routines
     from spel.scripts.fortran_parser.module_spec import ModuleSpecError, module_spec
@@ -629,6 +762,7 @@ def summary(pp: PortPlan) -> list[str]:
            f"{sum(p.interchange for p in pp.ports)} interchanged) in "
            f"{len({p.routine for p in pp.ports})} routines",
            f"routine seq: {len(pp.routine_seq)} routines",
+           f"no_create (namelist-guarded instances): {sum(1 for p in pp.ports if p.proposal.no_create)} loops",
            f"declares: {sum(len(v) for v in pp.declares.values())} module variables in {len(pp.declares)} modules"
            + (f" ({len(pp.private_globals)} private: {', '.join(sorted(pp.private_globals))})" if pp.private_globals else ""),
            f"blocked (stay on the host): {len(pp.blocked)}",

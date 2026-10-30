@@ -49,6 +49,8 @@ ModParseResult = tuple[dict[str, SubInit], list[str]]
 
 # Compile list of lower-case module names to remove
 # SPEL expects these all to be lower-case currently
+# (dynpftFileMod/dyncropFileMod were here until 2026-10-30: their dynVar* modules come from
+# genf90 templates, which spel.scripts.genf90 now generates for the analysis)
 bad_modules = {
     "abortutils",
     "shr_log_mod",
@@ -86,8 +88,6 @@ bad_modules = {
     "shr_pio_mod",
     "spmdgathscatmod",
     "perfmod_gpu",
-    "dynpftfilemod",
-    "dyncropfilemod",
     "dynfateslandusechangemod",
     "cnallocationbetrmod",
     "dynedmod",

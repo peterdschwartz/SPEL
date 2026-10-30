@@ -90,3 +90,32 @@ end subroutine s"""
     assert check_routine(sub, {"avg_1d"}, lines).locals_needed == []        # `avg` itself isn't known
     sub.sub_call_desc = {call.ln: SimpleNamespace(fn="m::avg_1d")}           # resolved generic
     assert check_routine(sub, {"avg_1d"}, lines).locals_needed == ["work"]
+
+
+DATA_SRC = """subroutine s(n, x)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(inout) :: x(:)
+  integer :: i
+  real(r8) :: dzmin(5), work(5), scale(5) = 2._r8
+  data dzmin /0.010_r8, 0.015_r8, 0.025_r8, 0.055_r8, 0.115_r8/
+  work(:) = 0._r8
+  !$acc parallel loop gang vector default(present)
+  do i = 1, n
+     x(i) = x(i) * dzmin(1) + work(1) + scale(2)
+  end do
+end subroutine s"""
+
+
+def test_host_initialized_locals_are_copied_in(tmp_path):
+    path = tmp_path / "m.F90"
+    path.write_text(DATA_SRC)
+    rec = walk(DATA_SRC)
+    lns = [ln for ln, line in enumerate(DATA_SRC.split("\n")) if line.strip()]
+    sub = SimpleNamespace(id="m::s", name="s", record=rec, filepath=path, startline=lns[0], endline=lns[-1])
+    lines = DATA_SRC.split("\n")
+    r = check_routine(sub, set(), lines)
+    assert set(r.locals_needed) == {"dzmin", "work", "scale"}
+    assert r.host_initialized == ["dzmin", "scale"]      # a DATA statement, an initializer
+    assert r.host_accessed == ["work"]                   # written by host code: copied around the kernel
+    # plan_fix emits `enter data copyin(dzmin, scale)` for them (it needs a module file: not exercised here)

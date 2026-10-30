@@ -62,6 +62,10 @@ class RoutineReport:
     # of those, the ones the host also reads or writes (outside compute constructs and
     # device calls): their values must move, `create` alone would hand the device garbage
     host_accessed: list[str] = field(default_factory=list)
+    # of the device-only ones, those the host initializes in the specification part (an
+    # initializer or a DATA statement) and never touches again: `enter data copyin`, since
+    # `create` would hand the device an unfilled copy (SnowHydrology's dzmin, 2026-10-30)
+    host_initialized: list[str] = field(default_factory=list)
     # device-only locals that error checks print on the host: first line of each such branch
     # (an if that can abort), where an `update self` brings the values over first
     cold_reads: dict[str, list[int]] = field(default_factory=dict)
@@ -206,10 +210,14 @@ def check_routine(sub, device_routines: set[str], lines: list[str],
     except BaseException:  # the parser exits on what it cannot read: no exemption
         cold = []
     host: set[str] = set()
+    initialized: set[str] = set()
     cold_reads: dict[str, set[int]] = {}
     for a in accesses:
         name = a.base.lower()
         if name not in needed or any(lo <= a.ln <= hi for lo, hi in device_lines):
+            continue
+        if a.context in ("init", "data"):
+            initialized.add(name)  # the specification part: the value the device copy must start with
             continue
         branch = next((b for b in cold if b[0] <= a.ln <= b[1]), None)
         if branch is not None and "w" not in a.status:
@@ -223,6 +231,7 @@ def check_routine(sub, device_routines: set[str], lines: list[str],
         if uses and not any(lo <= call.ln <= hi for lo, hi in device_lines):
             host |= uses & set(needed)
     report.host_accessed = [n for n in report.locals_needed if n in host]
+    report.host_initialized = [n for n in report.locals_needed if n in initialized and n not in host]
     report.cold_reads = {n: sorted(v) for n, v in cold_reads.items() if n not in host}
     return report
 
@@ -359,9 +368,16 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
     ind = _indent(lines[first_exec])
     out: list[Insertion] = []
     device_only = [n for n in report.locals_needed if n not in report.host_accessed]
+    created = [n for n in device_only if n not in report.host_initialized]
+    initialized = [n for n in device_only if n in report.host_initialized]
     if device_only:
-        out.append(Insertion(first_exec, [f"{ind}{TAG}: device storage of the local work arrays"]
-                             + _wrap_directive(ind, "enter data create", device_only)))
+        block = [f"{ind}{TAG}: device storage of the local work arrays"]
+        if created:
+            block += _wrap_directive(ind, "enter data create", created)
+        if initialized:
+            block += [f"{ind}{TAG}: initialized in the specification part: the device copy starts from the host values"]
+            block += _wrap_directive(ind, "enter data copyin", initialized)
+        out.append(Insertion(first_exec, block))
     at: dict[int, list[str]] = {}
     for name in device_only:
         for ln in report.cold_reads.get(name, []):
@@ -415,8 +431,9 @@ def apply_fix(fut, reports: list[RoutineReport], dry_run: bool = False) -> list[
         ins: list[Insertion] = []
         for sub, r in items:
             ins += plan_fix(sub, r, lines)
-            log.append(f"{path.name}: {r.routine}: create {[n for n in r.locals_needed if n not in r.host_accessed]}"
-                       f", copy around device use {r.host_accessed}")
+            log.append(f"{path.name}: {r.routine}: create "
+                       f"{[n for n in r.locals_needed if n not in r.host_accessed and n not in r.host_initialized]}"
+                       f", copyin {r.host_initialized}, copy around device use {r.host_accessed}")
         for x in sorted(ins, key=lambda x: (-x.ln, -x.order)):
             lines[x.ln:x.ln] = x.lines
         if not dry_run:
