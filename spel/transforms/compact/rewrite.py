@@ -45,18 +45,23 @@ from __future__ import annotations
 import difflib
 import json
 import re
-import shutil
 from collections import defaultdict
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Iterator, Optional
 
+from spel.transforms.core.registry import transform
+from spel.transforms.core.transform import Change, Plan as TPlan, Refusal, Transform
 from spel.transforms.compact.holders import Holder, base_routine, embedded_holders, nutrient_manifest
 from spel.transforms.compact.inventory import DRIVER_ID
 from spel.scripts.registrations import (
     HIST_CALLS, RESTART_CALL, _keyword_args, iter_statements, parse_routine, registrations,
 )
-from spel.transforms.compact.select import Polymorphic, Selection, statement_end
+from spel.transforms.compact.select import Polymorphic, Selection, statement_end, statement_start
+from spel.scripts.fortran_parser.spel_parser import Parser
+from spel.scripts.types import LineTuple
 from spel.scripts.fortran_parser.scope_walk import AssignEvent, flatten_designator
 from spel.scripts.fortran_parser.spel_ast import (
     AllocateStatement,
@@ -77,8 +82,10 @@ from spel.scripts.fortran_parser.spel_ast import (
     TypeDef,
     UseStatement,
     VariableDecl,
+    to_actual_arg,
 )
 from spel.scripts.fortran_parser.symbols import SymbolKind
+from spel.transforms.core.edits import span_text
 from spel.transforms.split.modules import parse_module_file, use_items
 
 TEMPLATE = Path(__file__).parent / "templates" / "CompactLayoutMod.F90"
@@ -141,9 +148,56 @@ def iter_expressions(node, root: bool = True) -> Iterator[Expression]:
     if not hasattr(node, "__dict__"):
         return
     for key, value in vars(node).items():
-        if key in ("token", "parent") or isinstance(value, (str, int, float, bool, type(None))):
+        if key in ("token", "parent", "span", "args_close") or isinstance(value, (str, int, float, bool, Enum, type(None))):
             continue
         yield from iter_expressions(value, False)
+
+
+def name_end(expr) -> Optional[tuple[int, int]]:
+    """(line, column) just after the name of a designator, before its last subscript list."""
+    while isinstance(expr, FieldAccessExpression):
+        expr = expr.field
+    if isinstance(expr, FuncExpression):
+        expr = expr.function
+    return tuple(expr.span[2:]) if expr.span else None
+
+
+def subscripted_designators(tree, ln0: int, ln1: int) -> Iterator:
+    """
+    `(name_end, (path, first subscript))` of every designator `a%b(i, ...)`
+    (subscripts only on its last part) that starts on lines ln0..ln1 of `tree`
+    (parsed with keep_spans); `path` is lowercase, without spaces.
+    """
+    fields: set[int] = set()  # the parts of a designator: not designators of their own
+    for stmt, _ in iter_statements(tree.body):
+        for e in iter_expressions(stmt):
+            if isinstance(e, FieldAccessExpression):
+                fields.add(id(e.field))
+            if id(e) in fields or not isinstance(e, (FuncExpression, FieldAccessExpression)):
+                continue
+            if e.span is None or not ln0 <= e.span[0] <= ln1:
+                continue
+            try:
+                comps = flatten_designator(e)
+            except Exception:
+                continue
+            if any(subs for _, subs in comps[:-1]) or not comps[-1][1] or comps[-1][1][0].span is None:
+                continue
+            end = name_end(e)
+            if end is not None:
+                yield end, ("%".join(n.lower() for n, _ in comps), comps[-1][1][0])
+
+
+def data_arguments(tree, ln0: int, ln1: int) -> list[KeywordArgument]:
+    """The `data=` arguments of the calls starting on lines ln0..ln1 of `tree` (parsed with keep_spans)."""
+    out = []
+    for stmt, _ in iter_statements(tree.body):
+        if isinstance(stmt, SubCallStatement) and stmt.function.span and ln0 <= stmt.function.span[0] <= ln1:
+            for a in stmt.function.args:
+                a = to_actual_arg(a)
+                if isinstance(a, KeywordArgument) and a.keyword.lower() == "data" and a.span:
+                    out.append(a)
+    return out
 
 
 def assignment_lhs(stmt) -> Optional[Expression]:
@@ -194,15 +248,34 @@ class FileEdits:
     after: dict[int, list[str]] = field(default_factory=lambda: defaultdict(list))
     before: dict[int, list[str]] = field(default_factory=lambda: defaultdict(list))
     deletes: set[int] = field(default_factory=set)
+    # column edits (from parser spans): line -> {(c0, c1): new text}, applied before `subs`
+    cols: dict[int, dict[tuple[int, int], str]] = field(default_factory=lambda: defaultdict(dict))
+
+    def replace_cols(self, ln: int, c0: int, c1: int, new: str) -> None:
+        """Replace columns [c0, c1) of line `ln` (an insertion if c0 == c1)."""
+        edits = self.cols[ln]
+        if edits.get((c0, c1), new) != new:
+            raise RewriteError(f"{self.path}:{ln + 1}: two different edits of columns {c0}-{c1}")
+        for a, b in edits:
+            if (a, b) != (c0, c1) and (a < c1 and c0 < b or a == b == c0 or c0 == c1 == a):
+                raise RewriteError(f"{self.path}:{ln + 1}: overlapping edits at columns {a}-{b} and {c0}-{c1}")
+        edits[(c0, c1)] = new
+
+    def line(self, i: int) -> str:
+        """Line `i` with its column edits and substitutions."""
+        line = self.lines[i]
+        for (c0, c1), new in sorted(self.cols.get(i, {}).items(), reverse=True):
+            line = line[:c0] + new + line[c1:]
+        for pattern, repl in self.subs.get(i, []):
+            line = pattern.sub(repl, line)
+        return line
 
     def result(self) -> list[str]:
         out: list[str] = []
-        for i, line in enumerate(self.lines):
+        for i in range(len(self.lines)):
             out.extend(self.before.get(i, []))
             if i not in self.deletes:
-                for pattern, repl in self.subs.get(i, []):
-                    line = pattern.sub(repl, line)
-                out.append(line)
+                out.append(self.line(i))
             out.extend(self.after.get(i, []))
         return out
 
@@ -258,6 +331,7 @@ class Rewriter:
         self._prologued: dict[str, set[str]] = defaultdict(set)  # routine -> subgrids with a k0 local
         self._module_use: set = set()
         self._trees: dict[str, object] = {}  # file -> parsed ModuleConstruct
+        self._routines: dict[str, object] = {}  # routine -> parse tree with spans
         self.init_plans: dict[str, list[InitPlan]] = {}  # selection type -> plans
         self.restart_plans: dict[str, list[RestartPlan]] = {}
         self.bind_module: str = ""
@@ -366,7 +440,7 @@ class Rewriter:
         for sub_id, poly in polymorphic.items():
             for caller, ln in sorted(poly.compact_calls):
                 fe = self.file(self.subs[caller].filepath)
-                self.append_argument(fe, ln, f"{OFF}={K0[poly_subgrid[sub_id]]}")
+                self.append_argument(fe, self.subs[caller], ln, f"{OFF}={K0[poly_subgrid[sub_id]]}")
 
     def rewrite_polymorphic(self, fe: FileEdits, sub, sites) -> None:
         """
@@ -392,7 +466,7 @@ class Rewriter:
             raise RewriteError(f"{sub.id}: expected one `{var} = filter({fp})`, found {len(assigns)}")
         for site in sites:
             self.rewrite_site(fe, site, index=KC)
-        self.append_argument(fe, sub.startline, OFF)
+        self.append_argument(fe, sub, sub.startline, OFF)
         last = statement_end(fe.lines, rec.last_decl_ln)
         fe.after[last].extend(
             [
@@ -408,35 +482,72 @@ class Rewriter:
             ]
         )
 
-    def append_argument(self, fe: FileEdits, ln: int, arg: str) -> None:
-        """Add `arg` as the last argument of the call or header statement on line `ln`."""
-        end = statement_end(fe.lines, ln)
-        code = fe.lines[end].split("!")[0]
-        close = code.rstrip().rfind(")")
-        if close < 0:
-            raise RewriteError(f"{fe.path}:{end + 1}: no closing parenthesis for `{arg}`")
-        pattern = re.compile(rf"^(.{{{close}}})\)")
-        repl = rf"\1, {arg})"
-        if (pattern, repl) not in fe.subs[end]:
-            fe.subs[end].append((pattern, repl))
+    def tree(self, sub):
+        """The routine's parse tree with source spans (cached)."""
+        if not hasattr(self, "_routines"):
+            self._routines = {}
+        if sub.id not in self._routines:
+            try:
+                # to the END statement: `endline` stops at the routine's own `contains`, if any
+                end = getattr(sub, "end_stmt_ln", None) or sub.endline
+                self._routines[sub.id] = parse_routine(sub.filepath, sub.startline, end, keep_spans=True)
+            except BaseException as err:  # the parser exits on fatal errors
+                raise RewriteError(f"{sub.id}: does not parse: {err}")
+        return self._routines[sub.id]
+
+    def site_tree(self, fe: FileEdits, site, end: int):
+        """The tree of the site's routine; without an analysis (snippets), of its statement alone."""
+        subs = getattr(self, "subs", None)
+        if subs is not None and site.sub in subs:
+            return self.tree(subs[site.sub])
+        lines = [LineTuple(line=fe.lines[i], ln=i) for i in range(statement_start(fe.lines, site.ln), end + 1)]
+        return SimpleNamespace(body=Parser(lines=lines, keep_spans=True).parse_program())
+
+    def append_argument(self, fe: FileEdits, sub, ln: int, arg: str) -> None:
+        """
+        Add `arg` as the last argument of the call on line `ln` of `sub`, or of
+        its header if `ln` is the routine's first line.
+        """
+        tree = self.tree(sub)
+        if ln == sub.startline:
+            close = tree.args_close
+        else:
+            calls = [s.function.span for s, _ in iter_statements(tree.body)
+                     if isinstance(s, SubCallStatement) and s.function.span and s.function.span[0] == ln]
+            if len(calls) != 1:
+                raise RewriteError(f"{fe.path}:{ln + 1}: expected one call statement for `{arg}`, found {len(calls)}")
+            l1, c1 = calls[0][2:]
+            close = (l1, c1 - 1, l1, c1)
+        if close is None or fe.lines[close[0]][close[1]:close[3]] != ")":
+            raise RewriteError(f"{fe.path}:{ln + 1}: no closing parenthesis for `{arg}`")
+        fe.replace_cols(close[0], close[1], close[1], f", {arg}")
 
     def rewrite_site(self, fe: FileEdits, site, index: str | None = None, k0: str = "k0p") -> None:
-        name = r"\s*%\s*".join(re.escape(part) for part in site.written.split("%"))
-        pattern = re.compile(
-            rf"(?<![%\w])(?P<name>{name})\s*\(\s*{re.escape(site.sub0)}\s*(?=[,)])",
-            re.IGNORECASE,
-        )
-        repl = rf"\g<name>({index}" if index else rf"\g<name>({k0}+{site.fp}"
+        """
+        `name(sub0, ...)` -> `name(index, ...)` (or `name(k0+fp, ...)`) for every
+        reference to the site's designator with that first subscript in its statement.
+        """
+        repl = f"({index}" if index else f"({k0}+{site.fp}"
         end = statement_end(fe.lines, site.ln)
-        hits = [ln for ln in range(site.ln, end + 1) if pattern.search(fe.lines[ln].split("!")[0])]
+        want = (site.written.lower(), site.sub0.replace(" ", "").lower())
+        hits = 0
+        for name_end, first in subscripted_designators(self.site_tree(fe, site, end), site.ln, end):
+            path, arg = first
+            if (path, span_text(fe.lines, arg.span).replace(" ", "").lower()) != want:
+                continue
+            (l0, c0), (l1, c1) = name_end, arg.span[2:]
+            if l0 != l1:
+                raise RewriteError(f"{fe.path}:{site.ln + 1}: `{site.written}({site.sub0}` spans lines")
+            code = fe.lines[l1]
+            while c1 < len(code) and code[c1] in " \t":  # up to the `,` or `)`
+                c1 += 1
+            fe.replace_cols(l0, c0, c1, repl)
+            hits += 1
         if not hits:
             raise RewriteError(
                 f"{fe.path}:{site.ln + 1}: no `{site.written}({site.sub0}` in the statement "
                 f"(sources changed since the analysis?)"
             )
-        for ln in hits:
-            if (pattern, repl) not in fe.subs[ln]:
-                fe.subs[ln].append((pattern, repl))
 
     def prologue(self, fe: FileEdits, sub, subgrids, extra: tuple[str, ...] = ()) -> None:
         """
@@ -653,7 +764,7 @@ class Rewriter:
         for plan in self.restart_plans.get(sel.dtype, []):
             sub = self.subs[plan.sub_id]
             fe = self.file(sub.filepath)
-            tree = parse_routine(sub.filepath, sub.startline, sub.endline)
+            tree = self.tree(sub)
             args = [str(a).lower() for a in tree.args]
             if "flag" not in args:
                 raise RewriteError(f"{sub.id}: no `flag` dummy (the restart read/write flag)")
@@ -663,11 +774,14 @@ class Rewriter:
                 if comp not in sel.components:
                     continue
                 tmp = f"spel_rst{rank}"
-                pattern = re.compile(rf"data\s*=\s*{re.escape(this)}\s*%\s*{re.escape(comp)}\b", re.IGNORECASE)
-                hits = [i for i in range(ln, end + 1) if pattern.search(fe.lines[i].split("!")[0])]
-                if len(hits) != 1:
+                hits = [
+                    (a.span[:2], name_end(a.value)) for a in data_arguments(tree, ln, end)
+                    if designator_text(a.value) == f"{this}%{comp}".lower()
+                ]
+                if len(hits) != 1 or hits[0][1] is None or hits[0][0][0] != hits[0][1][0]:
                     raise RewriteError(f"{fe.path}:{ln + 1}: `data={this}%{comp}` not found once in the restartvar call")
-                fe.subs[hits[0]].append((pattern, f"data={tmp}"))
+                (l0, c0), (_, c1) = hits[0]
+                fe.replace_cols(l0, c0, c1, f"data={tmp}")
                 indent = re.match(r"\s*", fe.lines[ln]).group(0)
                 fe.before[ln].append(f"{indent}call compact_gather{rank}({this}%{comp}, {tmp})  {TAG}")
                 fe.after[end].extend(
@@ -1224,51 +1338,6 @@ end module {BIND_MODULE}
             out.extend(f"+{l}\n" for l in self.bind_module.split("\n"))
         return "".join(out)
 
-    def apply(self, manifest: dict, output: Path | None = None, replace: bool = False) -> list[Path]:
-        """
-        Rewrite the sources in place, or write the rewritten files (by
-        basename, as for a case's SourceMods/src.elm) to `output`. An `output`
-        with an earlier rewrite's manifest is refused, unless `replace`: then
-        exactly the files that manifest lists are removed first.
-        """
-        main = self.main_dir()
-        if (main / MANIFEST).exists() or (main / BIND_FILE).exists():
-            raise RewriteError(f"{main} already has {BIND_FILE} or {MANIFEST}: already rewritten?")
-        # the checkout may carry CompactLayoutMod itself (histComputeMod and histFileMod use it):
-        # then it must be the template, and it is not written again
-        carried = (main / TEMPLATE.name).exists()
-        if carried and (main / TEMPLATE.name).read_text() != TEMPLATE.read_text():
-            raise RewriteError(
-                f"{main / TEMPLATE.name} differs from SPEL's template {TEMPLATE}: update one of them first"
-            )
-        dest = main if output is None else Path(output)
-        if output is not None and (dest / MANIFEST).exists():
-            if not replace:
-                raise RewriteError(f"{dest} has an earlier rewrite ({MANIFEST}); pass --replace")
-            for path in written_files(dest):
-                path.unlink()
-        dest.mkdir(parents=True, exist_ok=True)
-        written = []
-        for fe in self.files.values():
-            target = fe.path if output is None else dest / fe.path.name
-            target.write_text("\n".join(fe.result()))
-            written.append(target)
-        (dest / MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n")
-        if not self.sels:  # SetValues loops only
-            return written + [dest / MANIFEST]
-        if not carried:
-            shutil.copy(TEMPLATE, dest / TEMPLATE.name)
-            written.append(dest / TEMPLATE.name)
-        (dest / BIND_FILE).write_text(self.bind_module)
-        return written + [dest / BIND_FILE, dest / MANIFEST]
-
-
-def written_files(dest: Path) -> list[Path]:
-    """The files an earlier rewrite wrote to `dest` (by its manifest)."""
-    m = json.loads((dest / MANIFEST).read_text())
-    names = {Path(f).name for f in m["files"]} | {TEMPLATE.name, BIND_FILE, MANIFEST}
-    return [dest / n for n in sorted(names) if (dest / n).is_file()]
-
 
 def manifest(rewriter: Rewriter, spel_commit: str, e3sm: dict) -> dict:
     types = {}
@@ -1298,3 +1367,162 @@ def manifest(rewriter: Rewriter, spel_commit: str, e3sm: dict) -> dict:
     if nm is not None:  # the nutrient transform state the rewrite assumed
         out["nutrient"] = {k: nm.get(k) for k in ("spel_commit", "e3sm", "generated_by") if k in nm}
     return out
+
+
+DEFAULT_TYPES = ["vegetation_carbon_flux", "vegetation_nitrogen_flux", "vegetation_phosphorus_flux",
+                 "column_carbon_flux", "column_nitrogen_flux", "column_phosphorus_flux"]
+
+
+def select_types(fut, types: Optional[list[str]] = None, roles: bool = False, no_map_sites: bool = False,
+                 exclude_fields: str = "", fields: str = "", loops_only: bool = False,
+                 list_excluded: bool = False) -> tuple[list, list[str]]:
+    """
+    The field selections of `types` (default `DEFAULT_TYPES`, mapped to their family base types,
+    and with `roles` the role holders, on nutrient-transformed sources), narrowed by
+    `exclude_fields`/`fields` (comma-separated components); and the report lines.
+    """
+    import spel.transforms.compact.select as _sel
+    from spel.transforms.compact.holders import family_base, nutrient_manifest, role_types
+
+    report: list[str] = []
+    type_given = bool(types)
+    types = list(types) if type_given else list(DEFAULT_TYPES)
+    nm = nutrient_manifest(fut)
+    if nm is not None and not type_given:
+        # nutrient-transformed sources: the shared fields live on the family base types
+        mapped = []
+        for dtype in types:
+            base = family_base(nm, dtype)
+            if base and base not in mapped:
+                mapped.append(base)
+            elif not base and dtype not in mapped:
+                mapped.append(dtype)
+        if roles:
+            mapped += [r for r in role_types(nm, types) if r not in mapped]
+        report.append(f"types: {', '.join(mapped)} (from .spel-nutrient.json)")
+        types = mapped
+    saved, _sel.MAP_SITES = _sel.MAP_SITES, _sel.MAP_SITES and not no_map_sites
+    try:
+        sels = []
+        for dtype in [] if loops_only else types:
+            sel = _sel.select_fields(fut, dtype)
+            if exclude_fields:
+                for comp in exclude_fields.split(","):
+                    if comp in sel.components:
+                        sel.components.pop(comp)
+                        sel.history.pop(comp, None)
+                        sel.levels.pop(comp, None)
+                        sel.restart.pop(comp, None)
+                        sel.excluded[comp] = "--exclude-fields"
+                drop = set(exclude_fields.split(","))
+                sel.sites = [st for st in sel.sites if st.components - drop]
+            if fields:
+                keep = set(fields.split(","))
+                for comp in list(sel.components):
+                    if comp not in keep:
+                        sel.components.pop(comp)
+                        sel.history.pop(comp, None)
+                        sel.levels.pop(comp, None)
+                        sel.excluded[comp] = "not in --fields"
+                sel.sites = [st for st in sel.sites if st.components & keep]
+                if not sel.components:
+                    report.append(f"{dtype}: no selected field in --fields; skipped")
+                    continue
+            sels.append(sel)
+            report.append(f"{dtype}: {len(sel.components)} fields, {len(sel.sites)} access sites")
+            nested = [c for c, why in sel.excluded.items() if why.startswith("lives on")]
+            if nested:
+                report.append(f"  {len(nested)} shared fields live on an embedded holder; pass --type <that type> (see --excluded)")
+            for comp, zc in sel.components.items():
+                report.append(f"  {comp:32s} zeroed: {zc:20s} history: {sel.history[comp]}")
+            if list_excluded:
+                for comp, why in sorted(sel.excluded.items()):
+                    report.append(f"  excluded {comp:32s} {why}")
+            else:
+                report.append(f"  ({len(sel.excluded)} fields excluded; --excluded lists them)")
+            if sel.untraced:
+                report.append("  uses outside the elm_drv trace (text search; fields with a use of this type are excluded):")
+                report += [f"    {u}" for u in sel.untraced]
+    finally:
+        _sel.MAP_SITES = saved
+    return sels, report
+
+
+def core_edits(fe: FileEdits, why: str = "") -> list:
+    """A FileEdits as core edits: the same text as `fe.result()`."""
+    from spel.transforms.core.edits import insert, replace, replace_cols
+
+    # at one position: the previous line's `after`, this line's `before`, then the line itself
+    out = [insert(i + 1, new, order=-2, why=why) for i, new in sorted(fe.after.items()) if new]
+    out += [insert(i, new, order=-1, why=why) for i, new in sorted(fe.before.items()) if new]
+    for i in sorted({i for i, v in fe.subs.items() if v} | {i for i, v in fe.cols.items() if v} | fe.deletes):
+        line = fe.lines[i]
+        if i in fe.deletes:
+            out.append(replace(i, [], expect=[line], why=why))
+        elif not fe.subs.get(i):  # column edits only
+            out += [replace_cols(i, c0, c1, new, expect=line[c0:c1], why=why) for (c0, c1), new in sorted(fe.cols[i].items())]
+        elif fe.line(i) != line:
+            out.append(replace(i, fe.line(i), expect=[line], why=why))
+    return out
+
+
+@dataclass
+class Options:
+    type: list[str] = field(default_factory=list, metadata={
+        "help": "the derived types to rewrite (default: the patch/column C/N/P flux types, or their family base types on nutrient-transformed sources)"})
+    roles: bool = field(default=False, metadata={"help": "also the role holders of the default types (nutrient-transformed sources)"})
+    loops_only: bool = field(default=False, metadata={"help": "only the SetValues loops, no compact layout"})
+    setvalues_loops: bool = field(default=False, metadata={"help": "also turn the flux types' blocked SetValues loops into do concurrent"})
+    exclude_fields: str = field(default="", metadata={"help": "comma-separated components to drop from every selection"})
+    fields: str = field(default="", metadata={"help": "comma-separated components to keep (only these)"})
+    no_map_sites: bool = field(default=False, metadata={"help": "only filter-gathered sites"})
+    excluded: bool = field(default=False, metadata={"help": "list every excluded field and why in the report"})
+
+
+@transform
+class CompactRewrite(Transform):
+    """
+    Matches: the per-step zeroed fields of the selected flux types that every access site
+             reaches through a soil filter (`spel compact inventory` explains each verdict).
+    Changes: those fields move to per-group compact buffers; access sites, history, restart and
+             the SetValues loops are rewritten; CompactBindMod and the manifest are generated
+             (and CompactLayoutMod, unless the sources carry it).
+    Refuses: sources rewritten already (CompactBindMod or the manifest exist), a carried
+             CompactLayoutMod that differs from SPEL's template.
+    Design: compact/DESIGN.md.
+    """
+
+    name = "compact-rewrite"
+    summary = "compact (filter-packed) storage for the per-step zeroed flux fields"
+    Options = Options
+
+    def build(self, ctx, opts) -> TPlan:
+        from spel.scripts.analysis_cache import git_state
+        from spel.transforms.compact.inventory import FLUX_TYPES
+
+        out = TPlan(self.name)
+        sels, report = select_types(ctx.fut, opts.type or None, roles=opts.roles, no_map_sites=opts.no_map_sites,
+                                    exclude_fields=opts.exclude_fields, fields=opts.fields,
+                                    loops_only=opts.loops_only, list_excluded=opts.excluded)
+        rw = Rewriter(ctx.fut, sels)
+        try:
+            rw.build(loop_types=FLUX_TYPES if opts.setvalues_loops else ())
+        except RewriteError as err:
+            return out.add(Refusal(self.name, str(err)))
+        main = rw.main_dir()
+        if (main / MANIFEST).exists() or (main / BIND_FILE).exists():
+            return out.add(Refusal(str(main), f"already has {BIND_FILE} or {MANIFEST}: already rewritten?"))
+        carried = (main / TEMPLATE.name).exists()
+        if carried and (main / TEMPLATE.name).read_text() != TEMPLATE.read_text():
+            return out.add(Refusal(TEMPLATE.name, f"{main / TEMPLATE.name} differs from SPEL's template {TEMPLATE}"))
+        out.notes += report + rw.notes
+        for fe in rw.files.values():
+            out.add(Change(fe.path, core_edits(fe, self.name), where=fe.path.name))
+        spel_root = Path(__file__).resolve().parents[3]
+        out.new_files[main / MANIFEST] = json.dumps(
+            manifest(rw, git_state(spel_root).get("commit"), git_state(ctx.srcroot)), indent=1) + "\n"
+        if sels:
+            if not carried:
+                out.new_files[main / TEMPLATE.name] = TEMPLATE.read_text()
+            out.new_files[main / BIND_FILE] = rw.bind_module
+        return out

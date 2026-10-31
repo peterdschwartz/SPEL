@@ -15,7 +15,9 @@ field -> a switch, a list field -> several values) and keys of the spec file:
     [options]
     roots = ["elm_driver::elm_drv"]
 
-    # or a pipeline: the steps run in order, each re-analyzing the files the previous one wrote
+    # or a pipeline: the steps plan in order, each on the text the previous ones produced, and
+    # the net result is written once (core/pipeline.py: the analysis of the edited files is
+    # refreshed in memory; --reanalyze-steps writes each step and reanalyzes instead)
     [[step]]
     transform = "section-loops"
     [[step]]
@@ -47,9 +49,11 @@ BUILTINS = [
     "spel.transforms.acc_apply",
     "spel.transforms.acc_sync",
     "spel.transforms.acc_to_omp",
+    "spel.transforms.device.generate",
     "spel.transforms.device.targeted",
     "spel.transforms.split.modules",
-    "spel.transforms.adapters",
+    "spel.transforms.nutrient.transforms",
+    "spel.transforms.compact.rewrite",
 ]
 _loaded = False
 
@@ -172,6 +176,9 @@ def _run_parser(prog: str, t: Optional[type[Transform]]) -> argparse.ArgumentPar
     p.add_argument("--verify", action="store_true", help="re-parse the files written (problems: exit 1)")
     p.add_argument("-o", "--out", type=Path, help="write the files flat into DIR instead of in place")
     p.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
+    if t is None:
+        p.add_argument("--reanalyze-steps", action="store_true",
+                       help="pipeline: write each step in place and reanalyze before the next (no -o)")
     if t is not None:
         add_option_flags(p, t.Options)
     return p
@@ -215,29 +222,50 @@ def main(argv: list[str]) -> int:
     from spel.scripts.config import E3SM_SRCROOT
 
     srcroot = Path(E3SM_SRCROOT)
+    sink = driver.OutDir(args.out) if args.out else driver.InPlace()
+
+    def show(plan, sources) -> None:
+        if args.json:
+            print(json.dumps(plan.to_json(), indent=1))
+        if args.report or args.dry_run or not (args.diff or args.where or args.json):
+            print(plan.report())
+        if args.diff:
+            sys.stdout.write(plan.diff(sources))
+        if args.where:
+            print(plan.explain(sources, args.where))
+
+    def done(written, problems) -> int:
+        for w in written:
+            print(f"wrote {w}")
+        for prob in problems:
+            print(f"verify: {prob}", file=sys.stderr)
+        return 1 if problems else 0
+
+    if len(steps) > 1 and not getattr(args, "reanalyze_steps", False):
+        from spel.transforms.core.pipeline import Pipeline, PipelineError
+
+        fut = driver.context(srcroot=srcroot, reanalyze=args.reanalyze).fut
+        try:
+            res = Pipeline([(t(), opts) for t, opts in steps]).run(
+                fut, srcroot, sink=sink, dry_run=args.dry_run, verify=args.verify, manifest=True,
+                on_step=lambda i, st: show(st.result.plan, st.ctx.sources))
+        except PipelineError as err:
+            print(f"spel transform: {err}\n(nothing written; --reanalyze-steps runs the steps one "
+                  "at a time with a reanalysis in between)", file=sys.stderr)
+            return 2
+        return done(res.written, res.problems)
+
     if len(steps) > 1 and args.out and not args.dry_run:
-        sys.exit("spel transform: a multi-step spec runs in place (each step analyzes what the "
+        sys.exit("spel transform: --reanalyze-steps runs in place (each step analyzes what the "
                  "earlier ones wrote); use a scratch worktree instead of -o")
     status = 0
     for i, (t, opts) in enumerate(steps):
         # a later step needs the analysis of what the earlier ones wrote
         ctx = driver.context(srcroot=srcroot, reanalyze=args.reanalyze or (i > 0 and not args.dry_run))
-        sink = driver.OutDir(args.out) if args.out else driver.InPlace()
         res = driver.run(t(), ctx, opts, sink=sink, dry_run=args.dry_run, verify=args.verify,
                          manifest=not args.dry_run)
-        if args.json:
-            print(json.dumps(res.plan.to_json(), indent=1))
-        if args.report or args.dry_run or not (args.diff or args.where or args.json):
-            print(res.plan.report())
-        if args.diff:
-            sys.stdout.write(res.plan.diff(ctx.sources))
-        if args.where:
-            print(res.plan.explain(ctx.sources, args.where))
-        for w in res.written:
-            print(f"wrote {w}")
-        for prob in res.problems:
-            print(f"verify: {prob}", file=sys.stderr)
-            status = 1
+        show(res.plan, ctx.sources)
+        status = max(status, done(res.written, res.problems))
         if args.dry_run and i < len(steps) - 1:
             print(f"(dry run: steps after {t.name} plan on the unmodified sources)")
     return status

@@ -1268,19 +1268,38 @@ def remove_cpp_directives(
     return work_lines
 
 
+# Text to preprocess instead of a file's content on disk (os.path.abspath -> text). Set while
+# transforms plan on edited text that isn't written yet (spel.transforms.core.capture.VirtualFS).
+SOURCE_OVERRIDES: dict[str, str] = {}
+
+
 def apply_preprocessor(fn: Path) -> list[str]:
+    fn = Path(fn)
     base_fn = fn.name
     new_fn = Path(f"{spel_output_dir}/cpp_{base_fn}")
 
     # Set up cmd for preprocessing. Get macros used:
     macros_string = "-D" + " -D".join(macros)
-    cmd = f"gfortran -I{E3SM_SRCROOT}/share/include {macros_string} -cpp -E {fn} > {new_fn}"
-    _ = sp.getoutput(cmd)
+    text = SOURCE_OVERRIDES.get(os.path.abspath(fn))
+    if text is None:
+        cmd = f"gfortran -I{E3SM_SRCROOT}/share/include {macros_string} -cpp -E {fn} > {new_fn}"
+        _ = sp.getoutput(cmd)
+        with open(new_fn, "r") as file:
+            return file.readlines()
 
+    import io
+    import tempfile
+
+    # a same-named copy (cpp line markers name it; local includes still come from fn's directory)
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp) / base_fn
+        with io.open(copy, "w") as f:
+            f.write(text)
+        cmd = (f"gfortran -I{fn.parent} -I{E3SM_SRCROOT}/share/include {macros_string} "
+               f"-cpp -E {copy} > {new_fn}")
+        _ = sp.getoutput(cmd)
     with open(new_fn, "r") as file:
-        cpp_lines = file.readlines()
-
-    return cpp_lines
+        return [line.replace(f'"{copy}"', f'"{os.path.abspath(fn)}"') for line in file.readlines()]
 
 
 regex_end_module = re.compile(r"^\s*end\s*module\b", re.IGNORECASE)

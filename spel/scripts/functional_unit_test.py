@@ -861,7 +861,7 @@ class FunctionalUnitTest:
             self.type_dict
         )
 
-        # sources rewritten by `spel compact rewrite`: pack/unpack the compact fields
+        # sources rewritten by `spel transform compact-rewrite`: pack/unpack the compact fields
         # around compute (SpelCompactMod, written by UnitTestforELM with the file list)
         from spel.transforms.compact.unit_test import hook_lines
 
@@ -895,7 +895,7 @@ class FunctionalUnitTest:
         )
 
         if cfg.options.device_data:
-            # the generated device data layer (spel device-data) instead of SpelAccDataMod's
+            # the generated device data layer (spel transform device-data) instead of SpelAccDataMod's
             # deep copy; the harness still builds the filters (spel_acc_update_filters)
             lines = insert_at_token(
                 lines, "!#USE_START", ["use ElmDeviceDataMod, only: elm_device_copyin, elm_device_update\n",
@@ -1206,7 +1206,7 @@ def generate_cmake(files: list[str], case_dir: Path):
 
     option(DBG "Enable Debug mode" OFF)
     option(NVTX "NVTX ranges for Nsight profiling (nvfortran only)" ON)
-    set(ACC "OFF" CACHE STRING "OpenACC target: OFF, MULTICORE (host threads), GPU, or OPENMP (sources translated by spel acc2omp)")
+    set(ACC "OFF" CACHE STRING "OpenACC target: OFF, MULTICORE (host threads), GPU, or OPENMP (sources translated by spel transform acc2omp)")
     set_property(CACHE ACC PROPERTY STRINGS OFF MULTICORE GPU OPENMP)
     option(GPU "Same as -DACC=GPU (kept for old check_config.sh scripts)" OFF)
     string(TOUPPER "${{ACC}}" ACC_MODE)

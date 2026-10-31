@@ -43,6 +43,8 @@ from spel.transforms.compact.inventory import (
     split_window,
 )
 from spel.transforms.compact.holders import Holder, find_holder, srcroot_of
+from spel.scripts.fortran_parser.scope_walk import flatten_designator
+from spel.scripts.fortran_parser.spel_ast import InfixExpression
 from spel.transforms.compact.index_forms import MAIN_FILTER, SUBSET_FILTERS
 
 
@@ -126,10 +128,29 @@ def member_through_map(e: Entry, subgrid: str) -> bool:
     inner = form.inner
     if "col_pp%pfti(" not in text or inner is None or inner.kind != "filter" or "filter%soilc" not in inner.filter:
         return False
-    active = re.compile(rf"(?<![%\w])veg_pp%active\({re.escape(e.sub0)}\)")
-    for g in e.guards:
-        gt = str(g).replace(" ", "")
-        if active.search(gt) and ".or." not in gt and ".not." not in gt and "not(" not in gt:
+    return any(_requires_active(g, e.sub0) for g in e.guards)
+
+
+def _requires_active(guard, sub0: str) -> bool:
+    """Whether the if condition `guard` holds only if `veg_pp%active(sub0)`: one of its `.and.` terms."""
+    node = getattr(guard, "node", None)
+    if node is None or getattr(guard, "negated", False):
+        return False
+    terms, todo = [], [node]
+    while todo:
+        n = todo.pop()
+        if isinstance(n, InfixExpression) and n.operator.lower() == ".and.":
+            todo += [n.left_expr, n.right_expr]
+        else:
+            terms.append(n)
+    for t in terms:
+        try:
+            comps = flatten_designator(t)
+        except Exception:
+            continue
+        names = [n.lower() for n, _ in comps]
+        args = comps[-1][1]
+        if names == ["veg_pp", "active"] and len(args) == 1 and str(args[0]).replace(" ", "").lower() == sub0.replace(" ", "").lower():
             return True
     return False
 

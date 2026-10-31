@@ -153,7 +153,7 @@ come from `nsets` (`spel run <case> 128`), not from a new capture.
   flag, so gfortran timings are meaningless (coverage counters also contend under threads).
   Profile with nvfortran (`-fast`).
 - gfortran `ACC=MULTICORE` runs on one thread (GCC has no multicore OpenACC target). To run a
-  case multithreaded with gfortran, translate it with `spel acc2omp --case <case>` and build with
+  case multithreaded with gfortran, translate it with `spel transform acc2omp --case <case>` and build with
   `SPEL_ACC=OPENMP` (`-fopenmp -U_OPENMP`; threads from `OMP_NUM_THREADS`). `-U_OPENMP` keeps
   ELM's own `#ifdef _OPENMP` clump-threading code off, as in the analysis (it needs
   `shr_sys_abort` and aborts outside threaded regions). `spel create` undoes the translation, so
@@ -209,6 +209,13 @@ feature that needs to know what a statement *is* or which names it uses must get
   strings and keyword arguments counted as variables, continuation lines missed). Regexes are fine
   only for pure text work that classifies nothing: placing an edit at a known line, renaming a
   token the parser has already identified, or reading non-Fortran text.
+- In-line edits (rewrite a subscript, add an argument, replace an expression) take their columns
+  from the parser: `parse_routine(..., keep_spans=True)` (or `Parser(keep_spans=True)`) gives every
+  token and expression node a `span` `(ln0, c0, ln1, c1)` into the file's physical lines (0-based,
+  `c1` exclusive; continuations, comment lines and `;` handled), `SubroutineDefinitionConstruct
+  .args_close` the `)` of the dummy list. Edit with `core.edits.replace_span`/`replace_cols`
+  (`TextEdit`), not a regex over the line (`compact/rewrite.py::rewrite_site` is the example). Spans
+  are off by default and not in the pickled record: re-parse the routine where you need them.
 - If the parser or walker lacks what you need (a construct it rejects, a node that drops
   information, an event the walker doesn't record), **extend the parser** rather than working around
   it: add the node/field/event, make any behaviour change opt-in when existing callers depend on the
@@ -311,11 +318,27 @@ feature that needs to know what a statement *is* or which names it uses must get
   `build(ctx, opts) -> Plan`), register with `@transform` and get listed in
   `core/registry.py::BUILTINS`. Build edits with `core.edits` (`insert`/`replace`/`stacked`), find
   code with `core.query` and the record, emit Fortran with `core.fortran`; never write files in a
-  transform (the driver does). The large passes are adapters (`adapters.py`); status and the
+  transform (the driver does). Status and the
   remaining phases are in `spel/transforms/DESIGN.md` §7.
+- Every source rewrite is a `spel transform NAME` (`spel transform list`). The former commands
+  (`spel acc2omp`, `compact rewrite`, `device-data`, `split`, `nutrient extract|species|merge|groups|
+  history|restart`) are removed and only print their replacement (`cli.py::REMOVED`); don't add new
+  rewrite commands outside the registry. `spel compact inventory`, `spel nutrient common|procedures`
+  and `spel accplan` are reports and stay commands.
+- A refused transform writes nothing and still exits 0 (exit 1 only on `--verify` problems, 2 on a
+  pipeline stop); scripts must check for the output they expect (`e3sm_casegen.sh --compact` checks
+  for `.spel-compact.json`).
+- Test a transform on a snippet with `core/testing.py` (`check_transform(T, before, after,
+  tmp_path)`, `check_pipeline` for several steps): it analyzes one file (undeclared names become
+  module globals) and checks the result parses and that a second run changes nothing.
+- A multi-step `--spec` runs as `core/pipeline.py::Pipeline` (each step plans on the previous one's
+  text, the touched routines re-parsed in memory, written once). Anything that reads sources in a
+  transform must go through `ctx.lines`, `Path.read_text`/`open` or `apply_preprocessor` so the
+  pipeline's overlay (`VirtualFS`, `edit_files.SOURCE_OVERRIDES`) serves it the edited text; a new
+  parse cache must key on that text, as `module_spec._key` does.
 - Refactoring a transform: compare golden outputs before and after, on a fixed srcroot, with
   `python -m spel.transforms.tools.golden OUT --srcroot SRC --only PASS ...` (old code from a
-  `git worktree` of HEAD) and `diff -r`; `--chain nutrient` replays the nutrient refactor. Plans must
+  `git worktree` of HEAD) and `diff -r`; `--chain nutrient` replays the nutrient refactor (through `spel transform`). Plans must
   not depend on set order: run a pass under two `PYTHONHASHSEED`s if outputs look flaky.
 - pytest needs `DJANGO_DEBUG=true` in the environment (the Django settings refuse to load without
   a secret otherwise).
@@ -323,7 +346,7 @@ feature that needs to know what a statement *is* or which names it uses must get
 ## Compact layout (`spel compact`)
 
 - Since 2026-10-22 the E3SM branch no longer carries the compact rewrite: the layout is applied per
-  case at build time, `e3sm_casegen.sh --compact` (= `spel compact rewrite --srcroot SRC --reanalyze
+  case at build time, `e3sm_casegen.sh --compact` (= `spel transform compact-rewrite --srcroot SRC --reanalyze
   -o CASE/SourceMods/src.elm`, case name gets `.compact`; `COMPACT_ARGS` env adds options such as
   `--roles`). The branch does carry `CompactLayoutMod.F90` (the history readers use it); the rewrite
   requires it to equal the SPEL template `spel/transforms/compact/templates/CompactLayoutMod.F90` and
@@ -334,7 +357,7 @@ feature that needs to know what a statement *is* or which names it uses must get
   Design and rules: `spel/transforms/compact/DESIGN.md`; deferred fields: `DEFERRED.md`.
 - The inventory is deliberately conservative: false positives (e.g. value-dependent guards like
   `ch4_prod`'s `lake`) are reviewed by hand, not analyzed away.
-- `rewrite` needs the analysis of exactly the sources it edits (`spel analyze` first) and refuses
+- `compact-rewrite` needs the analysis of exactly the sources it edits (`spel analyze` first) and refuses
   sources that already have `CompactBindMod.F90` or `.spel-compact.json`. Test it with
   `-o $CASE/SourceMods/src.elm` against a baseline case built from the same commit (bit-for-bit
   history files; `$SCRATCH/prsplit/validate_level.sh LABEL SRC REF` with `COMPACT_ARGS` does this).
@@ -359,7 +382,7 @@ feature that needs to know what a statement *is* or which names it uses must get
   patches) in a per-column parallel loop with `!$acc loop seq` inside, not with OpenACC
   `reduction` clauses or reordered partial sums. List every scalar assigned in a compute loop in
   `private`, and give local work arrays a `!$acc data create(...)` region.
-- `spel acc2omp --dry-run` doubles as a race check for OpenACC code: `added vs OpenACC` lists
+- `spel transform acc2omp --dry-run` doubles as a race check for OpenACC code: `added vs OpenACC` lists
   scalars the analysis privatizes but the OpenACC clauses don't.
 - `private` arrays need compile-time bounds: nvfortran `ACC=MULTICORE` corrupts the heap
   (`free(): invalid pointer`, even on one thread) with automatic ones such as `x(-nlevsno+1:0)`.

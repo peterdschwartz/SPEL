@@ -1,4 +1,4 @@
-# Device data layer for full-model OpenACC runs (`spel device-data`)
+# Device data layer for full-model OpenACC runs (`spel transform device-data`)
 
 Status: first version built 2026-10-25; brute-force synchronization.
 
@@ -8,7 +8,7 @@ The branch's OpenACC kernels were only ever executed inside SPEL unit tests, who
 moves the data. In the full model every type instance carries `!$acc declare create`
 (the object exists on the device) but nothing copies the contents of its components, and
 the `*_vars` instances passed as arguments are never created on the device at all. The
-first kernel of a full run therefore reads unset device memory. `spel device-data`
+first kernel of a full run therefore reads unset device memory. `spel transform device-data`
 generates the missing layer from the analysis.
 
 ## What is generated
@@ -209,10 +209,10 @@ as a patch against the base commit:
 ## Usage
 
 ```
-spel device-data --dry-run            # plan: instances, transitions, edits
-spel device-data --print              # the module texts
-spel device-data [--reanalyze]        # write the modules to data_types/, edit the two driver files in place
-spel device-data -o CASE/SourceMods/src.elm
+spel transform device-data --dry-run            # plan: instances, transitions, edits
+spel transform device-data --dry-run --diff     # also the module texts (as new files)
+spel transform device-data [--reanalyze]        # write the modules to data_types/, edit the two driver files in place
+spel transform device-data -o CASE/SourceMods/src.elm
 ```
 
 Debug and optimized builds use the same generated code (plain data directives, runtime

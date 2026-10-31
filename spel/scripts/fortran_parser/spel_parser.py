@@ -136,12 +136,18 @@ class Parser:
         lines: list[LineTuple] = None,
         keep_directives: bool = False,
         keep_string_case: bool = False,
+        keep_spans: bool = False,
     ):
+        """keep_spans: tokens and expressions get `span`, their (ln0, c0, ln1, c1) in the file
+        lines (columns [c0, c1) on ln1); a subprogram gets `args_close`, the span of the `)`
+        closing its dummy arguments."""
+        self.keep_spans = keep_spans
         if lex:
             self.lexer: lexer.Lexer = lex
         elif lines:
             line_it = LogicalLineIterator(
-                lines=lines, keep_directives=keep_directives, keep_string_case=keep_string_case
+                lines=lines, keep_directives=keep_directives, keep_string_case=keep_string_case,
+                keep_spans=keep_spans,
             )
             self.lexer = lexer.Lexer(line_it)
         else:
@@ -235,7 +241,7 @@ class Parser:
             self.cur_token = Token(Tok.ENDSELECT, "end select")
             self.peek_token = self.lex_next()
         elif self.curTokenIs(Tok.END):
-            self.cur_token = Token(Tok.IDENT, "end")
+            self.cur_token = Token(Tok.IDENT, "end", self.cur_token.span)
         elif (
             self.curTokenIs(Tok.TYPE_DEF)
             and self.peekTokenIs(Tok.LPAREN)
@@ -243,7 +249,7 @@ class Parser:
         ):
             self.cur_token = Token(Tok.TYPE, "type")
         elif not self.is_first_token() and self.curTokenIs(Tok.TYPE_DEF):
-            self.cur_token = Token(Tok.IDENT, "type")
+            self.cur_token = Token(Tok.IDENT, "type", self.cur_token.span)
 
         # Statement start is resolved here, before block loops test for
         # terminators like `else`/`contains`
@@ -277,7 +283,7 @@ class Parser:
                 or self.peekTokenIs(Tok.PERCENT)
             )
         if is_var:
-            self.cur_token = Token(Tok.IDENT, self.cur_token.literal.lower())
+            self.cur_token = Token(Tok.IDENT, self.cur_token.literal.lower(), self.cur_token.span)
 
     def text_after_peek_paren(self) -> str:
         """
@@ -306,7 +312,7 @@ class Parser:
         """
         if self.peek_token.token in KEYWORDS_THAT_CAN_BE_IDENTIFIERS:
             self.peek_token = Token(
-                token=Tok.IDENT, literal=self.peek_token.literal.lower()
+                token=Tok.IDENT, literal=self.peek_token.literal.lower(), span=self.peek_token.span
             )
         return
 
@@ -1465,6 +1471,9 @@ class Parser:
                 if not isinstance(arg, Identifier):
                     self.fatal(f"Invalid dummy argument '{arg}' in {name}")
                 args.append(arg.value)
+            args_close = self.cur_token.span  # the ')' closing the dummy arguments
+        else:
+            args_close = None
 
         result: Optional[str] = None
         if is_function:
@@ -1518,6 +1527,8 @@ class Parser:
         )
         stmt.end_ln = end_ln
         stmt.contains_ln = contains_ln
+        if self.keep_spans:
+            stmt.args_close = args_close
         return stmt
 
     @Trace.trace_decorator("parse_entity_list")
@@ -1931,16 +1942,19 @@ class Parser:
         prefix = self.prefix_parse_fns.get(cur_type, None)
         if not prefix and cur_type in KEYWORDS_THAT_CAN_BE_IDENTIFIERS:
             # no reserved words: a keyword in operand position is a name
-            self.cur_token = Token(Tok.IDENT, self.cur_token.literal.lower())
+            self.cur_token = Token(Tok.IDENT, self.cur_token.literal.lower(), self.cur_token.span)
             prefix = self.parse_identifier
         if not prefix:
             err = f"Unexpected Token {cur_type} at {self.lineno} {self.lexer.input}"
             self.fatal(err)
+        first = self.cur_token
         left_expr: Expression = prefix()
-        return self.parse_infix_chain(left_expr, prec)
+        self.set_span(left_expr, first)
+        return self.parse_infix_chain(left_expr, prec, first)
 
-    def parse_infix_chain(self, left_expr: Expression, prec: Precedence) -> Expression:
-        """Continue an expression whose left operand is already parsed (cur_token is its last token)."""
+    def parse_infix_chain(self, left_expr: Expression, prec: Precedence, first: Optional[Token] = None) -> Expression:
+        """Continue an expression whose left operand is already parsed (cur_token is its last token).
+        `first`: the operand's first token (keep_spans; default: the start of its span)."""
         while (
             not self.peekTokenIs(Tok.NEWLINE)
             and prec.value < self.peek_precedence().value
@@ -1950,8 +1964,20 @@ class Parser:
                 return left_expr
             infix = self.infix_parse_fns[peek_type]
             self.next_token()
+            start = first.span if first is not None else getattr(left_expr, "span", None)
             left_expr = infix(left_expr)
+            if self.keep_spans and start and self.cur_token.span:
+                left_expr.span = (start[0], start[1], *self.cur_token.span[2:])
         return left_expr
+
+    def set_span(self, node, first: Token, last: Optional[Token] = None) -> None:
+        """keep_spans: `node` spans from `first` to `last` (default: the current token), unless
+        it has a span already (a parenthesized expression keeps the span inside the parentheses)."""
+        if not self.keep_spans or getattr(node, "span", None) is not None:
+            return
+        last = last or self.cur_token
+        if first.span and last.span:
+            node.span = (first.span[0], first.span[1], *last.span[2:])
 
     @Trace.trace_decorator("parse_io_item")
     def parse_io_item(self) -> Expression:

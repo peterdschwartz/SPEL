@@ -130,14 +130,14 @@ PASSES = {
     "acc_to_omp": p_acc_to_omp,
     "device_data": p_device_data,
     "device_targeted": p_device_targeted,
-    "compact_rewrite": _cli(["compact", "rewrite", "-o", "{out}"]),
-    "nutrient_extract": _cli(["nutrient", "extract"]),
-    "nutrient_groups": _cli(["nutrient", "groups"]),
-    "nutrient_merge": _cli(["nutrient", "merge"]),
-    "nutrient_history": _cli(["nutrient", "history"]),
-    "nutrient_restart": _cli(["nutrient", "restart"]),
-    "nutrient_species": _cli(["nutrient", "species"]),
-    "split": _cli(["split"]),
+    "compact_rewrite": _cli(["transform", "compact-rewrite", "-o", "{out}"]),
+    "nutrient_extract": _cli(["transform", "nutrient-extract"]),
+    "nutrient_groups": _cli(["transform", "nutrient-groups"]),
+    "nutrient_merge": _cli(["transform", "nutrient-merge"]),
+    "nutrient_history": _cli(["transform", "nutrient-history"]),
+    "nutrient_restart": _cli(["transform", "nutrient-restart"]),
+    "nutrient_species": _cli(["transform", "nutrient-species"]),
+    "split": _cli(["transform", "split"]),
 }
 
 
@@ -145,15 +145,15 @@ PASSES = {
 # removal of the unused legacy C/N/P types (34887d2ab6)
 CHAINS = {
     "nutrient": [
-        ["nutrient", "extract"],
-        ["nutrient", "species"],
-        ["nutrient", "merge"],
-        ["nutrient", "groups"],
-        ["nutrient", "merge", "--procedure", "init"],
-        ["nutrient", "history"],
-        ["nutrient", "restart"],
-        ["nutrient", "merge", "--procedure", "summary"],
-        ["split"],
+        ["transform", "nutrient-extract"],
+        ["transform", "nutrient-species"],
+        ["transform", "nutrient-merge"],
+        ["transform", "nutrient-groups"],
+        ["transform", "nutrient-merge", "--procedure", "init"],
+        ["transform", "nutrient-history"],
+        ["transform", "nutrient-restart"],
+        ["transform", "nutrient-merge", "--procedure", "summary"],
+        ["transform", "split"],
     ],
 }
 
@@ -178,7 +178,8 @@ def run_chain(name: str, srcroot: Path, out_root: Path) -> None:
             cmd = [spel, *step, "--reanalyze", "--srcroot", str(work)]
             res = subprocess.run(cmd, cwd=Path(__file__).resolve().parents[3], capture_output=True, text=True)
             git("add", "-A", cwd=work)
-            diff = git("diff", "--cached", "--no-color", cwd=work)
+            # the transform driver's manifest is not part of a pass's output
+            diff = git("diff", "--cached", "--no-color", "--", ".", ":(exclude,glob)**/.spel-transforms.json", cwd=work)
             git("-c", "user.name=golden", "-c", "user.email=golden@local", "commit", "-q", "--allow-empty",
                 "-m", label, cwd=work)
             (d / f"{label}.diff").write_text(diff.replace(str(work), "$SRC"))
@@ -222,7 +223,7 @@ def main(argv=None):
         d.mkdir(exist_ok=True)
         for path, text in sorted(vfs.files.items()):
             rel = path.replace(src, "SRC").replace(scratch, "OUT").strip("/").replace("/", "__")
-            (d / rel).write_text(text)
+            (d / rel).write_text(text.replace(scratch, "$OUT"))  # the transform manifest lists the -o paths
         text = "\n".join(map(str, log)) + "\n--- stdout\n" + buf.getvalue()
         (out_root / f"{name}.log").write_text(text.replace(scratch, "$OUT").replace(src, "$SRC"))
         print(f"{name}: {len(vfs.files)} files", file=sys.stderr)

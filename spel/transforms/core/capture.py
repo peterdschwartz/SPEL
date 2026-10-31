@@ -1,6 +1,7 @@
 """
-Capturing the files a legacy pass writes, so that its output becomes a Plan (`adapters.py`) or
-a golden snapshot (`tools/golden.py`) instead of edits to the checkout.
+Virtual files: capturing the files a pass writes, so that its output becomes a golden snapshot
+(`tools/golden.py`) instead of edits to the checkout, and serving edited text that isn't written
+yet to everything that reads sources (a `Pipeline` step plans on its predecessors' output).
 """
 
 from __future__ import annotations
@@ -14,10 +15,15 @@ import pathlib
 
 class VirtualFS:
     """Captures writes through Path.write_text/write_bytes and open(..., 'w'/'a'); later reads
-    of a captured path see the captured text."""
+    of a captured path see the captured text. Reads cover Path.read_text, open(..., 'r') and the
+    C preprocessor of the analysis (`edit_files.apply_preprocessor`).
 
-    def __init__(self):
-        self.files: dict[str, str] = {}
+    `files` seeds the virtual text; `capture=False` makes the overlay read-only (writes go to
+    disk as usual)."""
+
+    def __init__(self, files: dict | None = None, capture: bool = True):
+        self.files: dict[str, str] = {self.key(p): t for p, t in (files or {}).items()}
+        self.capture = capture
 
     @staticmethod
     def key(p) -> str:
@@ -25,6 +31,8 @@ class VirtualFS:
 
     @contextlib.contextmanager
     def active(self):
+        from spel.scripts import edit_files
+
         P = pathlib.Path
         saved = (P.write_text, P.write_bytes, P.read_text, P.exists, P.is_file, builtins.open, P.mkdir)
         vfs = self
@@ -67,16 +75,20 @@ class VirtualFS:
             if isinstance(file, int):
                 return real_open(file, mode, *a, **k)
             path = vfs.key(file)
-            if any(c in mode for c in "wax+") and "b" not in mode and not path.startswith("/dev/"):
+            if vfs.capture and any(c in mode for c in "wax+") and "b" not in mode and not path.startswith("/dev/"):
                 initial = vfs.files.get(path, "") if "a" in mode else ""
                 return _Capture(path, initial)
             if "b" not in mode and path in vfs.files:
                 return io.StringIO(vfs.files[path])
             return real_open(file, mode, *a, **k)
 
-        P.write_text, P.write_bytes, P.read_text = write_text, write_bytes, read_text
-        P.exists, P.is_file, builtins.open, P.mkdir = exists, is_file, open_, mkdir
+        P.read_text, P.exists, P.is_file, builtins.open = read_text, exists, is_file, open_
+        if self.capture:
+            P.write_text, P.write_bytes, P.mkdir = write_text, write_bytes, mkdir
+        saved_overrides = edit_files.SOURCE_OVERRIDES
+        edit_files.SOURCE_OVERRIDES = self.files  # the same dict: files captured later count too
         try:
             yield self
         finally:
             (P.write_text, P.write_bytes, P.read_text, P.exists, P.is_file, builtins.open, P.mkdir) = saved
+            edit_files.SOURCE_OVERRIDES = saved_overrides

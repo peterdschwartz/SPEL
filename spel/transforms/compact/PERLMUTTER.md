@@ -15,8 +15,8 @@ Three variants, built from one E3SM checkout:
 | Variant | How | What changes |
 |---|---|---|
 | `base` | the checkout as is | nothing |
-| `loops` | `spel compact rewrite --loops-only -o CASE/SourceMods/src.elm` | the six flux types' `SetValues`: blocked `associate (idx => filter(fi:...))` loops become `do concurrent` (2 files: VegetationDataType.F90, ColumnDataType.F90) |
-| `compact` | `spel compact rewrite -o CASE/SourceMods/src.elm` | the same loops, plus compact storage for 75 `veg_cf`, 33 `veg_nf`, 33 `veg_pf` fields (15 files, plus `CompactLayoutMod.F90`) |
+| `loops` | `spel transform compact-rewrite --loops-only -o CASE/SourceMods/src.elm` | the six flux types' `SetValues`: blocked `associate (idx => filter(fi:...))` loops become `do concurrent` (2 files: VegetationDataType.F90, ColumnDataType.F90) |
+| `compact` | `spel transform compact-rewrite -o CASE/SourceMods/src.elm` | the same loops, plus compact storage for 75 `veg_cf`, 33 `veg_nf`, 33 `veg_pf` fields (15 files, plus `CompactLayoutMod.F90`) |
 
 Background (laptop, 21-gridcell case): EcosystemDynNoLeaching1 unit test with
 nvfortran -fast went from ~400 ms to ~6 ms per step with the loop rewrite
@@ -62,16 +62,17 @@ run the three variants with the nvidia compiler if pm-cpu supports it for ELM.
    #   col_cf        65      55     7       3      0
    #   col_nf       106      90     7       9      0
    #   col_pf        96      85     7       4      0
-   spel compact rewrite --dry-run
+   spel transform compact-rewrite --dry-run
    #   vegetation_carbon_flux: 75 fields, 626 access sites
    #   vegetation_nitrogen_flux: 33 fields, 281 access sites
    #   vegetation_phosphorus_flux: 33 fields, 278 access sites
    #   <type>_setvalues: N blocked loops -> do concurrent   (4+3+3+5+6+7 = 28)
-   spel compact rewrite --loops-only --dry-run      # the 28 loops only
+   spel transform compact-rewrite --loops-only --dry-run      # the 28 loops only
    ```
 
-   The rewrite stops with `RewriteError` if a site's text doesn't match the
-   analysis (sources changed since `spel analyze`): re-run `spel analyze`.
+   The rewrite is refused (nothing written, the reason in the report) if a
+   site's text doesn't match the analysis (sources changed since `spel
+   analyze`): re-run `spel analyze`.
    "uses outside the elm_drv trace" lines marked `(another type)` are expected
    (same-named components of col/grc types).
 
@@ -88,15 +89,17 @@ run the three variants with the nvidia compiler if pm-cpu supports it for ELM.
          --group E3SM_testings/compact_$v | tee $SCRATCH/compact/casegen_$v.log
    done
    CASE_base=$(grep '^CASEDIR=' $SCRATCH/compact/casegen_base.log | cut -d= -f2)     # likewise loops, compact
-   spel compact rewrite --loops-only -o $CASE_loops/SourceMods/src.elm
-   spel compact rewrite              -o $CASE_compact/SourceMods/src.elm
+   spel transform compact-rewrite --loops-only -o $CASE_loops/SourceMods/src.elm
+   spel transform compact-rewrite              -o $CASE_compact/SourceMods/src.elm
    (cd $CASE_loops && ./case.build) && (cd $CASE_compact && ./case.build)
    ```
 
-   - Regenerate SourceMods with `--replace` (it removes exactly the files of
-     the earlier rewrite, by `.spel-compact.json`); never delete with globs and
-     never edit the generated files by hand.
-   - Never run `spel compact rewrite` without `-o` on the shared checkout.
+   - To regenerate SourceMods, first remove exactly the files of the earlier
+     rewrite: those `.spel-compact.json` lists under `files` (by basename),
+     `CompactBindMod.F90`, `CompactLayoutMod.F90` if written, and the two
+     manifests `.spel-compact.json`/`.spel-transforms.json`. Never delete with
+     globs and never edit the generated files by hand.
+   - Never run `spel transform compact-rewrite` without `-o` on the shared checkout.
    - Changing `GMAKE_J` or other env_build settings after setup needs
      `./case.build --clean-all`.
 
@@ -166,7 +169,7 @@ run the three variants with the nvidia compiler if pm-cpu supports it for ELM.
 - Optional, only if asked: unit tests on crop data. Capture with
   `spel validate --srcroot $E3SM --list cases.txt` where cases.txt has
   `eco1[crop; max=20]: ecosystemdynnoleaching1`, then make a scratch worktree of
-  the checkout with `spel compact rewrite` applied in place (commit it there),
+  the checkout with `spel transform compact-rewrite` applied in place (commit it there),
   `spel analyze --srcroot $WT`, `spel create -s ecosystemdynnoleaching1 -c eco1_c
   --srcroot $WT`, link `unit-tests/input-data/eco1_c/` to eco1's `spel-*.nc`
   (symlinks) plus a copy of `spel_reference.json`, and `spel run eco1_c`.

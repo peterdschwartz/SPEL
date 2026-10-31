@@ -6,7 +6,7 @@ For the routines of a call tree (`roots`), every outermost loop the planner
 and no warning, becomes a compute loop:
 
 - `!$acc parallel loop gang vector [collapse(n)] default(present) private(...)` on the
-  loop (the planner's clauses, the same rules as `spel acc2omp`), `!$acc loop seq` on
+  loop (the planner's clauses, the same rules as `spel transform acc2omp`), `!$acc loop seq` on
   every loop inside it (column-parallel: all inner loops; elementwise: the loops inside
   the collapsed nest). Each element keeps its order of operations: bit-for-bit.
 - `!$acc routine seq` in every routine called (directly or not) from inside a new

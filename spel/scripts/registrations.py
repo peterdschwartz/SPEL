@@ -239,9 +239,11 @@ def parse_routine(
     keep_directives: bool = False,
     keep_string_case: bool = False,
     skip_io: bool = False,
+    keep_spans: bool = False,
 ):
     """
     The routine's SubroutineDefinitionConstruct, parsed from the original file.
+    keep_spans: expressions carry their (ln0, c0, ln1, c1) in the file (`Parser`).
     skip_io: blank out I/O statements (write/print/read, which may hold implied-do
              lists the parser doesn't support) so the rest of the routine parses.
     """
@@ -249,7 +251,8 @@ def parse_routine(
     lines = [LineTuple(line=src[i], ln=i) for i in range(startline, endline + 1)]
     if skip_io:
         lines = _blank_io_statements(lines)
-    parser = Parser(lines=lines, keep_directives=keep_directives, keep_string_case=keep_string_case)
+    parser = Parser(lines=lines, keep_directives=keep_directives, keep_string_case=keep_string_case,
+                    keep_spans=keep_spans)
     return parser.parse_program().statements[0]
 
 

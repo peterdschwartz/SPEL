@@ -27,7 +27,7 @@ accesses decide the shape (`spel accplan MODULE`):
 
 The private/firstprivate clauses come from the OpenACC-to-OpenMP planner
 (`plan_compute_loop`) applied to a synthetic `!$acc parallel loop`, so they follow
-the same rules as `spel acc2omp`. Statements a device cannot run (`write`,
+the same rules as `spel transform acc2omp`. Statements a device cannot run (`write`,
 `print`, `call endrun`) are listed per loop: replace them by a flag set in the
 loop and tested on the host after it.
 """
@@ -425,14 +425,15 @@ def _is_local_array(rec: SubroutineRecord, path: str) -> bool:
     return bool(decl and decl.dim and decl.intent is None and all(d.name != path for d in rec.dummy_args))
 
 
-_UNSAFE_CACHE: dict[str, list[tuple[int, str]]] = {}
+_UNSAFE_CACHE: dict[str, tuple[object, list[tuple[int, str]]]] = {}
 
 
 def _unsafe(sub, source: Optional[list[str]] = None) -> list[tuple[int, str]]:
+    # keyed on the routine object too: a pipeline step replaces the routines it re-analyzes
     key = getattr(sub, "id", None) or sub.name
-    if key not in _UNSAFE_CACHE:
-        _UNSAFE_CACHE[key] = unsafe_lines(sub, source)
-    return _UNSAFE_CACHE[key]
+    if key not in _UNSAFE_CACHE or _UNSAFE_CACHE[key][0] is not sub:
+        _UNSAFE_CACHE[key] = (sub, unsafe_lines(sub, source))
+    return _UNSAFE_CACHE[key][1]
 
 
 def propose(sub, mapper, source: Optional[list[str]] = None, min_lines: int = 2) -> list[LoopProposal]:

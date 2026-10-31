@@ -780,7 +780,7 @@ class HistoryMerger:
                 if missing:
                     lines[i] = code.rstrip() + ", " + ", ".join(missing)
                 return lines
-        raise ExtractError("no `use SpeciesMod, only :` line (run `spel nutrient species` first)")
+        raise ExtractError("no `use SpeciesMod, only :` line (run `spel transform nutrient-species` first)")
 
     def report(self) -> str:
         out = list(self.results)

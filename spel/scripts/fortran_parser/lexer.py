@@ -32,6 +32,7 @@ class Lexer:
         self.cur_ln: int = 0
         # position of current token in current line
         self.token_pos: int = -1
+        self.cols: list | None = None  # physical (line, column) per input char (keep_spans)
         self._fetch_next_line()
 
 
@@ -43,6 +44,7 @@ class Lexer:
         try:
             fline = next(self.line_iter)
             next_line = fline.line
+            self.cols = fline.cols
             self.input = next_line + "\n"
             self.position = 0
             self.read_position = 0
@@ -50,6 +52,7 @@ class Lexer:
             self.cur_ln = self.line_iter.get_start_ln()
             self.token_pos = -1
         except StopIteration:
+            self.cols = None
             self.input = ""
             self.ch = ""
             self.cur_ln = -1  # no more lines
@@ -145,7 +148,21 @@ class Lexer:
         Get next tokens
         """
         self.skip_white_space()
+        start, cols = self.position, self.cols
+        tok = self._next_token()
+        if cols is not None and tok.span is None and cols is self.cols:
+            tok.span = self.span_of(start, self.position)
+        return tok
 
+    def span_of(self, start: int, end: int):
+        """(ln0, c0, ln1, c1) of input characters [start, end), or None."""
+        cols = self.cols
+        if cols is None or end <= start or end > len(cols) or cols[start] is None or cols[end - 1] is None:
+            return None
+        (ln0, c0), (ln1, c1) = cols[start], cols[end - 1]
+        return (ln0, c0, ln1, c1 + 1)
+
+    def _next_token(self) -> tokens.Token:
         match self.ch:
             case "=":
                 next_ch = self.peek_char()

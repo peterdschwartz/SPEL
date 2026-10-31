@@ -277,7 +277,7 @@ class Merger:
     def merge(self, fam: Family, binding: str) -> MergeResult | None:
         td, sd = self.fut.type_dict, self.fut.subroutine_dict
         if any(CORE not in td[t].components for t in fam.types.values()):
-            raise ExtractError(f"run `spel nutrient extract` first (no {CORE} component)")
+            raise ExtractError(f"run `spel transform nutrient-extract` first (no {CORE} component)")
         rep = compare_procedure(fam, binding, sd, td)
         if rep is None:
             return None

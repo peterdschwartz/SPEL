@@ -67,3 +67,25 @@ def test_forms():
     assert f[("col_cf%gpp", 17)][1] == "main"
     assert f[("col_cf%er", 21)][1] == "range"  # begc..endc
     assert f[("veg_cf%npp", 23)][1] == "whole"
+
+
+def test_guard_requires_active_patch():
+    from spel.scripts.fortran_parser.spel_parser import Parser
+    from spel.scripts.registrations import iter_statements
+    from spel.scripts.types import LineTuple
+    from spel.transforms.compact.select import _requires_active
+
+    src = """\
+if (veg_pp%active(p) .and. (.not. use_fates)) then
+   x = 1
+else if (veg_pp % active( p ) .or. y) then
+   x = 2
+else
+   x = 3
+end if"""
+    block = Parser(lines=[LineTuple(line=l, ln=i) for i, l in enumerate(src.split("\n"))]).parse_program()
+    guards = {stmt.lineno: g for stmt, g in iter_statements(block)}
+    assert [_requires_active(g, "p") for g in guards[1]] == [True]
+    assert [_requires_active(g, "p") for g in guards[3]] == [False, False]  # else branch; `.or.`
+    assert not any(_requires_active(g, "p") for g in guards[5])
+    assert not _requires_active(guards[1][0], "c")

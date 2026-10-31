@@ -45,3 +45,29 @@ def test_diff_edits_rebuild_the_new_text():
     assert es.apply(old) == new
     with pytest.raises(EditMismatch):  # planned on other text
         es.apply(["module m", "  use a", "  type u", "  end type", "contains", "end module m"])
+
+
+def test_text_edits():
+    from spel.transforms.core.edits import TextEdit, replace_cols, replace_span, span_text
+
+    lines = ["x(c) = y(c) + 1", "z = 2", "w = 3"]
+    es = EditSet().add(
+        replace_cols(0, 2, 3, "kc", expect="c"),
+        replace_span((0, 9, 0, 10), "kc", lines),
+        replace_cols(0, 9, 9, "k0+"),  # insertion before a replacement at the same column
+        replace_cols(0, 15, 15, " + 2"),
+        replace_cols(0, 15, 15, "!"),  # insertions at one column: in the order added
+        insert(1, "new"),
+        replace(2, "W = 3"),
+    )
+    es.add(replace_cols(0, 2, 3, "kc", expect="c"))  # identical: merged
+    assert es.apply(lines) == ["x(kc) = y(k0+kc) + 1 + 2!", "new", "z = 2", "W = 3"]
+    assert span_text(lines, (0, 0, 1, 1)) == "x(c) = y(c) + 1\nz"
+    with pytest.raises(EditConflict):
+        es.add(replace_cols(0, 1, 3, "q"))
+    with pytest.raises(EditConflict):
+        es.add(replace_cols(2, 0, 1, "q"))
+    with pytest.raises(EditConflict):
+        EditSet().add(replace_cols(1, 0, 1, "q"), delete(1))
+    with pytest.raises(EditMismatch):
+        EditSet().add(TextEdit(0, 0, 1, "q", expect="y")).apply(lines)

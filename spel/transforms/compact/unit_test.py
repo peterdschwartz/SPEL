@@ -1,5 +1,5 @@
 """
-Unit-test and capture support for sources rewritten by `spel compact rewrite`
+Unit-test and capture support for sources rewritten by `spel transform compact-rewrite`
 (the manifest `.spel-compact.json` in components/elm/src/main lists the groups).
 
 A generated unit test reads and writes the full layout (nc_io allocates the
