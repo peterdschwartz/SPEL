@@ -29,8 +29,8 @@ targets) so it follows the sources it is applied to.
 
 from __future__ import annotations
 
-import re
 import subprocess
+from spel.transforms.core.fortran import if_then, wrap_statement
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -389,21 +389,7 @@ def access_guards(fut, type_dict) -> Guards:
     return g
 
 
-def _wrap_cond(head: str, cond: str, width: int = 120) -> list[str]:
-    """`<head>if (cond) then`, continued at .and./.or. when long."""
-    line = f"{head}if ({cond}) then"
-    if len(line) <= width:
-        return [line]
-    pieces = re.split(r"(?=\s\.(?:and|or)\.\s)", cond)
-    out, cur = [], f"{head}if ("
-    for p in pieces:
-        if len(cur) + len(p) > width - 2 and cur.strip() != "if (":
-            out.append(cur.rstrip() + " &")
-            cur = head + "     " + p.lstrip()
-        else:
-            cur += p
-    out.append(cur + ") then")
-    return out
+_wrap_cond = if_then
 
 
 def _gated(cond: Optional[str], stmts: list[str]) -> list[str]:
@@ -542,20 +528,7 @@ def assign_groups(p: "Plan", type_dict) -> dict[str, str]:
 # --- per-type routines and modules ------------------------------------------------------
 
 
-def _wrap(line: str, width: int = 120) -> list[str]:
-    """Split a long Fortran statement at `, ` with `&` continuations."""
-    if len(line) <= width:
-        return [line]
-    indent = " " * (len(line) - len(line.lstrip()) + 5)
-    out, cur = [], ""
-    for piece in re.split(r"(?<=, )", line):
-        if cur and len(cur) + len(piece) > width - 2:
-            out.append(cur.rstrip() + " &")
-            cur = indent + piece
-        else:
-            cur += piece
-    out.append(cur)
-    return out
+_wrap = wrap_statement
 
 
 def _guarded(test: Optional[str], path: str, body: list[str]) -> list[str]:
@@ -1261,7 +1234,7 @@ def call_kinds(fut) -> list[tuple[int, str, str]]:
     """
     from spel.scripts.driver_callsites import type_bound_callee
     from spel.scripts.record_access import AccessMapper
-    from spel.transforms.acc_apply import _Facts
+    from spel.transforms.acc_apply import DeviceFacts as _Facts
 
     drv = fut.subroutine_dict["elm_driver::elm_drv"]
     facts = _Facts(fut)

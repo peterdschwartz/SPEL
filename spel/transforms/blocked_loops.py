@@ -20,7 +20,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+
+from spel.transforms.core.edits import Edit, delete, replace
+from spel.transforms.core.registry import transform
+from spel.transforms.core.source import indent
+from spel.transforms.core.transform import Change, Transform
 
 TAG = "! spel unblock"
 
@@ -77,38 +81,59 @@ def name_pattern(name: str) -> re.Pattern:
     return re.compile(rf"(?<![%\w]){re.escape(name)}\b", re.IGNORECASE)
 
 
-def unblock(lines: list[str], loops: list[BlockedLoop]) -> int:
-    """Rewrite the loops in place. Removed lines become None, so line numbers stay valid. Returns the count."""
+def unblock_edits(lines: list[str], loops: list[BlockedLoop]) -> list[Edit]:
+    """The edits unblocking `loops`: the header loses its step, the associate goes, the uses of
+    the associate name become `filter(index)`."""
+    out: list[Edit] = []
     for b in loops:
-        indent = lines[b.do_ln][: len(lines[b.do_ln]) - len(lines[b.do_ln].lstrip())]
-        lines[b.do_ln] = f"{indent}do {b.index} = {b.start}, {b.end}  {TAG}"
-        for ln in b.assoc_lines:
-            lines[ln] = None
+        out.append(replace(b.do_ln, f"{indent(lines[b.do_ln])}do {b.index} = {b.start}, {b.end}  {TAG}"))
+        out += [delete(ln) for ln in b.assoc_lines]
         use = name_pattern(b.name)
         for ln in b.uses:
             code, bang, comment = lines[ln].partition("!")
-            lines[ln] = use.sub(f"{b.filter}({b.index})", code) + bang + comment
+            out.append(replace(ln, use.sub(f"{b.filter}({b.index})", code) + bang + comment))
+    return out
+
+
+def unblock(lines: list[str], loops: list[BlockedLoop]) -> int:
+    """Rewrite the loops in place. Removed lines become None, so line numbers stay valid. Returns the count."""
+    for e in unblock_edits(lines, loops):
+        lines[e.ln] = e.new[0] if e.new else None
     return len(loops)
+
+
+@dataclass
+class Options:
+    routines: list[str] = field(default_factory=list, metadata={"help": "routine ids (default: every analyzed routine)"})
+
+
+@transform
+class Unblock(Transform):
+    """
+    Matches: `do fi = a, b, block` loops whose body is only `associate (idx => filter(fi:...))`.
+    Changes: one element per iteration: `do fi = a, b`, the associate removed, `idx` -> `filter(fi)`.
+    Refuses: (raises on) a blocked loop whose header the parser placed elsewhere.
+    """
+
+    name = "unblock"
+    summary = "rewrite blocked filter loops (SetValues idiom) as one element per iteration"
+    Options = Options
+
+    def select(self, ctx, opts):
+        yield from ctx.routines(opts.routines or None)
+
+    def plan(self, ctx, opts, sub):
+        lines = ctx.lines(sub)
+        loops = find_blocked_loops(sub.record, lines)
+        if loops:
+            return Change(ctx.path(sub), unblock_edits(lines, loops), where=sub.id,
+                          why=f"{len(loops)} blocked loops")
 
 
 def apply(fut, routine_ids, dry_run: bool = False) -> list[str]:
     """Unblock every blocked loop of the given routines. Returns a log."""
-    from spel.transforms.acc_apply import _path
+    from spel.transforms.core.driver import InPlace, run
+    from spel.transforms.core.transform import Context
 
-    by_file: dict[Path, list] = {}
-    for sid in sorted(routine_ids):
-        sub = fut.subroutine_dict[sid]
-        if sub.record is not None:
-            by_file.setdefault(_path(sub), []).append(sub)
-    log = []
-    for path, subs in sorted(by_file.items()):
-        lines = path.read_text().split("\n")
-        n = 0
-        for sub in subs:
-            loops = find_blocked_loops(sub.record, lines)
-            n += unblock(lines, loops)
-            if loops:
-                log.append(f"{sub.id}: {len(loops)} blocked loops")
-        if n and not dry_run:
-            path.write_text("\n".join(l for l in lines if l is not None))
-    return log
+    res = run(Unblock(), Context(fut), Options(routines=sorted(routine_ids)), sink=InPlace(), dry_run=dry_run)
+    return [f"{c.where}: {c.why}" for c in res.plan.changes]

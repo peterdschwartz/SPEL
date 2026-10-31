@@ -128,7 +128,7 @@ def device_spans(fut, lines: list[str]) -> list[tuple[int, int]]:
     """elm_drv's lines that run on the device: its kernels and the calls the transitions put there
     (generate.call_kinds, the kinds _transition_edits gives them)."""
     from spel.transforms.acc_directives import find_directives
-    from spel.transforms.acc_sync import _spans
+    from spel.transforms.core.query import device_spans as _spans
 
     sub = fut.subroutine_dict[DRV]
     spans = _spans(find_directives(lines, sub.startline, sub.endline), sub.record)
@@ -165,7 +165,8 @@ def excluded_calls(fut, drv: Path) -> list[tuple[int, int, list[tuple[str, str]]
     from spel.scripts.fortran_parser import spel_ast as A
     from spel.scripts.fortran_parser.module_spec import callee_name, parse_modules, statements_with_next
     from spel.scripts.registrations import _designator_parts
-    from spel.transforms.acc_sync import _Types, _end_of
+    from spel.transforms.acc_sync import _Types
+    from spel.transforms.core.query import construct_end as _end_of
 
     mod = next(m for m in parse_modules(drv) if m.name.lower() == "elm_driver")
     body = next(p for p in mod.subprograms if p.name.lower() == "elm_drv")
@@ -270,7 +271,7 @@ def apply(fut, srcroot: Path, dry_run: bool = False) -> list[str]:
     # acc-sync's own lines (its comment, use statements for callees' globals) carry its TAG
     ins = [(ln, order, [x.replace(acc_sync.TAG, TAG) for x in new]) for ln, order, new in ins]
     from spel.transforms.acc_directives import find_directives
-    from spel.transforms.acc_locals import _above_directives
+    from spel.transforms.core.query import above_directives as _above_directives
 
     directives = find_directives(lines, 0, len(lines) - 1)
     for rs in t.plan.routines:

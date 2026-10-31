@@ -258,19 +258,32 @@ def _aliases(rec: SubroutineRecord, lo: int, hi: int, indices: set[str]) -> dict
             elif reads:
                 r = reads[0]
                 subs_names = _names(r.subscripts)
-                src = [n for n in subs_names if n in indices] + [n for n in subs_names if n in out]
+                src = sorted(n for n in subs_names if n in indices) + sorted(n for n in subs_names if n in out)
                 if not src:
                     continue
                 base_idx, inj = (src[0], True) if src[0] in indices else (out[src[0]].index, out[src[0]].injective)
                 injective = inj and ("filter" in r.path.lower() or r.path.lower() in ("ipft", "icol", "ilun", "igrc"))
                 if "%" in r.path and r.path.lower().split("%")[-1] in COARSER:
                     injective = False
-                out[lhs.path] = Alias(base_idx, injective, r.path)
+                # a lookup on several indices (`l = landunit_indices(ltype, t)`) depends on all of them
+                also = []
+                for n in src:
+                    for x in (n,) if n in indices else (out[n].index, *out[n].also):
+                        if x != base_idx and x not in also:
+                            also.append(x)
+                out[lhs.path] = Alias(base_idx, injective, r.path, also=tuple(also))
                 changed = True
             elif direct or via_alias:
-                src = direct[0] if direct else via_alias[0]
+                srcs = sorted(direct) + sorted(via_alias)
+                src = srcs[0]
                 base_idx, inj = (src, True) if src in indices else (out[src].index, out[src].injective)
-                out[lhs.path] = Alias(base_idx, inj, rhs_text)
+                also = []
+                for n in srcs:
+                    for x in (n,) if n in indices else (out[n].index, *out[n].also):
+                        if x != base_idx and x not in also:
+                            also.append(x)
+                # c = fc + j over two indices: not one element per value of the pair
+                out[lhs.path] = Alias(base_idx, inj and not also, rhs_text, also=tuple(also))
                 changed = True
     return out
 

@@ -1081,9 +1081,12 @@ end module {BIND_MODULE}
         (`elm_inst_biogeochem`), the bind after the final reweight (its
         `!$OMP END PARALLEL DO`).
         """
-        sub = self.subs.get("elm_initializemod::initialize2")
+        from spel.transforms.core.query import outside_routine
+
+        # elm_drv doesn't reach initialize2: parse it from its module when the analysis lacks it
+        sub = self.subs.get("elm_initializemod::initialize2") or outside_routine("elm_initializemod::initialize2")
         if sub is None:
-            raise RewriteError("elm_initializemod::initialize2 not in the analysis")
+            raise RewriteError("elm_initializemod::initialize2 not found")
         fe = self.file(sub.filepath)
         tree = parse_routine(sub.filepath, sub.startline, sub.endline)
         inst = [

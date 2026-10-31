@@ -633,6 +633,37 @@ an `acc2omp` case, `--link-inputs` points a new case at the reference case's inp
 (`results.csv`, `summary.txt`, the `.nsys-rep` reports and build/run logs). For weak scaling,
 run it again with `nsets` proportional to the core count.
 
+### `spel transform`
+
+One front end for SPEL's source-to-source transforms (`spel/transforms/`). Each transform is a
+registered class that states what it matches, what it changes and what it refuses, and builds a
+plan (edits, refusals, notes); the shared driver reports, diffs, writes and verifies it.
+
+```bash
+spel transform list                                   # the transforms, one line each
+spel transform explain collapse-bounds                # what it does, and its options
+spel transform section-loops --dry-run --report       # plan only: what would change where
+spel transform acc-apply --where SoilTemperature      # before/after at matching locations
+spel transform acc-sync --diff -o /tmp/out --verify   # write flat into DIR, re-parse the result
+spel transform --spec steps.toml                      # several steps in place, reanalyzing in between
+```
+
+Options of each transform are flags (`spel transform NAME --help`). A spec file names one
+`transform` with an `[options]` table, or a list of `[[step]]`s:
+
+```toml
+[[step]]
+transform = "section-loops"
+[[step]]
+transform = "acc-apply"
+options = { roots = ["elm_driver::elm_drv"] }
+```
+
+Each write appends to `.spel-transforms.json` in the output directory (or the srcroot). The
+compact, device, nutrient and split passes are registered as adapters around their existing
+commands, which keep working unchanged. The API and its status are in
+`spel/transforms/DESIGN.md`.
+
 ### `spel acc2omp`
 
 Translates the OpenACC directives of analyzed modules to OpenMP, so a unit test can run

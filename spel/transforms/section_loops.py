@@ -41,8 +41,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
+
+from spel.transforms.core.edits import Edit, EditSet, insert, replace
+from spel.transforms.core.registry import transform
+from spel.transforms.core.source import indent
+from spel.transforms.core.transform import Change, Plan, Transform
 
 TAG = "! spel section-loop"
 INDEX = "spel_i"
@@ -397,73 +401,95 @@ def rewrite(stmt: SectionStmt, indent: str, first_index: int = 1) -> tuple[list[
     return out, n
 
 
-def apply_to_lines(sub, lines: list[str], stmts: list[SectionStmt], tree, notes: Optional[list[str]] = None) -> int:
-    """Rewrite the statements of one routine in `lines` (entries become multi-line strings or None).
-    Declares the loop indices before the routine's first executable statement (`tree`: the
-    routine's parse tree). A statement whose references the text matcher cannot place is left
-    alone (a note). Returns the count."""
-    from spel.transforms.acc_locals import first_executable
+def section_edits(sub, lines: list[str], stmts: list[SectionStmt], tree,
+                  notes: Optional[list[str]] = None) -> tuple[list[Edit], int]:
+    """The edits rewriting the statements of one routine as loop nests, plus the declaration of
+    the loop indices after the last declaration (`tree`: the routine's parse tree). A statement
+    whose references the text matcher cannot place is left alone (a note). Returns (edits, count)."""
+    from spel.transforms.core.query import first_executable
+    from spel.transforms.core.source import statement_end
 
-    nmax, done = 0, 0
+    edits: list[Edit] = []
+    nmax = 0
     for st in sorted(stmts, key=lambda s: -s.ln):
-        indent = lines[st.ln][: len(lines[st.ln]) - len(lines[st.ln].lstrip())]
         try:
-            new, n = rewrite(st, indent)
+            new, n = rewrite(st, indent(lines[st.ln]))
         except ValueError as err:
             if notes is not None:
                 notes.append(f"{sub.id}: {err}; left alone")
             continue
         nmax = max(nmax, n)
-        done += 1
-        lines[st.ln] = "\n".join(new)
-        for ln in range(st.ln + 1, st.end_ln + 1):
-            lines[ln] = None
-    if not done:
-        return 0
-    from spel.transforms.compact.select import statement_end
-
+        edits.append(replace(st.ln, new, n=st.end_ln - st.ln + 1))
+    if not edits:
+        return [], 0
     # after the last declaration, not at the first executable statement: `!$acc enter data`
     # directives placed between them by acc-locals are executable
     last = getattr(sub.record, "last_decl_ln", -1)
     at = statement_end(lines, last) + 1 if last >= 0 else first_executable(tree, sub.record)
     ref = lines[last] if last >= 0 and lines[last] else lines[at]
-    indent = ref[: len(ref) - len(ref.lstrip())] if ref else "    "
-    decl = f"{indent}integer :: {', '.join(f'{INDEX}{k}' for k in range(1, nmax + 1))}  {TAG} indices"
-    lines[at] = decl + "\n" + (lines[at] or "")
+    decl = f"{indent(ref) if ref else '    '}integer :: {', '.join(f'{INDEX}{k}' for k in range(1, nmax + 1))}  {TAG} indices"
+    edits.append(insert(at, decl, order=-1))  # above a rewritten first statement
+    return edits, len(edits) - 1
+
+
+def apply_to_lines(sub, lines: list[str], stmts: list[SectionStmt], tree, notes: Optional[list[str]] = None) -> int:
+    """`section_edits` applied to `lines` in place. Returns the count."""
+    edits, done = section_edits(sub, lines, stmts, tree, notes)
+    lines[:] = EditSet().extend(edits).apply(lines)
     return done
 
 
-def apply(fut, routine_ids, dry_run: bool = False) -> list[str]:
-    """Rewrite the section assignments of the given routines (outside kernels). Returns a log."""
-    from spel.transforms.acc_apply import _Facts, _path
-    from spel.transforms.acc_directives import find_directives
-    from spel.transforms.acc_sync import _Types, _spans
+@dataclass
+class Options:
+    routines: list[str] = field(default_factory=list, metadata={"help": "routine ids (default: every analyzed routine)"})
 
-    by_file: dict[Path, list] = {}
-    for sid in sorted(set(routine_ids)):
-        sub = fut.subroutine_dict.get(sid)
-        if sub is not None and sub.record is not None:
-            by_file.setdefault(_path(sub), []).append(sub)
-    log: list[str] = []
-    facts = _Facts(fut)
-    types = _Types(fut)
-    for path, subs in sorted(by_file.items()):
-        lines = path.read_text().split("\n")
-        n = 0
-        for sub in subs:
-            device = _spans(find_directives(lines, sub.startline, sub.endline), sub.record)
+
+@transform
+class SectionLoops(Transform):
+    """
+    Matches: array-section assignments outside compute constructs (`x(:, 1:n) = ...`).
+    Changes: each becomes a loop nest over spel_i<k> (outermost over the last dimension), with
+             the right-hand-side sections paired with the left-hand side's; the indices are
+             declared after the routine's declarations.
+    Refuses: statements in a compute construct, strides, unpaired sections, reductions over a
+             section, array-valued calls, references the text matcher can't place.
+    """
+
+    name = "section-loops"
+    summary = "rewrite array-section assignments outside kernels as explicit loop nests"
+    Options = Options
+
+    def build(self, ctx, opts):
+        from spel.transforms.acc_directives import find_directives
+        from spel.transforms.acc_sync import _Types
+        from spel.transforms.core.query import device_spans
+
+        plan = Plan(self.name)
+        types = _Types(ctx.fut)
+        for sub in sorted(ctx.routines(opts.routines or None), key=lambda s: (str(ctx.path(s)), s.id)):
+            lines = ctx.lines(sub)
+            device = device_spans(find_directives(lines, sub.startline, sub.endline), sub.record)
 
             def rank(name: str, sub=sub) -> int:
                 b = types.base(sub, name.lower())
                 return b[1] if b is not None else -1
 
             stmts, notes = find_section_statements(sub, lines, device, rank)
-            log += notes
+            plan.notes += notes
             if stmts:
-                k = apply_to_lines(sub, lines, stmts, facts.tree(sub), log)
-                log.append(f"{sub.id}: {k} section assignments -> loops ("
-                           + ", ".join(str(s.ln + 1) for s in stmts) + ")")
-                n += k
-        if n and not dry_run:
-            path.write_text("\n".join(l for l in lines if l is not None))
-    return log
+                edits, k = section_edits(sub, lines, stmts, ctx.facts.tree(sub), plan.notes)
+                why = f"{k} section assignments -> loops (" + ", ".join(str(s.ln + 1) for s in stmts) + ")"
+                plan.notes.append(f"{sub.id}: {why}")
+                if edits:
+                    plan.add(Change(ctx.path(sub), edits, where=sub.id, why=why))
+        return plan
+
+
+def apply(fut, routine_ids, dry_run: bool = False) -> list[str]:
+    """Rewrite the section assignments of the given routines (outside kernels). Returns a log."""
+    from spel.transforms.core.driver import InPlace, run
+    from spel.transforms.core.transform import Context
+
+    res = run(SectionLoops(), Context(fut), Options(routines=sorted(set(routine_ids))), sink=InPlace(),
+              dry_run=dry_run)
+    return res.plan.notes

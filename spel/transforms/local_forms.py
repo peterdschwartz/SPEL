@@ -198,7 +198,7 @@ def _per_iteration(sub, rec, name, decl, accs, writes, reads, guards) -> Optiona
 def check(fut, routines: Iterable[str]) -> list[Finding]:
     """The findings of the given routine ids (guards from the record's own parse tree, whose
     line numbers are the record's; the preprocessed module when the record has none)."""
-    from spel.transforms.acc_apply import routine_tree
+    from spel.transforms.core.query import routine_tree
 
     out: list[Finding] = []
     for sid in sorted(routines):

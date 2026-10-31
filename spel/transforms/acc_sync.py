@@ -35,8 +35,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
-from spel.transforms.acc_apply import _Facts, _path, abort_calls, call_tree
+from spel.transforms.acc_apply import DeviceFacts as _Facts
+from spel.transforms.core.query import abort_calls, call_tree, source_path as _path
 from spel.transforms.acc_directives import find_directives
+from spel.transforms.core.query import construct_end as _end_of, device_spans as _spans
+from spel.transforms.core.fortran import directive_list
+from spel.transforms.core.registry import transform
+from spel.transforms.core.source import indent as _indent
+from spel.transforms.core.transform import Plan as TPlan, Transform
 
 TAG = "! spel acc-sync"
 
@@ -196,11 +202,6 @@ class _Types:
         key = (owner, parts[-1]) if len(parts) > 1 or kind == "global" else (owner, sub.id, parts[0])
         return key, dim, kind, ok
 
-
-def _spans(directives, rec) -> list[tuple[int, int]]:
-    from spel.transforms.acc_locals import _compute_ranges
-
-    return [(lo, hi) for _, lo, hi in _compute_ranges(directives, rec)]
 
 
 def _entries(maps) -> list[tuple[str, str, int, str]]:
@@ -383,18 +384,6 @@ def excluded_calls_in(sid: str, path: Path, node) -> list[str]:
     return out
 
 
-def _end_of(st, lines: list[str]) -> int:
-    """Last line of a statement: a construct's end, else the last continuation line."""
-    end = getattr(st, "construct_end_ln", -1)  # an if construct's `end if` (its end_ln ends the first branch)
-    if end is None or end < 0:
-        end = getattr(st, "end_ln", -1)
-    if end is not None and end >= 0:
-        return end
-    ln = st.lineno
-    while ln + 1 < len(lines) and lines[ln].split("!")[0].rstrip().endswith("&"):
-        ln += 1
-    return ln
-
 
 def _children(st) -> list:
     from spel.scripts.fortran_parser import spel_ast as A
@@ -456,7 +445,7 @@ def _header_lines(st) -> list[int]:
 def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries, lines: list[str],
               types: _Types, out: SyncPlan, boundary=None) -> None:
     from spel.scripts.fortran_parser import spel_ast as A
-    from spel.transforms.acc_locals import first_executable
+    from spel.transforms.core.query import first_executable
 
     from spel.scripts.fortran_parser.symbols import Origin
 
@@ -632,19 +621,9 @@ def _directive(indent: str, head: str, names: list[str], width: int = 110, cond:
         from spel.transforms.acc_plan import DEVICE_FLAG
 
         cond = DEVICE_FLAG
-    out, cur = [], f"{indent}!$acc {head}("
-    tail = ") if_present" + (f" if({cond})" if cond else "")
-    for i, n in enumerate(names):
-        piece = n + (", " if i + 1 < len(names) else tail)
-        if len(cur) + len(piece) > width and not cur.endswith("("):
-            out.append(cur.rstrip() + " &")
-            cur = f"{indent}!$acc&   "
-        cur += piece
-    return out + [cur]
+    return directive_list(indent, head, names, width, tail=") if_present" + (f" if({cond})" if cond else ""))
 
 
-def _indent(line: str) -> str:
-    return line[: len(line) - len(line.lstrip())]
 
 
 def after_enter_data(lines: list[str], directives: list, first_exec: int) -> int:
@@ -679,7 +658,7 @@ def after_enter_data(lines: list[str], directives: list, first_exec: int) -> int
 def edits(plan_: SyncPlan, texts: dict[Path, list[str]],
           cond: Optional[str] = None) -> dict[Path, list[tuple[int, int, list[str]]]]:
     """(line, order, lines to insert before it) per file; `cond` adds an if clause to every update."""
-    from spel.transforms.acc_locals import _above_directives
+    from spel.transforms.core.query import above_directives as _above_directives
 
     by_file: dict[Path, list[tuple[int, int, list[str]]]] = {}
     directives: dict[Path, list] = {}
@@ -773,25 +752,65 @@ def dedupe_sync_blocks(lines: list[str]) -> list[str]:
     return out
 
 
-def apply(fut, plan_: SyncPlan, dry_run: bool = False) -> list[str]:
-    texts: dict[Path, list[str]] = {}
-    for rs in plan_.routines:
-        if rs.path not in texts:
-            texts[rs.path] = rs.path.read_text().split("\n")
-    log = []
+def sync_texts(plan_: SyncPlan, texts: dict[Path, list[str]]) -> dict[Path, tuple[list[str], int]]:
+    """The new lines of every file of the plan, and the number of insertions made. Updates an
+    earlier run inserted are not inserted again, and runs of sync lines are deduplicated
+    (`dedupe_sync_blocks`): a rerun leaves the source as one run does. This is why the pass
+    works on the text as it goes instead of through an EditSet."""
+    out = {}
     for path, ins in edits(plan_, texts).items():
-        lines = texts[path]
+        lines = list(texts[path])
         done = 0
         for ln, _, new in sorted(ins, key=lambda x: (-x[0], -x[1])):
             if lines[max(ln - len(new), 0):ln] == new or lines[ln:ln + len(new)] == new:
                 continue  # inserted by an earlier run (the analysis reads directives as comments)
             lines[ln:ln] = new
             done += 1
-        lines[:] = dedupe_sync_blocks(lines)
-        log.append(f"{path.name}: {done} insertions")
-        if not dry_run:
-            path.write_text("\n".join(lines))
-    return log
+        out[path] = (dedupe_sync_blocks(lines), done)
+    return out
+
+
+def text_plan(ctx, plan_: SyncPlan) -> TPlan:
+    texts = {rs.path: ctx.lines(rs.path) for rs in plan_.routines}
+    out = TPlan(AccSync.name, notes=list(getattr(plan_, "notes", [])))
+    for path, (lines, done) in sync_texts(plan_, texts).items():
+        out.new_files[path] = "\n".join(lines)
+        out.notes.append(f"{path.name}: {done} insertions")
+    return out
+
+
+def apply(fut, plan_: SyncPlan, dry_run: bool = False) -> list[str]:
+    from spel.transforms.core.driver import InPlace, apply_plan
+    from spel.transforms.core.transform import Context
+
+    ctx = Context(fut)
+    p = text_plan(ctx, plan_)
+    apply_plan(p, ctx, InPlace(), dry_run=dry_run)
+    return [n for n in p.notes if n.endswith(" insertions")]
+
+
+@dataclass
+class Options:
+    roots: list[str] = field(default_factory=lambda: ["elm_driver::elm_drv"],
+                             metadata={"help": "the call trees to synchronize"})
+
+
+@transform
+class AccSync(Transform):
+    """
+    Matches: host code between compute constructs of the call trees of `roots` that reads data
+             the device wrote, or writes data the device reads next.
+    Changes: `!$acc update self(...)` before such host segments, `!$acc update device(...)` after
+             them (and before their returns), the `use` lines the updates need.
+    Output: whole files (the pass deduplicates its own earlier updates; see `sync_texts`).
+    """
+
+    name = "acc-sync"
+    summary = "insert host/device updates around the host code of ported call trees"
+    Options = Options
+
+    def build(self, ctx, opts):
+        return text_plan(ctx, plan(ctx.fut, opts.roots))
 
 
 @dataclass

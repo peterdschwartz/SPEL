@@ -305,6 +305,21 @@ feature that needs to know what a statement *is* or which names it uses must get
 - The loader must load every table in `schema.TABLES` (it checks the CSVs exist, not that it reads
   them: `module_deps` was once silently skipped). Add a loader step with any new table.
 
+## Source transforms (`spel transform`, `spel/transforms/core`)
+
+- New transforms subclass `core.transform.Transform` (`name`, `summary`, an `Options` dataclass,
+  `build(ctx, opts) -> Plan`), register with `@transform` and get listed in
+  `core/registry.py::BUILTINS`. Build edits with `core.edits` (`insert`/`replace`/`stacked`), find
+  code with `core.query` and the record, emit Fortran with `core.fortran`; never write files in a
+  transform (the driver does). The large passes are adapters (`adapters.py`); status and the
+  remaining phases are in `spel/transforms/DESIGN.md` §7.
+- Refactoring a transform: compare golden outputs before and after, on a fixed srcroot, with
+  `python -m spel.transforms.tools.golden OUT --srcroot SRC --only PASS ...` (old code from a
+  `git worktree` of HEAD) and `diff -r`; `--chain nutrient` replays the nutrient refactor. Plans must
+  not depend on set order: run a pass under two `PYTHONHASHSEED`s if outputs look flaky.
+- pytest needs `DJANGO_DEBUG=true` in the environment (the Django settings refuse to load without
+  a secret otherwise).
+
 ## Compact layout (`spel compact`)
 
 - Since 2026-10-22 the E3SM branch no longer carries the compact rewrite: the layout is applied per

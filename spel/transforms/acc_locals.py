@@ -21,9 +21,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 
 from spel.transforms.acc_directives import AccDirective, find_directives
+from spel.transforms.core.edits import Edit, stacked
+from spel.transforms.core.fortran import directive_list
+from spel.transforms.core.registry import transform
+from spel.transforms.core.source import indent
+from spel.transforms.core.transform import Change, Plan, Transform
+from spel.transforms.core.query import above_directives as _above_directives  # noqa: F401
+from spel.transforms.core.query import compute_ranges as _compute_ranges, first_executable
 
 # clauses that give a variable device storage for the construct
 DATA_CLAUSES = {
@@ -33,8 +40,6 @@ DATA_CLAUSES = {
 }
 # clauses that make a variable private to the construct (no device storage needed)
 PRIVATE_CLAUSES = {"private", "firstprivate", "reduction"}
-END_OF = {"parallel": "end parallel", "kernels": "end kernels", "serial": "end serial", "data": "end data"}
-
 
 @dataclass
 class Finding:
@@ -86,38 +91,6 @@ def _clause_vars(d: AccDirective, names: set[str]) -> set[str]:
                 out.update(v.lower() for v in c.variables())
     return out
 
-
-def _loop_at(loops, ln: int):
-    for lp in loops:
-        if lp.start_ln == ln:
-            return lp
-        hit = _loop_at(lp.children, ln)
-        if hit is not None:
-            return hit
-    return None
-
-
-def _compute_ranges(directives: list[AccDirective], rec) -> Iterator[tuple[AccDirective, int, int]]:
-    """(construct, first line, last line) of every compute construct."""
-    stack: list[AccDirective] = []
-    for i, d in enumerate(directives):
-        if d.is_compute_loop:
-            # the loop follows the directive: the first analyzed loop starting after it
-            nxt = min((lp.start_ln for lp in _all_loops(rec.loop_nest) if lp.start_ln > d.end_ln), default=None)
-            lp = _loop_at(rec.loop_nest, nxt) if nxt is not None else None
-            if lp is not None:
-                yield d, d.start_ln, lp.end_ln
-        elif d.is_compute_region:
-            stack.append(d)
-        elif stack and d.construct == END_OF.get(stack[-1].construct):
-            start = stack.pop()
-            yield start, start.start_ln, d.end_ln
-
-
-def _all_loops(loops):
-    for lp in loops:
-        yield lp
-        yield from _all_loops(lp.children)
 
 
 def _data_regions(directives: list[AccDirective]) -> list[tuple[int, int, set[str]]]:
@@ -203,7 +176,7 @@ def check_routine(sub, device_routines: set[str], lines: list[str],
     report.locals_needed = sorted(needed, key=order.index)
     # host accesses; reads in an error check (a branch that can abort) only need an
     # `update self` there, not a copy around every kernel
-    from spel.transforms.acc_apply import cold_branches, routine_tree
+    from spel.transforms.core.query import cold_branches, routine_tree
 
     try:
         cold = cold_branches(routine_tree(sub).body)
@@ -286,59 +259,8 @@ class Insertion:
     order: int = 0  # among insertions at one line: lower first
 
 
-def _indent(line: str) -> str:
-    return line[: len(line) - len(line.lstrip())]
-
-
-def _wrap_directive(indent: str, head: str, names: list[str], width: int = 100) -> list[str]:
-    """`!$acc head(a, b, ...)` with `!$acc&` continuations (text the fix writes)."""
-    out, cur = [], f"{indent}!$acc {head}("
-    for i, n in enumerate(names):
-        piece = n + (", " if i + 1 < len(names) else ")")
-        if len(cur) + len(piece) > width and not cur.endswith("("):
-            out.append(cur.rstrip() + " &")
-            cur = f"{indent}!$acc&   "
-        cur += piece
-    return out + [cur]
-
-
-def first_executable(tree, rec) -> int:
-    """
-    Line of the routine's first executable statement (its own body, not nested ones).
-    Statement-function definitions (`f(x) = ...` with `f` declared scalar) belong to the
-    specification part although the parser reads them as assignments.
-    """
-    from spel.scripts.fortran_parser import spel_ast as A
-
-    spec_kinds = (A.UseStatement, A.ImplicitNoneStatement, A.VariableDecl, A.TypeDef, A.AccessStatement,
-                  A.ProcedureStatement)
-
-    def statement_function(st) -> bool:
-        e = getattr(st, "expression", None)
-        if not (isinstance(st, A.ExpressionStatement) and isinstance(e, A.InfixExpression) and e.operator.strip() == "="):
-            return False
-        lhs = e.left_expr
-        if not isinstance(lhs, A.FuncExpression) or not isinstance(lhs.function, A.Identifier):
-            return False
-        decl = rec.declaration(lhs.function.value.lower()) if rec is not None else None
-        return decl is not None and decl.dim == 0
-
-    for st in tree.body.statements:
-        if not isinstance(st, spec_kinds) and not statement_function(st):
-            return st.lineno
-    return tree.end_ln
-
-
-def _above_directives(ln: int, directives: list[AccDirective]) -> int:
-    """
-    The first line of the directives that end right above line `ln` (a `!$acc parallel
-    loop` and its continuations belong to the statement after them): inserting there
-    keeps them attached to it.
-    """
-    ends = {d.end_ln: d.start_ln for d in directives}
-    while ln - 1 in ends:
-        ln = ends[ln - 1]
-    return ln
+_indent = indent
+_wrap_directive = directive_list  # `!$acc head(a, b, ...)` with `!$acc&` continuations
 
 
 def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
@@ -415,27 +337,61 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
     return out
 
 
-def apply_fix(fut, reports: list[RoutineReport], dry_run: bool = False) -> list[str]:
-    """Insert the data directives into the sources (bottom-up per file). Returns a report."""
-    from spel.scripts.config import E3SM_SRCROOT
+def fix_edits(ins: list[Insertion]) -> list[Edit]:
+    """The insertions as edits. Of insertions at one line with the same order, a later one ends
+    up above an earlier one (as the fix has always placed them)."""
+    return stacked((x.ln, x.lines, x.order) for x in ins)
 
-    by_file: dict[Path, list[tuple[object, RoutineReport]]] = {}
+
+@dataclass
+class Options:
+    routines: list[str] = field(default_factory=list,
+                                metadata={"help": "routine names or ids (default: every routine with device code)"})
+
+
+@transform
+class AccLocals(Transform):
+    """
+    Matches: routines whose compute constructs or device calls use local arrays without device
+             storage (found by `check`).
+    Changes: device-only locals get `enter data create/copyin` after the declarations and
+             `exit data delete` before every return; locals the host also uses get a `data copy`
+             region around each device use; host reads of device-only locals get `update self`.
+    """
+
+    name = "acc-locals"
+    summary = "give routine-local arrays used by device code device storage"
+    Options = Options
+
+    def build(self, ctx, opts):
+        return fix_plan(ctx, check(ctx.fut, set(opts.routines) or None))
+
+
+def fix_plan(ctx, reports: list[RoutineReport]) -> Plan:
+    """The insertions fixing `reports` (from `check`), per file."""
+    plan = Plan(AccLocals.name)
+    by_file: dict[Path, list] = {}
     for r in reports:
-        sub = fut.subroutine_dict[r.routine]
-        p = Path(r.filepath)
-        p = p if p.is_absolute() else Path(E3SM_SRCROOT) / p
-        by_file.setdefault(p, []).append((sub, r))
-    log: list[str] = []
+        sub = ctx.fut.subroutine_dict[r.routine]
+        by_file.setdefault(ctx.path(sub), []).append((sub, r))
     for path, items in by_file.items():
-        lines = path.read_text().split("\n")
+        lines = ctx.lines(path)
         ins: list[Insertion] = []
         for sub, r in items:
             ins += plan_fix(sub, r, lines)
-            log.append(f"{path.name}: {r.routine}: create "
-                       f"{[n for n in r.locals_needed if n not in r.host_accessed and n not in r.host_initialized]}"
-                       f", copyin {r.host_initialized}, copy around device use {r.host_accessed}")
-        for x in sorted(ins, key=lambda x: (-x.ln, -x.order)):
-            lines[x.ln:x.ln] = x.lines
-        if not dry_run:
-            path.write_text("\n".join(lines))
-    return log
+            plan.notes.append(f"{path.name}: {r.routine}: create "
+                              f"{[n for n in r.locals_needed if n not in r.host_accessed and n not in r.host_initialized]}"
+                              f", copyin {r.host_initialized}, copy around device use {r.host_accessed}")
+        plan.add(Change(path, fix_edits(ins), where=path.name))
+    return plan
+
+
+def apply_fix(fut, reports: list[RoutineReport], dry_run: bool = False) -> list[str]:
+    """Insert the data directives of `reports` into the sources. Returns a report."""
+    from spel.transforms.core.driver import InPlace, apply_plan
+    from spel.transforms.core.transform import Context
+
+    ctx = Context(fut)
+    plan = fix_plan(ctx, reports)
+    apply_plan(plan, ctx, InPlace(), dry_run=dry_run)
+    return plan.notes

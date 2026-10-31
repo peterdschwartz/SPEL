@@ -208,3 +208,29 @@ def test_bounds_dummy_read_in_the_loop_is_copied_in():
     (p,) = propose(sub, AccessMapper({sub.id: sub}), source=BOUNDS.splitlines())
     assert p.kind == "elementwise" and p.copyin == ["bounds"]
     assert any("copyin(bounds)" in l for l in p.directive_lines())
+
+
+SRC_TWO_INDEX_LOOKUP = """
+subroutine weights(begt, endt, nl, idx, w, wt)
+  implicit none
+  integer, intent(in) :: begt, endt, nl, idx(:,:)
+  real(r8), intent(in) :: w(:)
+  real(r8), intent(inout) :: wt(:)
+  integer :: t, k, l
+  do t = begt, endt
+     do k = 1, nl
+        l = idx(k, t)
+        wt(l) = w(k)
+     end do
+  end do
+end subroutine weights
+"""
+
+
+def test_lookup_on_two_indices_depends_on_both():
+    # l = idx(k, t) (top_pp%landunit_indices): the alias used to take one of k, t at random
+    # (set order), so the outer loop was ported or not depending on PYTHONHASHSEED
+    sub = StubSub(SRC_TWO_INDEX_LOOKUP)
+    sub.filepath = None
+    (p,) = propose(sub, AccessMapper({sub.id: sub}), source=SRC_TWO_INDEX_LOOKUP.splitlines())
+    assert "wt" in p.scatter.get("t", []), (p.kind, p.scatter)

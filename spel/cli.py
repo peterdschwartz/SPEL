@@ -236,6 +236,20 @@ def nutrient(args):
         print(f"\nwrote {args.output}")
 
 
+def transform(args):
+    from spel.transforms.core.registry import main as transform_main
+
+    rest, skip = [], False
+    for a in args.rest:  # --srcroot was applied already (apply_srcroot)
+        if skip:
+            skip = False
+        elif a == SRCROOT_OPTION:
+            skip = True
+        elif not a.startswith(SRCROOT_OPTION + "="):
+            rest.append(a)
+    sys.exit(transform_main(rest))
+
+
 def split(args):
     from spel.scripts.analysis_cache import load_analysis
     from spel.scripts.config import E3SM_SRCROOT
@@ -1050,6 +1064,15 @@ def main():
     )
     split_parser.set_defaults(func=split)
 
+    transform_parser = subparsers.add_parser(
+        "transform",
+        help="source transforms: `spel transform list`, `explain NAME`, `NAME [options] [--dry-run] "
+        "[--diff] [--where TEXT] [-o DIR]`, `--spec FILE.toml`",
+        add_help=False,
+    )
+    transform_parser.add_argument("rest", nargs=argparse.REMAINDER)
+    transform_parser.set_defaults(func=transform)
+
     analyze_parser = subparsers.add_parser(
         "analyze",
         help="(Re)build the cached elm_drv analysis that `spel create` extracts from",
@@ -1333,6 +1356,13 @@ def main():
         p.add_argument(
             SRCROOT_OPTION, metavar="DIR", default=argparse.SUPPRESS, help=srcroot_help
         )
+
+    argv = sys.argv[1:]
+    words = [a for i, a in enumerate(argv) if not a.startswith("-")
+             and not (i > 0 and argv[i - 1] == SRCROOT_OPTION)]
+    if words[:1] == ["transform"] and not any(a in ("-h", "--help") for a in argv[:argv.index("transform")]):
+        # `spel transform` parses its own arguments (they may start with `--`, which REMAINDER rejects)
+        return transform(argparse.Namespace(rest=argv[argv.index("transform") + 1:]))
 
     args = parser.parse_args()
     try:

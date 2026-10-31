@@ -29,12 +29,16 @@ not know, or whose step uses an inquiry, are left alone and reported.
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Optional
 
 from spel.scripts.fortran_parser import spel_ast as A
-from spel.transforms.acc_directives import (AccDirective, DirectiveError, find_directives,
-                                            next_code_line, strip_comment)
+from spel.transforms.acc_directives import DirectiveError, find_directives, next_code_line, strip_comment
+from spel.transforms.core.edits import Edit, EditSet, insert, replace
+from spel.transforms.core.fortran import declaration
+from spel.transforms.core.registry import transform
+from spel.transforms.core.source import indent
+from spel.transforms.core.transform import Change, Refusal, Transform
 
 TAG = "! spel collapse-bounds"
 INQUIRY = {"lbound", "ubound", "size"}
@@ -72,10 +76,11 @@ def _header(line: str, index: str, lo: str, hi: str, step: Optional[str]) -> str
     return text + (f"  {cm}" if cm else "")
 
 
-def rewrite_routine(sub, lines: list[str], notes: Optional[list[str]] = None) -> int:
-    """Hoist the inquiry bounds of the collapsed nests of one routine; entries of `lines` become
-    multi-line strings. Returns the number of directives changed."""
-    from spel.transforms.compact.select import statement_end
+def plan_routine(sub, lines: list[str], notes: Optional[list[str]] = None) -> list[Edit]:
+    """The edits hoisting the inquiry bounds of the collapsed nests of one routine (none: nothing
+    to do). Nests the pass can't rewrite are reported in `notes` and left whole."""
+    from spel.transforms.core.query import first_executable, routine_tree
+    from spel.transforms.core.source import statement_end
 
     rec = sub.record
     loops = {}
@@ -87,10 +92,9 @@ def rewrite_routine(sub, lines: list[str], notes: Optional[list[str]] = None) ->
     except DirectiveError as err:
         if notes is not None:
             notes.append(f"{sub.id}: {err}; routine left alone")
-        return 0
-    edits: dict[int, str] = {}       # header line -> new text
-    before: dict[int, list[str]] = {}  # directive start line -> assignments
-    nmax, done = 0, 0
+        return []
+    edits: list[Edit] = []
+    nmax = 0
     for d in directives:
         if d.construct not in CONSTRUCTS:
             continue
@@ -117,68 +121,93 @@ def rewrite_routine(sub, lines: list[str], notes: Optional[list[str]] = None) ->
                 notes.append(f"{sub.id}: line {d.start_ln + 1}: inquiry in a loop step; left alone")
             continue
         assigns: list[str] = []
+        headers: list[Edit] = []
         for k, lp in enumerate(nest, 1):
             node = lp.node
             lo, hi = str(node.start), str(node.end)
-            changed = False
             if has_inquiry(node.start):
                 assigns.append(f"{d.indent}spel_lb{k} = {lo}  {TAG}")
-                lo, changed = f"spel_lb{k}", True
+                lo = f"spel_lb{k}"
             if has_inquiry(node.end):
                 assigns.append(f"{d.indent}spel_ub{k} = {hi}  {TAG}")
-                hi, changed = f"spel_ub{k}", True
-            if changed:
+                hi = f"spel_ub{k}"
+            if lo != str(node.start) or hi != str(node.end):
                 if not re.match(r"\s*do\s+\w+\s*=", lines[lp.start_ln], re.I):
                     if notes is not None:
                         notes.append(f"{sub.id}: line {lp.start_ln + 1}: header not a plain `do index =`; left alone")
                     assigns = []
                     break
-                edits[lp.start_ln] = _header(lines[lp.start_ln], node.index, lo, hi,
-                                             str(node.step) if node.step is not None else None)
+                headers.append(replace(lp.start_ln, _header(lines[lp.start_ln], node.index, lo, hi,
+                                                            str(node.step) if node.step is not None else None)))
                 nmax = max(nmax, k)
-        if assigns:
-            before[d.start_ln] = assigns
-            done += 1
-    if not done:
-        return 0
-    for ln, text in edits.items():
-        lines[ln] = text
-    for ln, ass in before.items():
-        lines[ln] = "\n".join(ass + [lines[ln]])
+        if assigns:  # the whole nest, or nothing of it
+            edits += headers
+            edits.append(insert(d.start_ln, assigns, why=f"collapse({n}) nest at line {d.start_ln + 1}"))
+    if not edits:
+        return []
     names = [f"spel_lb{k}" for k in range(1, nmax + 1)] + [f"spel_ub{k}" for k in range(1, nmax + 1)]
     last = getattr(rec, "last_decl_ln", -1)
     if last >= 0:
         at = statement_end(lines, last) + 1
         ref = lines[last]
     else:
-        from spel.transforms.acc_locals import first_executable
-        from spel.transforms.acc_apply import routine_tree
         at = first_executable(routine_tree(sub), rec)
         ref = lines[at]
-    indent = ref[: len(ref) - len(ref.lstrip())] if ref else "    "
-    lines[at] = f"{indent}integer :: {', '.join(names)}  {TAG}: host copies of collapsed-loop inquiry bounds\n" + (lines[at] or "")
-    return done
+    # above the assignments when the first nest starts right after the declarations
+    decl = declaration(indent(ref) if ref else "    ", "integer", names,
+                       comment=f"{TAG}: host copies of collapsed-loop inquiry bounds", width=10**6)
+    edits.append(insert(at, decl, order=-1))
+    return edits
+
+
+def rewrite_routine(sub, lines: list[str], notes: Optional[list[str]] = None) -> int:
+    """`plan_routine` applied to `lines` in place. Returns the number of directives changed."""
+    edits = plan_routine(sub, lines, notes)
+    lines[:] = EditSet().extend(edits).apply(lines)
+    return sum(1 for e in edits if not e.n and e.order == 0)
+
+
+@dataclass
+class Options:
+    routines: list[str] = field(default_factory=list, metadata={"help": "routine ids (default: every analyzed routine)"})
+
+
+@transform
+class CollapseBounds(Transform):
+    """
+    Matches: `parallel loop`/`kernels loop` directives with collapse(n>=2) whose nest takes a
+             bound from lbound/ubound/size.
+    Changes: assigns each such bound to spel_lb<k>/spel_ub<k> before the directive, uses the
+             scalar in the `do` header, declares the scalars once per routine.
+    Refuses: directives with no analyzed loop after them, imperfect nests, inquiries in a step,
+             headers that aren't `do i = ...`.
+    """
+
+    name = "collapse-bounds"
+    summary = "hoist inquiry-function bounds of collapsed loop nests into host scalars (nvfortran bug)"
+    Options = Options
+
+    def select(self, ctx, opts):
+        yield from ctx.routines(opts.routines or None)
+
+    def plan(self, ctx, opts, sub):
+        notes: list[str] = []
+        edits = plan_routine(sub, ctx.lines(ctx.path(sub)), notes)
+        out = [Refusal(sub.id, n.split(": ", 1)[1]) if n.startswith(sub.id) else n for n in notes]
+        if edits:
+            k = sum(1 for e in edits if not e.n and e.order == 0)
+            out.append(Change(ctx.path(sub), edits, where=sub.id,
+                              why=f"{k} collapsed nests with inquiry bounds hoisted"))
+        return out
 
 
 def apply(fut, routine_ids, dry_run: bool = False) -> list[str]:
     """Rewrite the collapsed nests with inquiry bounds of the given routines. Returns a log."""
-    from spel.transforms.acc_apply import _path
+    from spel.transforms.core.driver import InPlace, run
+    from spel.transforms.core.transform import Context
 
-    by_file: dict[Path, list] = {}
-    for sid in sorted(set(routine_ids)):
-        sub = fut.subroutine_dict.get(sid)
-        if sub is not None and sub.record is not None:
-            by_file.setdefault(_path(sub), []).append(sub)
-    log: list[str] = []
-    for path, subs in sorted(by_file.items()):
-        lines = path.read_text().split("\n")
-        n = 0
-        # bottom-up: a routine's edits must not shift the lines of the routines above it
-        for sub in sorted(subs, key=lambda s: -s.startline):
-            k = rewrite_routine(sub, lines, log)
-            if k:
-                log.append(f"{sub.id}: {k} collapsed nests with inquiry bounds hoisted")
-                n += k
-        if n and not dry_run:
-            path.write_text("\n".join(l for l in lines if l is not None))
+    ctx = Context(fut)
+    res = run(CollapseBounds(), ctx, Options(routines=sorted(set(routine_ids))), sink=InPlace(), dry_run=dry_run)
+    log = [f"{r.where}: {r.reason}" for r in res.plan.refusals] + res.plan.notes
+    log += [f"{c.where}: {c.why}" for c in res.plan.changes]
     return log

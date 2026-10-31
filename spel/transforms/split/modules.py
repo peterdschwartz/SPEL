@@ -59,6 +59,7 @@ from spel.scripts.fortran_parser.tokens import TokenTypes as Tok
 from spel.scripts.module_resolver import ModuleResolver, ModuleScopes, module_head
 from spel.scripts.types import LineTuple, LogicalLineIterator
 from spel.transforms.nutrient.tree import names_in, split_code, statement_at, statement_names
+from spel.transforms.core.fortran import wrap_items
 
 INTRINSIC_TYPES = {"integer", "real", "logical", "character", "complex", "double", "doubleprecision"}
 FORTRAN_SUFFIXES = (".F90", ".f90", ".F", ".f")
@@ -178,16 +179,7 @@ def spelled(lines: list[str], name: str) -> str:
 
 def wrap(head: str, items: list[str], width: int = 100) -> list[str]:
     """`head` followed by the comma-separated items, continued with `&` past `width`."""
-    indent = " " * (len(head) - len(head.lstrip()) + 4)
-    out, line = [], head
-    for i, item in enumerate(items):
-        piece = item + ("," if i < len(items) - 1 else "")
-        if len(line) + len(piece) + 1 > width and line.strip() != head.strip():
-            out.append(line.rstrip() + " &")
-            line = indent
-        line += piece if line.endswith((" ", ":")) and line == indent else (" " + piece if not line.endswith(" ") else piece)
-    out.append(line.rstrip())
-    return out
+    return wrap_items(head, items, width)
 
 
 def squeeze(lines: list[str]) -> list[str]:
