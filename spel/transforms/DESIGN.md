@@ -415,3 +415,8 @@ Left (in order):
 6. (done) Legacy command names removed (§6): every rewrite is `spel transform NAME`; scripts
    (`e3sm_casegen.sh --compact`, `nutrient_refactor.sh`, `profile_compare.sh`), golden.py and the
    docs use the transform names.
+7. (done) `prune` (from the unmerged `remove-unused-members` branch, whose `spel prune` command
+   was not brought over) is a native transform (`spel/transforms/prune.py`): one `diff_edits`
+   change per file, the report as plan notes. On master (fe50956) its outputs equal the old
+   `Pruner`'s (34 files). The driver now keeps a file's CRLF line endings
+   (`driver.newline_of`); before, every transform wrote them as LF (`main/initInterp.F90`).

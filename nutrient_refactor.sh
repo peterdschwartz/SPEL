@@ -45,7 +45,7 @@ STEPS=(
   "spel transform nutrient-restart|One restartvar per nutrient core field (spel transform nutrient-restart)"
   "spel transform nutrient-merge --procedure summary|Merge shared Summary code into core-component routines"
   "spel transform split|Split Vegetation/Column/GridcellDataType into type modules (spel transform split)"
-  "spel prune|Delete derived-type members nothing accesses (spel prune)"
+  "spel transform prune|Delete derived-type members nothing accesses (spel transform prune)"
 )
 
 if [ "$LIST" = 1 ]; then

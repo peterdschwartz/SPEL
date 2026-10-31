@@ -31,9 +31,19 @@ class Sink:
         for path, text in sorted(files.items()):
             t = self.target(Path(path))
             t.parent.mkdir(parents=True, exist_ok=True)
-            t.write_text(text)
+            t.write_text(text, newline=newline_of(Path(path)))
             out.append(t)
         return out
+
+
+def newline_of(path: Path) -> str:
+    """The line ending of an existing source (sources are read with universal newlines; some ELM
+    files are CRLF and must stay so); "\\n" for new files."""
+    try:
+        with open(path, "rb") as f:
+            return "\r\n" if b"\r\n" in f.read() else "\n"
+    except OSError:
+        return "\n"
 
 
 class InPlace(Sink):

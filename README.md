@@ -281,7 +281,7 @@ All commands are subcommands of `spel`. Run `spel <command> --help` for the auth
 | [`spel subset`](#gridcell-subsets) | Write some gridcells of a case's reference data as a new case's |
 | [`spel run`](#spel-run) | Configure, build, and run a generated unit test, then validate it against ELM's data |
 | [`spel profile`](#spel-profile) | Build and run a unit test without outputs under Nsight Systems/Compute |
-| [`spel transform`](#spel-transform) | Source-to-source transforms: OpenACC porting, `acc2omp`, compact layout, nutrient refactor, `split`, ... (`spel transform list`) |
+| [`spel transform`](#spel-transform) | Source-to-source transforms: OpenACC porting, `acc2omp`, compact layout, nutrient refactor, `split`, `prune`, ... (`spel transform list`) |
 | [`spel compact`](#spel-compact) | Inventory flux fields for a compact subgrid layout (the rewrite is `spel transform compact-rewrite`) |
 | [`spel accplan`](#spel-accplan) | Propose an OpenACC loop structure (collapse, column-parallel, interchange, scatter) per loop |
 | `spel nutrient` | Find the fields C/N/P type variants share (candidates for a common base type) |
@@ -687,6 +687,16 @@ which now only print their replacement:
 The reports stay commands: `spel compact inventory`, `spel nutrient common|procedures` and
 `spel accplan`. The nutrient refactor of a whole checkout, one commit per step, is
 `nutrient_refactor.sh`.
+
+#### `prune`
+
+`spel transform prune` deletes the derived-type members (of every analyzed type) that nothing
+uses: every `%name` reference under `components/elm` only declares, allocates, deallocates,
+nullifies or resets the member to a constant. Those statements go with it. References are
+matched by component name across types, so a name used anywhere keeps every member of that name.
+The EMI stub/demo and git submodules (FATES) are searched but never edited. `--report --verbose`
+lists the kept members with the reason. It edits type declarations, so in a spec it needs
+`--reanalyze-steps`.
 
 #### `acc2omp`
 

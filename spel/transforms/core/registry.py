@@ -54,6 +54,7 @@ BUILTINS = [
     "spel.transforms.split.modules",
     "spel.transforms.nutrient.transforms",
     "spel.transforms.compact.rewrite",
+    "spel.transforms.prune",
 ]
 _loaded = False
 

@@ -138,6 +138,7 @@ PASSES = {
     "nutrient_restart": _cli(["transform", "nutrient-restart"]),
     "nutrient_species": _cli(["transform", "nutrient-species"]),
     "split": _cli(["transform", "split"]),
+    "prune": _cli(["transform", "prune"]),
 }
 
 

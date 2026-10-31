@@ -325,6 +325,8 @@ feature that needs to know what a statement *is* or which names it uses must get
   history|restart`) are removed and only print their replacement (`cli.py::REMOVED`); don't add new
   rewrite commands outside the registry. `spel compact inventory`, `spel nutrient common|procedures`
   and `spel accplan` are reports and stay commands.
+- The driver keeps each file's line endings (CRLF stays CRLF: `driver.newline_of`); transforms see
+  `\n`-split lines.
 - A refused transform writes nothing and still exits 0 (exit 1 only on `--verify` problems, 2 on a
   pipeline stop); scripts must check for the output they expect (`e3sm_casegen.sh --compact` checks
   for `.spel-compact.json`).
