@@ -18,6 +18,8 @@ subroutine init_history(this, begc, endc)
        long_name='snow liquid water', ptr_col=data2dptr, default='inactive')
   call hist_addfld1d (fname='QFLX', units='mm/s', avgflag='A', long_name='x', ptr_col=col_wf%qflx_evap_tot)
   call hist_addfld1d (fname='TOTAL', units='mm', avgflag='A', long_name='y', ptr_col=total_water)
+  call hist_addfld2d (fname='PCT_LANDUNIT', units='%', type2d='ltype', avgflag='A', &
+       long_name='% of each landunit on topounit', ptr_topo=subgrid_weights_diagnostics%pct_landunit)
   if (use_cn) then
      call restartvar(ncid=ncid, flag=flag, varname='H2OSOI_LIQ', xtype=ncd_double, dim1name='column', &
           data=this%h2osoi_liq)
@@ -43,7 +45,12 @@ def test_bases_pointers_and_metadata(tmp_path):
         "col_wf%qflx_evap_tot",
         "total_water",
         "veg_ef%eflx_lh_tot",
+        "subgrid_weights_diagnostics%pct_landunit",
     }
+    # topounit-level fields (ptr_topo) were invisible until 2026-10-30: PCT_LANDUNIT's source was
+    # missing from the device-data layer and the history kernel aborted
+    topo = by_path["subgrid_weights_diagnostics%pct_landunit"]
+    assert topo.kind == "hist" and topo.base == "subgrid_weights_diagnostics" and topo.field == "pct_landunit"
     snow = by_path["this%h2osno"]
     assert snow.kind == "hist" and snow.base == "this" and snow.field == "h2osno"
     assert snow.name == "h2osno" and snow.units == "mm" and snow.long_name == "snow depth (liquid water)"
@@ -64,8 +71,8 @@ def test_find_registrations_sets_attribute(tmp_path):
     plain = SimpleNamespace(id="m::other", library=False, filepath=f, startline=2, end_stmt_ln=4, endline=4)
     lib = SimpleNamespace(id="lib::x", library=True, filepath=None, startline=-999, end_stmt_ln=-999, endline=-999)
     n = find_registrations({"a": with_regs, "b": plain, "c": lib})
-    assert n == 6
-    assert len(with_regs.registrations) == 6
+    assert n == 7
+    assert len(with_regs.registrations) == 7
     assert plain.registrations == [] and lib.registrations == []
 
 

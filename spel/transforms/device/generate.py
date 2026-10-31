@@ -39,6 +39,9 @@ MODULE_NAME = "ElmDeviceDataMod"
 TAG = "! spel device-data"
 INTRINSIC = {"real", "integer", "logical", "character", "double", "complex", "double precision"}
 MAX_DEPTH = 5
+# routines whose trees run device code: the namelist guards of the copies are the OR over all of them
+# (elm_drv's step; lnd2atm / lnd2atm_minimal: the subgrid averages lnd_run_mct and initialize2 run)
+DEVICE_ROOTS = ("elm_driver::elm_drv", "lnd2atmmod::lnd2atm", "lnd2atmmod::lnd2atm_minimal")
 
 
 class DeviceDataError(RuntimeError):
@@ -311,19 +314,29 @@ def access_guards(fut, type_dict) -> Guards:
     all gated is handled only under the or of their conditions (c13_col_cf: use_c13).
     Kept unguarded: history-registered components (the hbuf kernels read them), and
     conditions with string comparisons (no spel_streq in ELM).
+
+    The accesses come from every device root (`DEVICE_ROOTS`): elm_drv's tree and the
+    lnd2atm averaging, which lnd_run_mct calls after elm_drv and whose kernels read the
+    table's arrays unconditionally (2026-10-30: sedflux_vars was gated by the erosion flags
+    from elm_drv's accesses alone, and lnd2atm's sed_yld_col average found it absent).
     """
     from spel.scripts.fortran_parser.boolen_expression import AnyOf, minimize, simplify
     from spel.scripts.nml.analyze_namelist import check_subs_for_nml_guarded_vars, nml_guards
+    from spel.scripts.validate_access import merge_guards
 
     g = Guards()
     drv = fut.subroutine_dict.get("elm_driver::elm_drv")
     if drv is None:
         g.notes.append("guards: elm_drv not in the analysis, no namelist guards")
         return g
+    roots = [fut.subroutine_dict[r] for r in DEVICE_ROOTS if r in fut.subroutine_dict]
+    for r in DEVICE_ROOTS:
+        if r not in fut.subroutine_dict:
+            g.notes.append(f"guards: device root {r} not in the analysis")
     instance_dict = {i.name: t for t in fut.type_dict.values() for i in t.instances.values()}
     try:
-        by_cond = check_subs_for_nml_guarded_vars([drv], instance_dict)
-        raw = nml_guards(drv)
+        by_cond = check_subs_for_nml_guarded_vars(roots, instance_dict)
+        raw = merge_guards((r.elmtype_access_by_ln, nml_guards(r)) for r in roots)
     except Exception as exc:
         g.notes.append(f"guards: namelist analysis failed ({exc}), no namelist guards")
         return g
@@ -348,9 +361,9 @@ def access_guards(fut, type_dict) -> Guards:
                 continue
             g.components[id(c)] = text
             names |= cond.variable_names()
-    accessed = getattr(drv, "elmtype_access_by_ln", {})
+    accessed = {v for r in roots for v in getattr(r, "elmtype_access_by_ln", {})}
     fields_of: dict[str, list[str]] = {}
-    for v in accessed:
+    for v in sorted(accessed):
         fields_of.setdefault(v.split("%")[0].lower(), []).append(v)
     for inst, fields in fields_of.items():
         conds = [raw.get(v) for v in fields]

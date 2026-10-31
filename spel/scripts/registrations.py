@@ -41,7 +41,7 @@ from spel.scripts.fortran_parser.spel_parser import Parser
 from spel.scripts.types import LineTuple
 
 HIST_CALLS = ("hist_addfld1d", "hist_addfld2d", "hist_addfld_decomp")
-HIST_POINTERS = ("ptr_patch", "ptr_col", "ptr_lunit", "ptr_gcell", "ptr_lnd", "ptr_atm")
+HIST_POINTERS = ("ptr_patch", "ptr_col", "ptr_lunit", "ptr_gcell", "ptr_topo", "ptr_lnd", "ptr_atm")
 RESTART_CALL = "restartvar"
 SET_OPTIONS = ("set_lake", "set_nolake", "set_urb", "set_nourb", "set_spec", "set_noglcmec")
 REGISTRATION_RX = re.compile(r"\b(hist_addfld1d|hist_addfld2d|hist_addfld_decomp|restartvar)\b", re.I)

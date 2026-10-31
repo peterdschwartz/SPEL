@@ -330,3 +330,57 @@ every inconsistency into a wrong number instead of an abort. Rules that follow:
    created locals, device-lint = collapse-bounds + host-initialized-locals + sync-drift.
 4. Validate per pass group (10-step host-vs-GPU restart, 15 min), compare the restarts first
    (per landunit, per layer, pattern of the difference), then probe the driver.
+
+## 2026-10-30: `attach` before the target is on the device is a silent no-op (history buffers wrong on the GPU)
+
+The refactored history (`histComputeMod`) and the subgrid view (`subgridAveViewMod`) reach the
+model arrays through pointer components that are `enter data attach`ed. Both were attached when
+they were built, in `initialize2` before `elm_device_copyin`: the OpenACC runtime takes *no
+action* for an attach whose target is not present (spec 2.7.2), the device descriptor keeps the
+host address, and Perlmutter's unified addressing (HMM) lets the kernel read host memory instead
+of faulting. The GPU's history buffers were the *host's* stale arrays (TSOI exactly 11 x the
+finidat value, fluxes 0, spval-initialized fields spval), at page-fault speed (7.5 s / 10 steps).
+The in-tree test copied the data before attaching, so it passed; the 10-step validation compares
+the model restart, never the history buffers. Reproducer: `spelval/histtest/repro_attach/t_attach.F90`.
+
+Rules:
+
+1. Attach is a separate, explicit step after the data layer's copy (`subgrid_ave_device_attach`,
+   `hist_device_attach`, called by `initialize2` right after `elm_device_copyin`); the builders
+   (`init_subgrid_ave`, `hist_compute_build`) no longer attach, and re-attach themselves only
+   when rebuilding something that was attached.
+2. Every attach checks `acc_is_present` of every target and aborts on a missing one; the device
+   path aborts if it runs before the attach. Nothing is allowed to fall through to host memory.
+3. Tests of device code copy the data in the *model's* order (after the consumer's setup) and run
+   with a host decoy: the host copies are made wrong (negated) while the kernel runs, so a kernel
+   reading host memory fails the comparison even where host and device would otherwise agree.
+4. An e2e validation of a component must compare that component's output (the history restart
+   `elm.rh0` through cprnc, `tools/validate_hist.sh`), not only the model restart.
+
+## 2026-10-30: every history source must be in the device-data layer (`ptr_topo`, private instances)
+
+The first run with the presence checks of rule 2 above aborted: `PCT_LANDUNIT`, `PCT_NAT_PFT` and
+`PCT_CFT` (hpindex 1492-1494, the last fields registered) read `subgrid_weights_diagnostics%pct_*`
+(`subgridWeightsMod`), which the layer did not carry. Two SPEL deficits hid it:
+
+- `registrations.py` knew `ptr_patch/col/lunit/gcell/lnd/atm` but not `ptr_topo`, so the 17
+  topounit-level fields (`TBOT`, `PBOT`, ..., the `PCT_*` fields) were invisible to
+  `_history_components` and to every registration-based check. Fixed (test added).
+- `subgridWeightsMod` is default-private and did not export the type or the instance, so `plan`
+  skipped it ("private module variable"): the layer cannot name it, and acc-sync cannot push it
+  after `set_subgrid_diagnostic_fields` (a host loop under `weights_updated`). Fixed in the tree by
+  making both public; the layer is regenerated and dynSubgridDriverMod resynced.
+
+Rules: a history field's source is read on the device by `histComputeMod` whatever the analyzed
+routines do, so the planner must treat every registration target as device data: the instance must
+be in the layer (public, or its module must manage it), and host writes to it need a push. The
+history attach check (`hist_compute_attach`) reports *every* missing target before it aborts, so one
+GPU run with the production history (`tools/gpuleg_hist_probe.sh`) lists the whole gap; the
+hpindex -> field name map is the `hpindex`/`name` variables of the history restart (`elm.rh0`).
+
+The same night, the lnd2atm presence check found the second gap of this kind: `sedflux_vars` was copied only under
+`(use_cn .and. use_erosion) .or. (ero_ccycle .and. ...)`, because `access_guards` derived the instance guards from
+elm_drv's accesses alone, while `lnd2atm` (called by `lnd_run_mct`, outside elm_drv) averages `sed_yld_col`
+unconditionally through the `l2a_add` table. The guards now come from every device root (`DEVICE_ROOTS` =
+elm_drv, lnd2atm, lnd2atm_minimal; `merge_guards`: a field stays guarded only if every root that accesses it
+guards it). Rule: whenever device code gets a new entry point outside elm_drv's tree, add it to `DEVICE_ROOTS`.
