@@ -128,25 +128,6 @@ class DeviceData(CliAdapter):
     command = ["device-data"]
 
 
-@transform
-class DeviceTargeted(CliAdapter):
-    """
-    Changes: elm_drv's host/device transitions only switch `elm_device_ready`; acc-sync updates
-             move the data each host segment uses, guarded by `.not. elm_device_fullsync`.
-    Adapter: runs `device.targeted.apply` (no spel command). Design: device/targeted.py.
-    """
-
-    name = "device-targeted"
-    summary = "targeted host/device updates in elm_drv instead of whole-state transitions"
-    Options = DeviceOptions
-
-    def run(self, ctx, opts) -> None:
-        from spel.transforms.device import targeted
-
-        for line in targeted.apply(ctx.fut, Path(ctx.srcroot)):
-            print(line)
-
-
 @dataclass
 class NutrientOptions:
     family: list[str] = field(default_factory=list, metadata={"help": "only these families (e.g. vegetation_nutrient_flux)"})
@@ -180,31 +161,19 @@ NutrientMerge = _nutrient(
     "merge", "move the procedures' shared statements to base-type procedures; after extract",
     "Changes: statements the C/N/P procedures share move to a base-type procedure they call.",
     MergeOptions)
+@dataclass
+class GroupsOptions(NutrientOptions):
+    groups: Optional[Path] = field(default=None, metadata={
+        "help": "TOML file of role tables (family -> base names) replacing the built-in GROUPS"})
+
+
 NutrientGroups = _nutrient(
     "groups", "move N/P-only fields to role components (mineral, uptake, retrans)",
-    "Changes: N/P-only components move to role holders (nutrient/groups.py).")
+    "Changes: N/P-only components move to role holders (nutrient/groups.py, or the `groups` TOML file).",
+    GroupsOptions)
 NutrientHistory = _nutrient(
     "history", "one history registration per core field for every species",
     "Changes: the per-species hist_addfld calls of core fields become one loop over species.")
 NutrientRestart = _nutrient(
     "restart", "one restartvar per core field for every species",
     "Changes: the per-species restartvar calls of core fields become one loop over species.")
-
-
-@dataclass
-class SplitOptions:
-    plan: Optional[str] = field(default=None, metadata={"help": "the split plan (default: elm-data-types)"})
-
-
-@transform
-class Split(CliAdapter):
-    """
-    Changes: moves type definitions and their procedures out of large modules into new ones
-             (instances stay); every `use` of a moved name is rewritten.
-    Adapter: runs `spel split`; the plans are split/modules.py PLANS.
-    """
-
-    name = "split"
-    summary = "move type definitions out of large modules into new ones"
-    Options = SplitOptions
-    command = ["split"]

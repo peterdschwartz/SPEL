@@ -59,7 +59,10 @@ from spel.scripts.fortran_parser.tokens import TokenTypes as Tok
 from spel.scripts.module_resolver import ModuleResolver, ModuleScopes, module_head
 from spel.scripts.types import LineTuple, LogicalLineIterator
 from spel.transforms.nutrient.tree import names_in, split_code, statement_at, statement_names
+from spel.transforms.core.edits import EditSet, changed_lines, diff_edits, replace
 from spel.transforms.core.fortran import wrap_items
+from spel.transforms.core.registry import transform
+from spel.transforms.core.transform import Refusal, Transform
 
 INTRINSIC_TYPES = {"integer", "real", "logical", "character", "complex", "double", "doubleprecision"}
 FORTRAN_SUFFIXES = (".F90", ".f90", ".F", ".f")
@@ -825,32 +828,57 @@ class Splitter:
         return out
 
     def rewrite_clients(self, files: dict[Path, list[str]]) -> dict[Path, list[str]]:
+        """The final text of every file the split writes. `self.client_edit_sets[path]` holds
+        the edits of each client (and new or rewritten file) against `files[path]`, or against
+        the file on disk for a client the split does not otherwise write."""
         edits: dict[Path, list[str]] = {}
+        self.client_edit_sets: dict[Path, EditSet] = {}
         by_path = defaultdict(list)
         for path, ln, st in self.client_uses():
             by_path[path].append((ln, st))
         for path in files:
             by_path.setdefault(path, [])
         for path, uses in by_path.items():
-            lines = list(files.get(path) or path.read_text(errors="replace").split("\n"))
+            original = list(files.get(path) or path.read_text(errors="replace").split("\n"))
+            lines = list(original)
             if path in files:
                 uses = self.reparse_uses(lines)
-            changed = self.pass_instances(path, lines, uses)
-            for ln, st in sorted(uses, key=lambda x: -x[0]):
+            self.pass_instances(path, lines, uses)  # edits call lines in place, one line each
+            es = EditSet(path).extend(changed_lines(original, lines))
+            for ln, st in uses:
                 last, _ = statement_at(lines, ln)
                 code, comment = split_code(lines[last])
                 indent = lines[ln][: len(lines[ln]) - len(lines[ln].lstrip())]
                 old = lines[ln : last + 1]
                 new = self.client_lines(st, indent, comment.strip(), old)
                 if [l.rstrip() for l in old] != [l.rstrip() for l in new] and self.changes(st):
-                    lines[ln : last + 1] = new
-                    changed = True
-            if changed:
-                edits[path] = lines
+                    es.add(replace(ln, new, n=last + 1 - ln, expect=original[ln : last + 1],
+                                   why=f"use {st.module}"))
+            if es:
+                self.client_edit_sets[path] = es
+                edits[path] = es.apply(original)
         for path, lines in files.items():
             if path not in edits:
                 edits[path] = lines
         return edits
+
+    def core_plan(self, name: str = "split"):
+        """The core Plan of a built split: new modules as new files, the rewritten sources and
+        the clients as edits of the files on disk."""
+        from spel.transforms.core.transform import Change, Plan
+
+        out = Plan(name, notes=list(self.notes) + self.report().split("\n"))
+        for path, lines in sorted(self.client_edits.items()):
+            if path in self.files and not path.exists():
+                out.new_files[path] = "\n".join(lines)
+            elif path in self.files:
+                disk = path.read_text(errors="replace").split("\n")
+                out.add(Change(path, diff_edits(disk, lines, why="split source"), where=path.name,
+                               why="moved definitions out, uses rewritten"))
+            else:
+                out.add(Change(path, self.client_edit_sets[path].edits, where=path.name,
+                               why="uses of moved names rewritten"))
+        return out
 
     def pass_instances(self, path: Path, lines: list[str], uses) -> bool:
         """
@@ -979,3 +1007,37 @@ def elm_data_types_plan(mod: str, type_name: str) -> Optional[str]:
 
 
 PLANS = {"elm-data-types": (["columndatatype", "vegetationdatatype", "gridcelldatatype"], elm_data_types_plan)}
+
+
+@dataclass
+class Options:
+    plan: Optional[str] = field(default=None, metadata={"help": "the split plan (default: elm-data-types)"})
+
+
+@transform
+class Split(Transform):
+    """
+    Matches: the type definitions (and their procedures) the plan assigns to new modules.
+    Changes: moves them out of large modules into new ones (instances stay); every `use` of a
+             moved name is rewritten; calls of procedures given instance dummies pass them.
+    Refuses: a plan that would make a use cycle, or a module it cannot split (SplitError).
+    The plans are PLANS.
+    """
+
+    name = "split"
+    summary = "move type definitions out of large modules into new ones"
+    Options = Options
+
+    def build(self, ctx, opts):
+        from spel.transforms.core.transform import Plan
+
+        key = opts.plan or "elm-data-types"
+        if key not in PLANS:
+            return Plan(self.name).add(Refusal(key, f"no such plan; known: {', '.join(sorted(PLANS))}"))
+        mods, plan_fn = PLANS[key]
+        try:
+            sp = Splitter(ctx.fut, mods, plan_fn, Path(ctx.srcroot))
+            sp.build()
+        except SplitError as err:
+            return Plan(self.name).add(Refusal(key, str(err)))
+        return sp.core_plan(self.name)

@@ -75,6 +75,19 @@ def changed_lines(old: Sequence[str], new: Sequence[str], order: float = 1e9) ->
     return [replace(ln, b, order=order, expect=[a]) for ln, (a, b) in enumerate(zip(old, new)) if a != b]
 
 
+def diff_edits(old: Sequence[str], new: Sequence[str], why: str = "") -> list[Edit]:
+    """Edits turning `old` into `new`, from a line diff: for passes that rebuild a file whole
+    (a module losing most of its contents), so their output still goes through an EditSet."""
+    out = []
+    sm = difflib.SequenceMatcher(None, list(old), list(new), autojunk=False)
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "insert":
+            out.append(insert(i1, new[j1:j2], why=why))
+        elif op != "equal":
+            out.append(replace(i1, new[j1:j2], n=i2 - i1, expect=old[i1:i2], why=why))
+    return out
+
+
 def _lines(new) -> tuple[str, ...]:
     return (new,) if isinstance(new, str) else tuple(new)
 

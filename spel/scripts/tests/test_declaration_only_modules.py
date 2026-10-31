@@ -140,3 +140,17 @@ def test_generated_elm_instmod_declares_header_typed_imports(inst_mod, type_dict
     assert '#include "unittest_defs.h"' in text
     assert "type(hlm_fates_interface_type)                      :: alm_fates" in text
     assert "elmfatesinterfacemod" not in text.lower()
+
+
+def test_module_file_lookup_ignores_modules_with_a_longer_name(tmp_path, monkeypatch):
+    # a test stub `module elm_varctl_stub` found first made `elm_varctl` resolve to the stub
+    import spel.scripts.dynamic_globals as dg
+    import spel.scripts.fortran_modules as fm
+
+    (tmp_path / "a_test").mkdir()
+    (tmp_path / "a_test" / "elm_varctl_stub.F90").write_text("module elm_varctl_stub\nend module\n")
+    (tmp_path / "z_main").mkdir()
+    (tmp_path / "z_main" / "elm_varctl.F90").write_text("module elm_varctl\nend module\n")
+    monkeypatch.setattr(fm, "ELM_SRC", str(tmp_path) + "/")
+    monkeypatch.setattr(dg, "map_module_name_to_fpath", {})
+    assert fm.get_filename_from_module("elm_varctl") == str(tmp_path / "z_main" / "elm_varctl.F90")

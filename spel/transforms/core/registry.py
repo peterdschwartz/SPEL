@@ -47,6 +47,8 @@ BUILTINS = [
     "spel.transforms.acc_apply",
     "spel.transforms.acc_sync",
     "spel.transforms.acc_to_omp",
+    "spel.transforms.device.targeted",
+    "spel.transforms.split.modules",
     "spel.transforms.adapters",
 ]
 _loaded = False

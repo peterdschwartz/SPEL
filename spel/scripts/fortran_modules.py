@@ -65,7 +65,7 @@ def get_filename_from_module(module_name: str, verbose: bool = False):
         dg.map_module_name_to_fpath[module_name] = file_path
         return file_path
 
-    cmd = rf'grep -rin --exclude-dir=external_models/ "^\s*module\s* {module_name}" {ELM_SRC}*'
+    cmd = rf'grep -rin --exclude-dir=external_models/ "^\s*module\s* {module_name}\b" {ELM_SRC}*'
     elm_output = sp.getoutput(cmd)
     if not elm_output:
         if verbose:
@@ -73,7 +73,7 @@ def get_filename_from_module(module_name: str, verbose: bool = False):
         #
         # If file is not an ELM file, may be a shared module in E3SM/share/util/
         #
-        cmd = f'grep -rin --exclude-dir=external_models/ "module {module_name}" {SHR_SRC}*'
+        cmd = rf'grep -rin --exclude-dir=external_models/ "module {module_name}\b" {SHR_SRC}*'
         shr_output = sp.getoutput(cmd)
 
         gen_output = ""

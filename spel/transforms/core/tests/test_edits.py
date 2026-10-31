@@ -1,6 +1,6 @@
 import pytest
 
-from spel.transforms.core.edits import EditConflict, EditMismatch, EditSet, delete, insert, replace
+from spel.transforms.core.edits import EditConflict, EditMismatch, EditSet, delete, diff_edits, insert, replace
 
 SRC = ["a", "b", "c", "d"]
 
@@ -36,3 +36,12 @@ def test_expect():
 def test_diff():
     d = EditSet().add(replace(0, "A")).diff(SRC)
     assert "-a" in d and "+A" in d
+
+
+def test_diff_edits_rebuild_the_new_text():
+    old = ["module m", "  use a", "  type t", "  end type", "contains", "end module m"]
+    new = ["module m", "  use a", "  use b, only : t", "contains", "  ! new", "end module m"]
+    es = EditSet().extend(diff_edits(old, new))
+    assert es.apply(old) == new
+    with pytest.raises(EditMismatch):  # planned on other text
+        es.apply(["module m", "  use a", "  type u", "  end type", "contains", "end module m"])

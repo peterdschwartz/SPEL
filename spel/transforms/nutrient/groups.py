@@ -17,10 +17,12 @@ The type of a role's component is the family's name with ``nutrient``
 replaced by the role (column_mineral_flux, vegetation_retrans_state). Fields
 keep their base names (common.py), except where that repeats the component
 (FIELD_NAMES). The grouping is the starting point for the domain
-scientists: changing it is an edit of GROUPS and a regeneration.
+scientists: changing it is an edit of GROUPS (or a TOML file given with `--groups`) and a regeneration.
 """
 
 from __future__ import annotations
+
+from typing import Optional
 
 from spel.transforms.nutrient.common import Family
 from spel.transforms.nutrient.extract import ExtractError, FamilyEdit
@@ -86,10 +88,28 @@ GROUPS: dict[str, dict[str, list[str]]] = {
 FIELD_NAMES = {("retrans", "retrans"): "pool"}
 
 
-def group_edits(families: list[Family]) -> list[FamilyEdit]:
+def load_groups(path) -> dict[str, dict[str, list[str]]]:
+    """GROUPS from a TOML file: one table per role, family name -> base names:
+
+        [mineral]
+        column_nutrient_state = ["smin", "smin_vr"]
+    """
+    import tomllib
+    from pathlib import Path
+
+    data = tomllib.loads(Path(path).read_text())
+    for role, per_family in data.items():
+        if not isinstance(per_family, dict) or not all(
+            isinstance(v, list) and all(isinstance(b, str) for b in v) for v in per_family.values()
+        ):
+            raise ExtractError(f"{path}: [{role}] must map family names to lists of base names")
+    return data
+
+
+def group_edits(families: list[Family], groups: Optional[dict[str, dict[str, list[str]]]] = None) -> list[FamilyEdit]:
     by_name = {f.name: f for f in families}
     edits = []
-    for role, per_family in GROUPS.items():
+    for role, per_family in (GROUPS if groups is None else groups).items():
         for fam_name, bases in per_family.items():
             fam = by_name.get(fam_name)
             if fam is None:

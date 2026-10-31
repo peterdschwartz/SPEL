@@ -234,7 +234,8 @@ def _data_entries(sub, maps) -> list[tuple[str, str, int, str]]:
 
 def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
          device_spans: Optional[dict[str, list[tuple[int, int]]]] = None,
-         boundary: Optional[dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]]] = None) -> SyncPlan:
+         boundary: Optional[dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]]] = None,
+         off_by_default: Optional[Iterable[str]] = None) -> SyncPlan:
     """
     The host segments of the call tree's routines and what each must sync.
 
@@ -245,10 +246,12 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
     analysis, as (path, status) in the root's scope: what is written before is pushed at
     the root's first statement, what is read after and written by device code is pulled
     at its end (elm_drv: the coupler import and export around it).
+    off_by_default: the switches whose if constructs count as cold (default OFF_BY_DEFAULT).
     """
     from spel.scripts.fortran_parser.module_spec import parse_modules
     from spel.scripts.record_access import AccessMapper
 
+    cold_switches = OFF_BY_DEFAULT if off_by_default is None else frozenset(n.lower() for n in off_by_default)
     facts = _Facts(fut)
     types = _Types(fut)
     mapper = AccessMapper(fut.subroutine_dict)
@@ -345,7 +348,7 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
             continue
         rs = RoutineSync(sid, path)
         _segments(rs, s, node, device_lines[sid], _data_entries(s, maps[sid]), facts.lines(s), types, out,
-                  (boundary or {}).get(sid))
+                  (boundary or {}).get(sid), cold_switches)
         if rs.segments:
             out.routines.append(rs)
         out.notes += excluded_calls_in(sid, path, node)
@@ -443,7 +446,7 @@ def _header_lines(st) -> list[int]:
 
 
 def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries, lines: list[str],
-              types: _Types, out: SyncPlan, boundary=None) -> None:
+              types: _Types, out: SyncPlan, boundary=None, cold_switches=OFF_BY_DEFAULT) -> None:
     from spel.scripts.fortran_parser import spel_ast as A
     from spel.transforms.core.query import first_executable
 
@@ -541,7 +544,7 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
             return False
         names = {n.lower() for n in expr_names(st.condition)}
         return (any(st.lineno <= ln <= hi for ln in aborts) or any(n.startswith(PREFIX) for n in names)
-                or bool(names & OFF_BY_DEFAULT)
+                or bool(names & cold_switches)
                 or (st.construct_end_ln != -1 and flag_condition(st.condition)))  # a block if, not `if (c) return`
 
     def returns_in(lo: int, hi: int) -> list[int]:
@@ -793,6 +796,8 @@ def apply(fut, plan_: SyncPlan, dry_run: bool = False) -> list[str]:
 class Options:
     roots: list[str] = field(default_factory=lambda: ["elm_driver::elm_drv"],
                              metadata={"help": "the call trees to synchronize"})
+    off_by_default: list[str] = field(default_factory=list, metadata={
+        "help": "switches whose if constructs are treated as cold, replacing the built-in list (empty: built-in)"})
 
 
 @transform
@@ -810,7 +815,7 @@ class AccSync(Transform):
     Options = Options
 
     def build(self, ctx, opts):
-        return text_plan(ctx, plan(ctx.fut, opts.roots))
+        return text_plan(ctx, plan(ctx.fut, opts.roots, off_by_default=opts.off_by_default or None))
 
 
 @dataclass

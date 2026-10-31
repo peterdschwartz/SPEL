@@ -131,6 +131,24 @@ def test_off_by_default_branch_syncs_inside():
     (seg,) = rs.segments
     assert seg.first == 11 and seg.stale == {"x"} and seg.writes == {"y"}   # the do loop inside the branch
 
+    # a replaced switch list (the `off_by_default` option) no longer treats use_fates as cold;
+    # the condition reads device data, so it is not a host flag either
+    src = FATES_BRANCH.replace("if (use_fates) then", "if (use_fates .and. x(1) > 0.0_r8) then")
+    lines = src.split("\n")
+    sub = StubSub(src)
+    sub.active_global_vars = {}
+    spans = acc_sync._spans(find_directives(lines), sub.record)
+    entries = acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub))
+    node = parse_statements(src).statements[0]
+    first = {}
+    for switches in (acc_sync.OFF_BY_DEFAULT, frozenset({"use_fan"})):
+        rs = acc_sync.RoutineSync(sub.id, None)
+        acc_sync._segments(rs, sub, node, spans, entries, lines, acc_sync._Types(fut), out,
+                           cold_switches=switches)
+        first[switches] = [(g.first, g.header_only) for g in rs.segments]
+    # cold: the header, then the loop inside the branch; not cold: the whole if construct
+    assert first == {acc_sync.OFF_BY_DEFAULT: [(10, True), (11, False)], frozenset({"use_fan"}): [(10, False)]}
+
 
 COLD = """subroutine check(n, x, nbad)
   implicit none
@@ -259,6 +277,18 @@ def test_targeted_strip_removes_an_application():
     src = ["  call a()", f"  !$acc update self(p, &", f"  !$acc&   q) if_present if({targeted.COND})",
            f"  call elm_device_pull_all()  {targeted.TAG}", "  !$acc update self(r) if_present", "  call b()"]
     assert targeted.strip(src) == ["  call a()", "  !$acc update self(r) if_present", "  call b()"]
+
+
+def test_targeted_transform_refuses_an_applied_driver(tmp_path):
+    from spel.transforms.core.source import Sources
+    from spel.transforms.core.transform import Context
+    from spel.transforms.device import targeted
+
+    drv = targeted.driver_path(tmp_path)
+    drv.parent.mkdir(parents=True)
+    drv.write_text(f"  call a()\n  call elm_device_pull_all()  {targeted.TAG}\n")
+    plan = targeted.DeviceTargeted().build(Context(None, tmp_path, Sources()), targeted.Options())
+    assert not plan and "earlier application" in plan.refusals[0].reason
 
 
 FLAG_BRANCH = """subroutine weights(n, x, y, updated)

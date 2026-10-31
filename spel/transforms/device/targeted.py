@@ -36,6 +36,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from spel.transforms.core.edits import EditSet, stacked
+from spel.transforms.core.registry import transform
+from spel.transforms.core.source import indent
+from spel.transforms.core.transform import Change, Plan as TPlan, Refusal, Transform
 from spel.transforms.device.generate import MODULE_NAME, DeviceDataError, call_kinds
 
 TAG = "! spel targeted"
@@ -253,20 +257,18 @@ def strip(lines: list[str]) -> list[str]:
     return out
 
 
-def apply(fut, srcroot: Path, dry_run: bool = False) -> list[str]:
+def driver_path(srcroot: Path) -> Path:
+    return Path(srcroot) / "components" / "elm" / "src" / "main" / "elm_driver.F90"
+
+
+def edit_set(fut, srcroot: Path, lines: list[str]) -> tuple[Targeted, EditSet]:
+    """The plan and the insertions into the driver `lines`, which must be the analyzed file on
+    disk without an earlier application (`check_lines`)."""
     from spel.transforms import acc_sync
 
-    drv = srcroot / "components" / "elm" / "src" / "main" / "elm_driver.F90"
-    text = drv.read_text().split("\n")
-    stripped = strip(text)
-    if stripped != text:
-        if not dry_run:
-            drv.write_text("\n".join(stripped))
-        else:
-            raise DeviceDataError(f"{drv.name} carries an earlier application: strip it (apply without --dry-run)")
+    drv = driver_path(srcroot)
     check_lines(fut, drv)
     t = plan(fut, drv)
-    lines = drv.read_text().split("\n")
     ins = acc_sync.edits(t.plan, {drv: lines}, cond=COND).get(drv, [])
     # acc-sync's own lines (its comment, use statements for callees' globals) carry its TAG
     ins = [(ln, order, [x.replace(acc_sync.TAG, TAG) for x in new]) for ln, order, new in ins]
@@ -277,7 +279,7 @@ def apply(fut, srcroot: Path, dry_run: bool = False) -> list[str]:
     for rs in t.plan.routines:
         for seg in rs.segments:
             if any(p.split("%")[0] in FILTER_INSTANCES for p in seg.skipped):
-                ind = acc_sync._indent(lines[seg.first])
+                ind = indent(lines[seg.first])
                 ins.append((_above_directives(seg.first, directives), 0,
                             [f"{ind}call elm_device_filters_update(to_device=.false.)  {TAG}"]))
                 if not seg.header_only:
@@ -291,13 +293,13 @@ def apply(fut, srcroot: Path, dry_run: bool = False) -> list[str]:
     if not pulls:
         raise DeviceDataError(f"{drv.name}: no call of {sorted(PULL_ALL_BEFORE)} in elm_drv")
     for ln in pulls:
-        ind = acc_sync._indent(lines[ln])
+        ind = indent(lines[ln])
         ins.append((ln, 5, [f"{ind}call elm_device_pull_all()  {TAG}: restart writes read the whole state"]))
     # calls the analysis cannot see into: their derived-type arguments whole, pulled before and pushed after
     upd = _update_routines(srcroot)
     needed: dict[str, set[str]] = {}
     for first, last, insts in excluded_calls(fut, drv):
-        ind = acc_sync._indent(lines[first])
+        ind = indent(lines[first])
         for inst, typ in insts:
             r = f"update_{typ}"
             if r not in upd:
@@ -312,8 +314,54 @@ def apply(fut, srcroot: Path, dry_run: bool = False) -> list[str]:
         raise DeviceDataError(f"{drv.name}: no `use {MODULE_NAME}`")
     ins.append((use_ln + 1, 0, [f"  use {MODULE_NAME}, only : {', '.join(USE_NAMES)}  {TAG}"]
                                + [f"  use {m}, only : {', '.join(sorted(rs))}  {TAG}" for m, rs in sorted(needed.items())]))
-    for ln, _, new in sorted(ins, key=lambda x: (-x[0], -x[1])):
-        lines[ln:ln] = new
+    return t, EditSet(drv).extend(stacked((ln, new, order) for ln, order, new in ins))
+
+
+def apply(fut, srcroot: Path, dry_run: bool = False) -> list[str]:
+    drv = driver_path(srcroot)
+    text = drv.read_text().split("\n")
+    stripped = strip(text)
+    if stripped != text:
+        if not dry_run:
+            drv.write_text("\n".join(stripped))
+        else:
+            raise DeviceDataError(f"{drv.name} carries an earlier application: strip it (apply without --dry-run)")
+    lines = drv.read_text().split("\n")
+    t, es = edit_set(fut, srcroot, lines)
     if not dry_run:
-        drv.write_text("\n".join(lines))
-    return t.report + [f"{drv.name}: {len(ins)} insertions{' (dry run)' if dry_run else ''}"]
+        drv.write_text("\n".join(es.apply(lines)))
+    return t.report + [f"{drv.name}: {len(es)} insertions{' (dry run)' if dry_run else ''}"]
+
+
+@dataclass
+class Options:
+    pass
+
+
+@transform
+class DeviceTargeted(Transform):
+    """
+    Matches: elm_drv's host segments (acc-sync rooted at elm_drv), the clump filters, the
+             restart write, calls into modules the analysis excludes.
+    Changes: elm_drv's host/device transitions only switch `elm_device_ready`; acc-sync updates
+             move the data each host segment uses, guarded by `.not. elm_device_fullsync`.
+    Refuses: a driver that carries an earlier application (`targeted.strip` it and re-analyze).
+    Design: device/targeted.py.
+    """
+
+    name = "device-targeted"
+    summary = "targeted host/device updates in elm_drv instead of whole-state transitions"
+    Options = Options
+
+    def build(self, ctx, opts) -> TPlan:
+        out = TPlan(self.name)
+        drv = driver_path(ctx.srcroot)
+        lines = ctx.lines(drv)
+        if strip(lines) != lines:
+            return out.add(Refusal(drv.name, "carries an earlier application: strip it, then `spel analyze` again"))
+        try:
+            t, es = edit_set(ctx.fut, ctx.srcroot, lines)
+        except DeviceDataError as err:
+            return out.add(Refusal(drv.name, str(err)))
+        out.notes += t.report + [f"{drv.name}: {len(es)} insertions"]
+        return out.add(Change(drv, es.edits, where="elm_driver::elm_drv"))

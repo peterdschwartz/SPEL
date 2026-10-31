@@ -304,8 +304,13 @@ Built:
   working): `collapse-bounds`, `unblock` (blocked_loops), `section-loops`, `defer-checks`,
   `acc-locals`, `acc-apply`; `acc-sync` and `acc2omp` give whole-file outputs (acc-sync
   deduplicates its earlier runs, acc2omp maps onto a shifted unit-test copy).
-- Adapters (`adapters.py`): `compact-rewrite`, `device-data`, `device-targeted`,
-  `nutrient-{extract,species,merge,groups,history,restart}`, `split`. Each runs the existing pass
+- Native since 2026-10-31: `device-targeted` (`targeted.edit_set`: insertions into the driver;
+  refuses a driver that carries an earlier application) and `split` (`Splitter.core_plan`: new
+  modules as new files, client `use`/call rewrites as positional edits, the rewritten split
+  sources as `core.edits.diff_edits`). Both golden-identical to the adapters (targeted on the
+  compact-v2 working tree with its application stripped, split on master).
+- Adapters (`adapters.py`): `compact-rewrite`, `device-data`,
+  `nutrient-{extract,species,merge,groups,history,restart}`. Each runs the existing pass
   on the context's analysis with its writes captured and returns the files as the plan's outputs,
   so it gets the shared `--dry-run/--diff/-o/--verify/--spec`. The old commands are unchanged.
 - Deleted (phase 0): `refactor_tools`, `apply_filter_compress`, `compress_filter`.
@@ -328,12 +333,13 @@ Deliberate behaviour changes:
 
 Left (in order):
 
-1. Replace the remaining private `_indent`/`_directive` copies in acc_sync, acc_to_omp,
-   device/generate and split by `core.source`/`core.fortran`.
-2. Policy tables as TOML specs (split `PLANS`, nutrient `GROUPS`/`HISTORY`, device `GROUPS`,
-   acc_sync `OFF_BY_DEFAULT`); `load_spec` already reads step lists and options.
-3. Port the adapters onto core edits one at a time (device-targeted and split first; compact
-   last), each checked with the golden harness.
+1. (done) The private `_indent`/`_directive` copies are gone; acc_sync's `_directive` only adds its
+   `if_present` policy on top of `core.fortran.directive_list`.
+2. Policy tables as config: done for acc-sync `OFF_BY_DEFAULT` (`off_by_default` option, also in a
+   spec) and nutrient `GROUPS` (`--groups FILE` / `groups` option, TOML role tables). Still code:
+   split `PLANS` (functions), device `GROUPS` (module layout the generator depends on).
+3. Port the adapters onto core edits one at a time, each checked with the golden harness:
+   device-targeted and split done; next device-data, then nutrient, compact last.
 4. Parser column spans (§4), then drop the regex substitutions in compact/nutrient.
 5. `core/testing.py` snippet harness and a `Pipeline` overlay (today `--spec` steps reanalyze
    between steps).

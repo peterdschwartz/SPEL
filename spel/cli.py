@@ -283,10 +283,10 @@ def nutrient_extract(fut, families, args):
     if args.family:
         families = [f for f in families if f.name in args.family]
     if args.action == "groups":
-        from spel.transforms.nutrient.groups import group_edits
+        from spel.transforms.nutrient.groups import group_edits, load_groups
 
         try:
-            edits, skipped = group_edits(families), {}
+            edits, skipped = group_edits(families, load_groups(args.groups) if args.groups else None), {}
         except ExtractError as err:
             raise SystemExit(f"nutrient groups: {err}")
         key = "groups"
@@ -1030,6 +1030,10 @@ def main():
         nargs="*",
         help="procedures: print the statements of these bindings (e.g. init); "
         "merge: the bindings to merge (default: setvalues zerodwt clean)",
+    )
+    nutrient_parser.add_argument(
+        "--groups",
+        help="groups: TOML file (role tables of family -> base names) replacing the built-in GROUPS",
     )
     nutrient_parser.add_argument(
         "--kinds",
