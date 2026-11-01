@@ -200,14 +200,14 @@ end subroutine zero
 """
 
 
-def test_bounds_dummy_read_in_the_loop_is_copied_in():
-    """A kernel that reads the `bounds` dummy needs copyin(bounds): a caller whose bounds variable is
-    not on the device otherwise fails with "data in PRESENT clause was not found: bounds"."""
+def test_bounds_dummy_read_in_the_loop_gets_no_copyin():
+    """A kernel that reads the `bounds` dummy gets no copyin(bounds): a data clause on every loop is a
+    present lookup per launch; the bounds reach the device another way (user decision, 2026-10-31)."""
     sub = StubSub(BOUNDS)
     sub.filepath = None
     (p,) = propose(sub, AccessMapper({sub.id: sub}), source=BOUNDS.splitlines())
-    assert p.kind == "elementwise" and p.copyin == ["bounds"]
-    assert any("copyin(bounds)" in l for l in p.directive_lines())
+    assert p.kind == "elementwise" and p.copyin == []
+    assert not any("copyin(bounds)" in l for l in p.directive_lines())
 
 
 SRC_TWO_INDEX_LOOKUP = """

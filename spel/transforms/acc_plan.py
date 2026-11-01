@@ -79,7 +79,7 @@ class LoopProposal:
     notes: list[Note] = field(default_factory=list)
     unsafe: list[tuple[int, str]] = field(default_factory=list)   # (1-based line, statement)
     private_arrays: list[str] = field(default_factory=list)       # local arrays written and read per iteration
-    copyin: list[str] = field(default_factory=list)               # `bounds`: a dummy the loop reads (copyin of present data is a no-op)
+    copyin: list[str] = field(default_factory=list)               # data clauses the plan adds (none by default)
     no_create: list[str] = field(default_factory=list)            # global instances the device data layer copies only under a
     #   namelist flag the loop's enclosing ifs do not test (c14_grc_cs under `if (use_c14)` inside the loop): the
     #   kernel takes the host address when the copy is absent, and the flag keeps it from dereferencing it
@@ -546,11 +546,9 @@ def _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines) 
             kind, reason = "elementwise", ""
         prop = LoopProposal(sub.name, fname, loop, nest if kind == "elementwise" else [loop], kind, reason,
                             carried, scatter, same_value, private_arrays=private_arrays)
-        # a `bounds` dummy read in the loop (`do p = bounds%begp, bounds%endp`): the caller's variable is on
-        # the device only when someone entered it (elm_drv's bounds_clump is, other callers' locals are not)
-        if "bounds" in {d.name.lower() for d in rec.dummy_args} and any(
-                a.base.lower() == "bounds" and lo <= a.ln <= hi for a in rec.accesses()):
-            prop.copyin = ["bounds"]
+        # no copyin(bounds) on the kernels (removed 2026-10-31, user decision): a data clause on every
+        # loop costs a present lookup per launch; the bounds a kernel reads must reach the device
+        # another way (the plan: per-clump bounds kept on the device as module data)
         if kind == "interchange":  # the two-loop swap, or the reorder
             prop.order, prop.npar = reorder if reorder is not None else ([nest_idx[1], nest_idx[0]], 1)
         if kind == "carried" and loop.children:
