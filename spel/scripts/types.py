@@ -1052,12 +1052,16 @@ class Dependence:
     `trigger_types` gives the Fortran type of each trigger (default logical).
     """
 
-    def __init__(self, cascade_var, trigger, val_pairs: list[Pairs], trigger_types=None):
+    def __init__(self, cascade_var, trigger, val_pairs: list[Pairs], trigger_types=None, trigger_defaults=None):
         self.var: str = cascade_var
         self.triggers: tuple[str, ...] = (trigger,) if isinstance(trigger, str) else tuple(trigger)
         self.trigger: str = self.triggers[0]
         self.trigger_types: tuple[str, ...] = tuple(trigger_types or ("logical",) * len(self.triggers))
         self.pairs = val_pairs
+        # the triggers' values when the namelist does not set them (Fortran literals), for
+        # triggers the analysis records no declared default for (the dynamic_subgrid namelist
+        # variables are locals of its read routine, set by assignments); None: unknown
+        self.trigger_defaults: Optional[tuple[str, ...]] = tuple(trigger_defaults) if trigger_defaults else None
 
     def all_triggers(self) -> tuple[str, ...]:
         # analyses pickled before multi-trigger cascades only have `trigger`

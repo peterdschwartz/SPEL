@@ -42,6 +42,21 @@ NML_CASCADES = {
             Pairs(nml_val=".false.", cascade_val=".false."),
         ],
     ),
+    # dynSubgridControlMod's accessors of the dynamic_subgrid namelist (transient PFT and crop
+    # data from flanduse_timeseries): dynpft_interp/dyncrop_interp and the weight updates run only
+    # with them. The namelist variables are locals of read_namelist, set to .false. before the read.
+    **{
+        f"get_do_transient_{what}": Dependence(
+            cascade_var=f"get_do_transient_{what}",
+            trigger=f"dynsubgridcontrolmod::do_transient_{what}",
+            val_pairs=[
+                Pairs(nml_val=".false.", cascade_val=".false."),
+                Pairs(nml_val=".true.", cascade_val=".true."),
+            ],
+            trigger_defaults=(".false.",),
+        )
+        for what in ("pfts", "crops")
+    },
     # AllocationMod::EvaluateSupplStatus sets these from the nutrient-supplement
     # namelist variables every step; during accelerated spinup (spinup_state == 1)
     # carbon_only is also forced on for the first nyears_ad_carbon_only years, so

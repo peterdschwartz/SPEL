@@ -39,9 +39,13 @@ log = logging.getLogger("spel.transforms.testing")
 class SnippetResolver(DictResolver):
     """Unknown names are module globals; `use`d modules export whatever the routine asks for."""
 
-    def __init__(self, procedures: Iterable[str] = (), globals: Iterable[str] = ()):
+    def __init__(self, procedures: Iterable[str] = (), globals: Iterable[str] = (),
+                 targets: Optional[dict[str, str]] = None):
+        # targets: routine ids of the snippet's own module procedures, so calls between them resolve
+        targets = {k.lower(): v for k, v in (targets or {}).items()}
         syms = {n.lower(): Symbol(n.lower(), SymbolKind.VARIABLE, Origin.GLOBAL) for n in globals}
-        syms.update({n.lower(): Symbol(n.lower(), SymbolKind.PROCEDURE, Origin.GLOBAL) for n in procedures})
+        syms.update({n.lower(): Symbol(n.lower(), SymbolKind.PROCEDURE, Origin.GLOBAL, targets.get(n.lower()))
+                     for n in procedures})
         super().__init__(globals=syms)
 
     def fallback(self, name: str) -> Optional[Symbol]:
@@ -125,7 +129,8 @@ def analyze_snippet(path: Path, procedures: Iterable[str] = (), globals: Iterabl
         for c in tree.contains:
             yield from names(c)
 
-    resolver = SnippetResolver([*procedures, *(x for t, _ in tops for x in names(t))], globals)
+    targets = {t.name.lower(): f"{m}::{t.name.lower()}" for t, m in tops}
+    resolver = SnippetResolver([*procedures, *(x for t, _ in tops for x in names(t))], globals, targets)
     subs: dict[str, SnippetSub] = {}
 
     def add(tree, module: str, host: Optional[SnippetSub]):

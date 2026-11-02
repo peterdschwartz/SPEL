@@ -4,7 +4,13 @@ The transform registry and the `spel transform` command.
     spel transform list
     spel transform explain NAME
     spel transform NAME [options] [--dry-run] [--diff] [--report] [--where TEXT] [--verify] [-o DIR]
+                   [--config PRESET|lnd_in]
     spel transform --spec FILE.toml [--dry-run] [--diff] ...
+
+`--config` (or `config = "..."` at the top of a spec) gives the run configuration: a preset of
+spel/db (presets/<NAME>.cfg) or a case's lnd_in. The transforms then touch only the code that
+runs in it: namelist-gated branches that cannot run, and the routines reached only through
+them, are left alone (core/config.py).
 
 A transform registers itself with `@transform`; the built-in ones are imported on first use
 (`BUILTINS`). Its `Options` dataclass fields become flags (`routines` -> `--routines`, a bool
@@ -44,6 +50,8 @@ BUILTINS = [
     "spel.transforms.collapse_bounds",
     "spel.transforms.blocked_loops",
     "spel.transforms.section_loops",
+    "spel.transforms.loop_fusion",
+    "spel.transforms.filter_map",
     "spel.transforms.defer_checks",
     "spel.transforms.acc_locals",
     "spel.transforms.acc_apply",
@@ -148,6 +156,13 @@ def make_options(t: type[Transform], values: dict):
 # --- specs -----------------------------------------------------------------------------------
 
 
+def spec_config(path: Path) -> Optional[str]:
+    """The `config` of a TOML spec file (a preset name or a namelist file), if any."""
+    import tomllib
+
+    return tomllib.loads(Path(path).read_text()).get("config")
+
+
 def load_spec(path: Path) -> list[tuple[type[Transform], object]]:
     """The (transform, options) steps of a TOML spec file."""
     import tomllib
@@ -177,6 +192,8 @@ def _run_parser(prog: str, t: Optional[type[Transform]]) -> argparse.ArgumentPar
     p.add_argument("--verify", action="store_true", help="re-parse the files written (problems: exit 1)")
     p.add_argument("-o", "--out", type=Path, help="write the files flat into DIR instead of in place")
     p.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
+    p.add_argument("--config", help="run configuration: a preset (spel/db presets/NAME.cfg) or a case's lnd_in; "
+                                    "only the code that runs in it is transformed")
     if t is None:
         p.add_argument("--reanalyze-steps", action="store_true",
                        help="pipeline: write each step in place and reanalyze before the next (no -o)")
@@ -191,6 +208,8 @@ def _steps_from_args(argv: list[str]):
             sys.exit("spel transform: --spec needs a file")
         spec = Path(argv[1])
         args = _run_parser("spel transform --spec FILE", None).parse_args(argv[2:])
+        if args.config is None:
+            args.config = spec_config(spec)
         return args, load_spec(spec)
     t = get(argv[0])
     p = _run_parser(f"spel transform {t.name}", t)
@@ -245,11 +264,13 @@ def main(argv: list[str]) -> int:
     if len(steps) > 1 and not getattr(args, "reanalyze_steps", False):
         from spel.transforms.core.pipeline import Pipeline, PipelineError
 
-        fut = driver.context(srcroot=srcroot, reanalyze=args.reanalyze).fut
+        ctx0 = driver.context(srcroot=srcroot, reanalyze=args.reanalyze, config=args.config)
+        if ctx0.config is not None:
+            print(ctx0.config.describe())
         try:
             res = Pipeline([(t(), opts) for t, opts in steps]).run(
-                fut, srcroot, sink=sink, dry_run=args.dry_run, verify=args.verify, manifest=True,
-                on_step=lambda i, st: show(st.result.plan, st.ctx.sources))
+                ctx0.fut, srcroot, sink=sink, dry_run=args.dry_run, verify=args.verify, manifest=True,
+                on_step=lambda i, st: show(st.result.plan, st.ctx.sources), config=ctx0.config)
         except PipelineError as err:
             print(f"spel transform: {err}\n(nothing written; --reanalyze-steps runs the steps one "
                   "at a time with a reanalysis in between)", file=sys.stderr)
@@ -262,7 +283,10 @@ def main(argv: list[str]) -> int:
     status = 0
     for i, (t, opts) in enumerate(steps):
         # a later step needs the analysis of what the earlier ones wrote
-        ctx = driver.context(srcroot=srcroot, reanalyze=args.reanalyze or (i > 0 and not args.dry_run))
+        ctx = driver.context(srcroot=srcroot, reanalyze=args.reanalyze or (i > 0 and not args.dry_run),
+                             config=args.config)
+        if ctx.config is not None and i == 0:
+            print(ctx.config.describe())
         res = driver.run(t(), ctx, opts, sink=sink, dry_run=args.dry_run, verify=args.verify,
                          manifest=not args.dry_run)
         show(res.plan, ctx.sources)

@@ -73,6 +73,7 @@ class PortPlan:
     notes: list[str] = field(default_factory=list)  # what the plan could not determine
     declares: dict[str, set[str]] = field(default_factory=dict)  # module -> module variables to declare
     private_globals: set[str] = field(default_factory=set)  # module variables a generated module cannot update
+    inactive: int = 0  # loops left alone: in branches the configuration does not run
 
 
 
@@ -433,20 +434,24 @@ def _reorderable(prop) -> bool:
     return all(lp.node.lineno == lp.start_ln for lp in nest)
 
 
-def plan(fut, roots: Iterable[str], exclude: Optional[Callable[[str], bool]] = None) -> PortPlan:
+def plan(fut, roots: Iterable[str], exclude: Optional[Callable[[str], bool]] = None, config=None) -> PortPlan:
     """Compute-loop ports for the call trees of `roots`. `exclude` keeps routines, and
-    whatever is reachable only through them, off the device (see `call_tree`)."""
+    whatever is reachable only through them, off the device (see `call_tree`). `config` (a
+    core.config.Configuration): only the loops that run in it, through the branches that do."""
     from spel.scripts.record_access import AccessMapper
 
     facts = DeviceFacts(fut)
     mapper = AccessMapper(fut.subroutine_dict)
-    tree = call_tree(fut, roots, exclude)
+    tree = config.call_tree(fut, roots, exclude) if config is not None else call_tree(fut, roots, exclude)
     out = PortPlan()
     candidates: list[Port] = []
 
     def visit(sub, props: list[LoopProposal]) -> None:
         for p in props:
             if p.kind == "has-directive":
+                continue
+            if config is not None and not config.span_active(sub, p.loop.start_ln, p.loop.end_ln):
+                out.inactive += 1
                 continue
             if p.kind == "carried" and p.children:
                 out.manual.append(Port(sub.id, p, blockers=["carried (inner loops proposed separately)"]))
@@ -695,7 +700,7 @@ class AccApply(Transform):
     Options = Options
 
     def build(self, ctx, opts):
-        pp = plan(ctx.fut, opts.roots)
+        pp = plan(ctx.fut, opts.roots, config=ctx.config)
         out = edit_plan(ctx, pp)
         out.notes += summary(pp)
         return out
@@ -704,7 +709,8 @@ class AccApply(Transform):
 def summary(pp: PortPlan) -> list[str]:
     from collections import Counter
 
-    out = [f"ported loops: {len(pp.ports)} ({dict(Counter(p.proposal.kind for p in pp.ports))}, "
+    out = [f"inactive in the configuration (left alone): {pp.inactive} loops"] if pp.inactive else []
+    out += [f"ported loops: {len(pp.ports)} ({dict(Counter(p.proposal.kind for p in pp.ports))}, "
            f"{sum(p.interchange for p in pp.ports)} interchanged) in "
            f"{len({p.routine for p in pp.ports})} routines",
            f"routine seq: {len(pp.routine_seq)} routines",

@@ -357,6 +357,10 @@ class AccLocals(Transform):
     Changes: device-only locals get `enter data create/copyin` after the declarations and
              `exit data delete` before every return; locals the host also uses get a `data copy`
              region around each device use; host reads of device-only locals get `update self`.
+             Device-only locals that `data copy` regions move at every kernel (no host use in the
+             parsed source but allocate/deallocate and DEVICE_CONSUMERS calls) get `enter data
+             create` after their allocate and `exit data delete` before their deallocate, and lose
+             the copy regions and updates that name only them.
     """
 
     name = "acc-locals"
@@ -364,7 +368,24 @@ class AccLocals(Transform):
     Options = Options
 
     def build(self, ctx, opts):
-        return fix_plan(ctx, check(ctx.fut, set(opts.routines) or None))
+        routines = set(opts.routines) or None
+        if routines is None and ctx.config is not None:
+            # only the routines the time step runs in the configuration (not PHS under use_hydrstress = .false.)
+            routines = {s.id for s in ctx.routines()}
+        plan = fix_plan(ctx, check(ctx.fut, routines))
+        # device-only work arrays that copy regions move every launch: create once instead
+        for sid, sub in sorted(ctx.fut.subroutine_dict.items()):
+            if routines and sid not in routines and sid.split("::")[-1].lower() not in routines:
+                continue
+            if getattr(sub, "record", None) is None or getattr(sub, "library", False):
+                continue
+            lines = ctx.lines(sub)
+            co = copy_only_locals(sub, lines)
+            if co is None:
+                continue
+            plan.add(Change(ctx.path(sub), copy_only_edits(sub, co, lines), where=sid,
+                            why=f"device-only {', '.join(co.names)}: enter data create once, no copy regions"))
+        return plan
 
 
 def fix_plan(ctx, reports: list[RoutineReport]) -> Plan:
@@ -395,3 +416,145 @@ def apply_fix(fut, reports: list[RoutineReport], dry_run: bool = False) -> list[
     plan = fix_plan(ctx, reports)
     apply_plan(plan, ctx, InPlace(), dry_run=dry_run)
     return plan.notes
+
+
+# --- device-only work arrays held in copy regions ---------------------------------------------
+#
+# A local work array that only device code reads and writes, but that `data copy` regions put on
+# the device around each kernel, moves host -> device -> host at every region (the accumulator
+# updates' rbufslp: 200 MB per step, 2026-11-01). It needs one `enter data create` (after its
+# allocate) and one `exit data delete` (before its deallocate) instead. The analysis cannot
+# decide "device-only" alone: statements using excluded modules (accumulMod) are not in the
+# record. So the routine's real source is parsed and every host statement checked.
+
+# Routines that read/write an array argument only on the device when the device is ready (their
+# data clauses are present_or_*; the SPEL_ACCUM_CHECK debug check compares with the host copy):
+DEVICE_CONSUMERS = {"update_accum_field", "extract_accum_field"}
+
+
+@dataclass
+class CopyOnly:
+    routine: str
+    names: list[str]
+    allocs: dict[str, list[int]]      # name -> lines after which it is allocated (statement ends)
+    deallocs: dict[str, list[int]]    # name -> lines of its deallocate statements
+    regions: list[tuple[int, int, int]]  # (start, start directive end, end data line) to remove
+    updates: list[tuple[int, int]]    # (start, end) of update directives to remove
+
+
+def copy_only_locals(sub, lines: list[str]) -> Optional[CopyOnly]:
+    from spel.scripts.fortran_parser import spel_ast as A
+    from spel.scripts.registrations import iter_statements
+    from spel.transforms.compact.rewrite import iter_expressions
+    from spel.transforms.core.query import routine_tree
+    from spel.transforms.core.source import statement_end
+
+    rec = sub.record
+    if rec is None:
+        return None
+    arrays = {n.lower() for n, d in rec.local_variables.items()
+              if d.dim > 0 and "parameter" not in {a.lower() for a in d.attrs}}
+    directives = find_directives(lines, sub.startline, sub.endline)
+    stack, regions = [], []
+    for d in directives:
+        if d.construct == "data":
+            stack.append(d)
+        elif d.construct == "end data" and stack:
+            regions.append((stack.pop(), d))
+    copy_vars: set[str] = set()
+    for start, _ in regions:
+        copy_vars |= _clause_vars(start, {"copy", "copyin", "copyout", "present_or_copy", "pcopy"})
+    other = set()
+    for d in directives:
+        if d.construct in ("enter data", "declare"):
+            other |= _clause_vars(d, DATA_CLAUSES)
+    cands = (copy_vars & arrays) - other
+    if not cands:
+        return None
+    device = [(lo, hi) for _, lo, hi in _compute_ranges(directives, rec)]
+    try:
+        tree = routine_tree(sub)
+    except BaseException:  # the parser exits on what it cannot read
+        return None
+
+    def refs(node) -> set[str]:
+        return {e.value.lower() for e in iter_expressions(node) if isinstance(e, A.Identifier)}
+
+    allocs: dict[str, list[int]] = {}
+    deallocs: dict[str, list[int]] = {}
+    host_use: set[str] = set()
+    containers = (A.DoLoop, A.DoWhile, A.AssociateConstruct, A.BlockStatement, A.MacroIf,
+                  A.WhereConstruct, A.SelectCaseConstruct)
+    for st, _ in iter_statements(tree.body):
+        ln = st.lineno
+        if any(lo <= ln <= hi for lo, hi in device):
+            continue
+        if isinstance(st, A.IfConstruct):
+            host_use |= refs(st.condition) & cands
+            continue
+        if isinstance(st, containers):
+            continue
+        if isinstance(st, A.AllocateStatement):
+            objs = set()
+            for o in st.objects:
+                base = o.function if isinstance(o, A.FuncExpression) else o
+                if isinstance(base, A.Identifier):
+                    objs.add(base.value.lower())
+            for nm in objs & cands:
+                (deallocs if st.is_deallocate else allocs).setdefault(nm, []).append(
+                    ln if st.is_deallocate else statement_end(lines, ln))
+            host_use |= (refs(st) - objs) & cands  # in a source=/bounds expression
+            continue
+        if isinstance(st, A.SubCallStatement) and str(st.function.function).lower() in DEVICE_CONSUMERS:
+            plain = {a.value.lower() for a in st.function.args if isinstance(a, A.Identifier)}
+            host_use |= (refs(st) - plain) & cands
+            continue
+        host_use |= refs(st) & cands
+    names = sorted(cands - host_use)
+    if not names:
+        return None
+    keep = set(names)
+    drop_regions = [(s.start_ln, s.end_ln, e.start_ln) for s, e in regions
+                    if _clause_vars(s, DATA_CLAUSES) and _clause_vars(s, DATA_CLAUSES) <= keep
+                    and all(c.name in ("copy", "copyin", "copyout", "present_or_copy", "pcopy", "if")
+                            for c in s.clauses)]
+    drop_updates = [(d.start_ln, d.end_ln) for d in directives if d.construct == "update"
+                    and _clause_vars(d, {"self", "host", "device"}) and _clause_vars(d, {"self", "host", "device"}) <= keep]
+    return CopyOnly(sub.id, names, {n: allocs.get(n, []) for n in names},
+                    {n: deallocs.get(n, []) for n in names}, drop_regions, drop_updates)
+
+
+def copy_only_edits(sub, co: CopyOnly, lines: list[str]) -> list[Edit]:
+    from spel.scripts.fortran_parser import spel_ast as A
+    from spel.transforms.core.edits import replace
+    from spel.transforms.core.query import routine_tree
+
+    ins: list[Insertion] = []
+    tree = None
+    for n in co.names:
+        if co.allocs[n]:
+            for ln in co.allocs[n]:
+                ins.append(Insertion(ln + 1, _wrap_directive(_indent(lines[ln]), "enter data create", [n]), order=2))
+        else:
+            tree = tree or routine_tree(sub)
+            first = _above_directives(first_executable(tree, sub.record), find_directives(lines, sub.startline, sub.endline))
+            ins.append(Insertion(first, _wrap_directive(_indent(lines[first]), "enter data create", [n]), order=2))
+        if co.deallocs[n]:
+            for ln in co.deallocs[n]:
+                ins.append(Insertion(ln, _wrap_directive(_indent(lines[ln]), "exit data delete", [n]), order=-1))
+        else:
+            from spel.transforms.core.query import routine_tree as rt
+            from spel.scripts.registrations import iter_statements
+
+            tree = tree or rt(sub)
+            last = tree.contains_ln if getattr(tree, "contains_ln", -1) >= 0 else tree.end_ln
+            ends = [st.lineno for st, _ in iter_statements(tree.body) if isinstance(st, A.ReturnStatement)] + [last]
+            for ln in ends:
+                ins.append(Insertion(ln, _wrap_directive(_indent(lines[ln]), "exit data delete", [n]), order=-1))
+    edits = fix_edits(ins)
+    for s0, s1, e in co.regions:
+        edits.append(replace(s0, [], n=s1 - s0 + 1, expect=lines[s0:s1 + 1], why="copy region of a device-only local"))
+        edits.append(replace(e, [], expect=[lines[e]], why="copy region of a device-only local"))
+    for s0, s1 in co.updates:
+        edits.append(replace(s0, [], n=s1 - s0 + 1, expect=lines[s0:s1 + 1], why="update of a device-only local"))
+    return edits

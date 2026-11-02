@@ -1,4 +1,4 @@
-"""elm_drv's host/device transitions are placed by the driver file's own statements."""
+"""elm_drv's host calls are found on the driver file's own statements; device-data places no transitions."""
 from types import SimpleNamespace
 
 from spel.transforms.device import generate
@@ -22,7 +22,7 @@ end module elm_driver
 """
 
 
-def test_transitions_land_before_their_calls(tmp_path, monkeypatch):
+def test_host_calls_are_reported_on_the_driver_lines(tmp_path, monkeypatch):
     drv = tmp_path / "elm_driver.F90"
     drv.write_text(DRIVER)
     monkeypatch.setattr(generate, "device_routines", lambda fut: {"devwork", "dynsubgrid_driver"})
@@ -31,18 +31,30 @@ def test_transitions_land_before_their_calls(tmp_path, monkeypatch):
     monkeypatch.setattr(generate, "call_kinds", lambda fut: [
         (1, "hostwork", "host"), (1, "devwork", "device"), (1, "hostwork", "host"), (1, "dynsubgrid_driver", "host")])
     fut = SimpleNamespace(subroutine_dict={"elm_driver::elm_drv": SimpleNamespace()})
-    edits, _ = generate._transition_edits(fut, drv)
+    report = generate.host_calls(fut, drv)
     lines = DRIVER.split("\n")
-    for e in sorted(edits, key=lambda e: -e.at_line):
-        lines[e.at_line:e.at_line] = e.lines
-    placed = [(ln, lines[i + 2].strip()) for i, ln in enumerate(lines) if "spel device-data" in ln]
-    assert len(placed) == 5
-    for ln, nxt in placed:
-        name = ln.split("before ")[-1]
-        assert name in nxt.lower(), (ln, nxt)
-    assert "to_device=.true." in placed[1][0]          # devwork
-    assert "to_device=.false." in placed[3][0]         # ndep_interp, by name
-    assert "to_device=.false." in placed[4][0]         # dynSubgrid runs as a host segment
+    got = [(int(r.split(":")[0]), r.split("host routine ")[1].split()[0]) for r in report]
+    assert [b for _, b in got] == ["hostwork", "hostwork", "ndep_interp", "dynsubgrid_driver"]
+    for ln, base in got:
+        assert base in lines[ln - 1].lower(), (ln, base, lines[ln - 1])
+
+
+def test_driver_edits_insert_no_transitions(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    (src / "main").mkdir(parents=True)
+    monkeypatch.setattr(generate, "host_calls", lambda fut, drv: [])
+    edits, _ = generate._driver_edits(SimpleNamespace(), src)
+    text = "\n".join(l for e in edits for l in e.lines)
+    assert "elm_device_update" not in text
+    # the state stays on the device after both copies
+    assert text.count("call elm_device_copyin()") == 2
+    assert text.count("elm_device_fullsync = .false.") == 2
+    # the attach of the device pointers after the copy in initialize2, with their imports
+    assert "call subgrid_ave_device_attach()" in text and "call hist_device_attach()" in text
+    assert "only : hist_device_attach" in text and "only : subgrid_ave_device_attach" in text
+    # reweight_wrapup sends only its clump's filters, not the whole subgrid group
+    assert "subgrid_update" not in text
+    assert text.count("call update_clumpfilter(") == 2 and "bounds%clump_index" in text
 
 
 

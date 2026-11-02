@@ -13,15 +13,18 @@ no-ops without `_OPENACC`:
   placed on the default device at program start, so the run must give each rank one
   visible device, e.g. `srun --gpus-per-task=1`).
 - `elm_device_copyin()`: the one-time deep copy of every type instance of the analysis
-  to the device, called in `elm_drv` on the first time step (after initialization and
-  restart reads), guarded by `elm_device_resident`. Instances with `!$acc declare
+  to the device, called at the end of `initialize2` (after the restart reads; `elm_drv`
+  has a fallback guarded by `elm_device_resident`). Instances with `!$acc declare
   create` get their components copied under the already present object; the others get
   `enter data copyin` of the object first. Pointer components the analysis records as
   aliases (`=>` to another component) are attached instead of copied. After the copy
   every array is checked with `acc_is_present` and the misses are reported.
 - `elm_device_update(to_device)`: `update device`/`update self` of every component of
-  every instance (brute force: the whole state), called at the step boundaries and
-  around the host-side sections of `elm_drv`.
+  every instance (brute force: the whole state). ELM no longer calls it (2026-11-01): after
+  the copy the state stays on the device (`elm_device_fullsync = .false.`, set by the
+  inserted calls), `device-targeted` moves the data the host code of `elm_drv` uses, and a
+  configuration whose host code cannot be synced that way aborts in elm_drv's GPU guard.
+  The unit-test harness still uses it to pull a case's outputs.
 
 Everything is generated from `fut.type_dict` (instances, components, nesting, pointer
 targets) so it follows the sources it is applied to.
@@ -805,13 +808,13 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
     L = _header(MODULE_NAME, [
         "Device data layer for full-model OpenACC runs: device initialization, the",
         "one-time deep copy of every type instance to the device (first time step),",
-        "and the host/device transitions of the driver. The per-type routines are in",
-        "the DeepCopy*Mod group modules.",
+        "and whole-state updates. The per-type routines are in the DeepCopy*Mod group",
+        "modules.",
         "",
-        "Transitions: by default (targeted) elm_device_update only switches where the",
-        "compute constructs run (elm_device_ready) and the driver's acc-sync updates move",
-        "the data its host segments use; SPEL_DEVICE_FULLSYNC=1 in the environment makes",
-        "every transition copy the whole state instead (the reference for A/B runs).",
+        "ELM has no host/device transitions: after elm_device_copyin the caller sets",
+        "elm_device_fullsync = .false., the state stays on the device, and the driver's",
+        "targeted updates (device-targeted) move the data its host code uses. elm_device_update",
+        "(a whole-state transition) is for the unit-test harness.",
     ], srcroot, commit)
     L += ["  use elm_varctl, only : iulog, elm_device_ready"]
     if spmd:
@@ -1169,7 +1172,8 @@ class Target:
 @dataclass
 class Edit:
     path: Path
-    target: Optional[Target]  # the statement to insert before/after (its first match)
+    target: Optional[Target | tuple[Target, ...]]  # the statement to insert before/after (its first
+    #   match; a tuple: the first of the alternatives the file has)
     lines: list[str]
     after: bool = False
     at_line: Optional[int] = None  # insert before this 0-based line instead (a recorded call site)
@@ -1203,6 +1207,18 @@ def _locate(path: Path, target: Target, after: bool) -> int:
         if hit:
             return next_ln if after else st.lineno
     raise DeviceDataError(f"{path.name}: no {target}")
+
+
+def _locate_any(path: Path, target, after: bool) -> tuple[int, Target]:
+    """`_locate` of the first alternative of `target` (a Target or a tuple of them) the file has."""
+    alts = target if isinstance(target, tuple) else (target,)
+    for k, t in enumerate(alts):
+        try:
+            return _locate(path, t, after), t
+        except DeviceDataError:
+            if k == len(alts) - 1:
+                raise
+    raise DeviceDataError(f"{path.name}: no target")
 
 
 # routines that run kernels the analysis does not see: their modules are excluded from it
@@ -1317,78 +1333,63 @@ def device_routines(fut) -> set[str]:
     return device
 
 
-def _transition_edits(fut, drv: Path) -> tuple[list[Edit], list[str]]:
+def host_calls(fut, drv: Path) -> list[str]:
     """
-    Whole-state syncs before every call of elm_drv: `update self` before each host routine,
-    `update device` before each device routine. elm_device_update does nothing when the state
-    already lives there, so only the actual host/device transitions copy, and a transition
-    inside a branch that is not taken cannot leave the next routine with the wrong copy
-    (calls in if blocks: the budgets, nstep > 0). Brute force; the refinement is per-routine
-    variable lists from the access analysis.
+    elm_drv's calls of host routines, matched to the driver file's statements (report only).
+    There are no host/device transitions any more (2026-11-01): the state stays on the device
+    after the copy, `device-targeted` moves the data each host segment uses, and a configuration
+    whose host code cannot be synced that way aborts in elm_drv's GPU guard. The list says
+    where elm_drv still runs host code.
     """
     if fut.subroutine_dict.get("elm_driver::elm_drv") is None:
         raise DeviceDataError("elm_driver::elm_drv not in the analysis")
     from spel.scripts.fortran_parser.module_spec import callee_name, parse_modules, statements_with_next
 
-    # the calls and their lines come from the driver file being edited, not from the analysis:
-    # its line numbers go stale as soon as the driver is edited after `spel analyze`, and
-    # transitions placed by them land before the wrong calls
+    # the calls and their lines come from the driver file being edited (the analysis's lines go
+    # stale as soon as the driver is edited after `spel analyze`); the analysis's calls in source
+    # order give the kinds. Calls into modules the analysis excludes (ndep_interp, hist_*,
+    # restFile_write) are not in it: they keep the kind by name (DEVICE_EXTRA for hist_update_hbuf)
     mod = parse_modules(drv)[0]
     body = next(p for p in mod.subprograms if p.name.lower() == "elm_drv")
     calls = sorted({(st.lineno, name) for st, _ in statements_with_next(body.body, body.end_ln)
                     if (name := callee_name(st)) is not None})
-    # the analysis's calls in source order give the kinds; matched one by one to the file's
-    # calls (the analysis read the driver with its transitions, the file may be stripped)
-    # calls into modules the analysis excludes (ndep_interp, hist_*, restFile_write) are not in
-    # it: they keep the kind by name (DEVICE_EXTRA for hist_update_hbuf)
     kinds = [(b, k) for _, b, k in call_kinds(fut) if b not in NEUTRAL]
     by_name = device_routines(fut)
-    placed: list[tuple[int, str, str]] = []
+    report: list[str] = []
     i = 0
     for ln, base in calls:
         if base in NEUTRAL:
             continue
         if i < len(kinds) and kinds[i][0] == base:
-            placed.append((ln, base, kinds[i][1]))
+            kind = kinds[i][1]
             i += 1
         else:
-            placed.append((ln, base, "device" if base in DEVICE_EXTRA else call_kind(base, by_name)))
+            kind = "device" if base in DEVICE_EXTRA else call_kind(base, by_name)
+        if kind != "device":
+            report.append(f"  {ln + 1}: host routine {base} (device-targeted syncs its data, or the GPU guard aborts)")
     if i != len(kinds):
         raise DeviceDataError(f"elm_drv's calls in the driver file differ from the analysis at {kinds[i][0]}: "
                               "run `spel analyze`")
-    edits: list[Edit] = []
-    report: list[str] = []
-    state = "host"
-    for ln, base, kind in placed:
-        to_device = kind == "device"
-        edits.append(
-            Edit(
-                drv,
-                None,
-                [
-                    "#ifdef _OPENACC",
-                    f"    call elm_device_update(to_device={'.true.' if to_device else '.false.'}, line=__LINE__)  {TAG}: {'host -> device' if to_device else 'device -> host'} before {base}",
-                    "#endif",
-                ],
-                at_line=ln,
-            )
-        )
-        report.append(f"  {ln + 1}: {'update device' if to_device else 'update self  '} before {base}")
-        state = kind
-    return edits, report
+    return report
+
+
+TARGETED_MODE = [
+    "    ! the run has no host/device transitions (configurations that need host code abort in",
+    "    ! elm_drv): the targeted syncs move the data from here on",
+    "    elm_device_fullsync = .false.",
+]
 
 
 def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
     drv = src / "main" / "elm_driver.F90"
     ini = src / "main" / "elm_initializeMod.F90"
-    use_line = f"  use {MODULE_NAME}, only : elm_device_init, elm_device_copyin, elm_device_update, elm_device_resident  {TAG}"
     edits = [
         Edit(ini, Target("use", "shr_kind_mod"),
-             [f"  use {MODULE_NAME}, only : elm_device_init, elm_device_copyin, elm_device_update  {TAG}"]),
+             [f"  use {MODULE_NAME}, only : elm_device_init, elm_device_copyin, elm_device_fullsync  {TAG}"]),
         Edit(ini, Target("call", "t_startf", "initialize1", "elm_init1"),
              ["#ifdef _OPENACC", f"    call elm_device_init()  {TAG}", "#endif"], after=True),
         # the end of initialize2 runs kernels (lnd2atm_minimal's subgrid averages, lnd2glc):
-        # copy the state there, after every restart read, and hand it back to the host after
+        # copy the state there, after every restart read; it stays there
         Edit(
             ini,
             Target("if_calling", "lnd2atm_minimal", "initialize2"),
@@ -1398,30 +1399,32 @@ def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
                 "    ! kernels that compute the initial export state",
                 "    call t_startf('device_copyin')",
                 "    call elm_device_copyin()",
+                *TARGETED_MODE,
                 "    call t_stopf('device_copyin')",
+                "    ! the subgrid view (init_subgrid_ave) and the history fields (hist_htapes_build) reach the",
+                "    ! model arrays through device pointers: attach them now that the arrays are on the device",
+                "    ! (an attach before the copy is skipped by the runtime and the kernels read host memory)",
+                "    call subgrid_ave_device_attach()",
+                "    call hist_device_attach()",
                 "#endif",
             ],
         ),
-        Edit(
-            ini,
-            Target("if_calling", "update_lnd2glc", "initialize2"),
-            [
-                "#ifdef _OPENACC",
-                f"    call elm_device_update(to_device=.false.)  {TAG}: the step starts on the host",
-                "#endif",
-            ],
-            after=True,
-        ),
-        Edit(drv, Target("use", "shr_kind_mod"), [use_line]),
+        Edit(ini, Target("use", "histfilemod", "initialize2"),
+             [f"    use histFileMod           , only : hist_device_attach  {TAG}",
+              f"    use subgridAveMod         , only : subgrid_ave_device_attach  {TAG}"], after=True),
+        Edit(drv, Target("use", "shr_kind_mod"),
+             [f"  use {MODULE_NAME}, only : elm_device_copyin, elm_device_resident, elm_device_fullsync  {TAG}"]),
         Edit(
             drv,
-            Target("call", "get_proc_bounds", "elm_drv"),
+            # upstream elm_drv gets its bounds first; the ported one reads decompMod's bounds_proc
+            (Target("call", "get_proc_bounds", "elm_drv"), Target("call", "get_curr_time_string", "elm_drv")),
             [
                 "#ifdef _OPENACC",
                 f"    {TAG}: the whole state to the device if initialization did not (fallback)",
                 "    if (.not. elm_device_resident) then",
                 "       call t_startf('device_copyin')",
                 "       call elm_device_copyin()",
+                "       elm_device_fullsync = .false.  ! no host/device transitions: the targeted syncs move the data",
                 "       call t_stopf('device_copyin')",
                 "    end if",
                 "#endif",
@@ -1429,8 +1432,8 @@ def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
             after=True,
         ),
     ]
-    # subgrid weights changed (first step, transient runs): the filters and the subgrid data
-    # were rebuilt on the host inside a device section of elm_drv; refresh the device copies
+    # subgrid weights changed (first step, transient runs): reweight_wrapup rebuilt one clump's
+    # filters on the host; refresh that clump's device copies (not the whole subgrid group)
     rew = src / "main" / "reweightMod.F90"
     edits += [
         Edit(
@@ -1439,8 +1442,8 @@ def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
             [
                 "#ifdef _OPENACC",
                 f"    use openacc           , only : acc_is_present  {TAG}",
-                "    use filterMod         , only : filter",
-                "    use DeepCopySubgridMod, only : subgrid_update",
+                "    use filterMod         , only : filter, filter_inactive_and_active",
+                "    use DeepCopySubgridMod, only : update_clumpfilter",
                 "#endif",
             ],
             after=True,
@@ -1450,16 +1453,19 @@ def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
             Target("call", "setfilters", "reweight_wrapup"),
             [
                 "#ifdef _OPENACC",
-                f"    {TAG}: the filters are built on the host; once the state is on the device",
-                "    ! (after elm_device_copyin) send the rebuilt filters and subgrid data there",
-                "    if (acc_is_present(filter)) call subgrid_update(to_device=.true.)",
+                f"    {TAG}: setFilters rebuilt this clump's filters on the host; once the state is on the",
+                "    ! device (after elm_device_copyin) send them there. Nothing else changed here: check_weights",
+                "    ! only reads, and set_active's `active` flags are pushed above.",
+                "    if (acc_is_present(filter)) then",
+                "       call update_clumpfilter(filter(bounds%clump_index), to_device=.true.)",
+                "       call update_clumpfilter(filter_inactive_and_active(bounds%clump_index), to_device=.true.)",
+                "    end if",
                 "#endif",
             ],
             after=True,
         ),
     ]
-    trans, report = _transition_edits(fut, drv)
-    return edits + trans, report
+    return edits, ["elm_drv runs host code at:"] + host_calls(fut, drv)
 
 
 GENERATED = "GENERATED by `spel device-data`"
@@ -1491,8 +1497,8 @@ def driver_edit_sets(fut, src: Path, read=None) -> tuple[dict[Path, EditSet], li
             i = e.at_line
             where = f"line {i + 1}"
         else:
-            i = _locate(e.path, e.target, e.after)
-            where = f"{'after' if e.after else 'before'} {e.target} (line {i + 1})"
+            i, found = _locate_any(e.path, e.target, e.after)
+            where = f"{'after' if e.after else 'before'} {found} (line {i + 1})"
         placed.append((e.path, i, e.lines, where, k))
     # insertions at one line: a later one ends up above (the order of the bottom-up splicing)
     for path, i, new, where, k in sorted(placed, key=lambda t: -t[1]):
@@ -1554,8 +1560,11 @@ class DeviceData(Transform):
     """
     Matches: every type instance of the analysis (`fut.type_dict`), elm_drv's calls.
     Changes: generates ElmDeviceDataMod and the DeepCopy*Mod group modules in data_types/
-             (device init, first-step deep copy, whole-state updates) and inserts their calls
-             into elm_initializeMod, elm_driver (host/device transitions) and reweightMod.
+             (device init, the deep copy, whole-state updates for the unit tests) and inserts
+             their calls into elm_initializeMod (init; the copy at the end of initialize2, after
+             which the state stays on the device), elm_driver (the fallback copy) and
+             reweightMod. No host/device transitions: device-targeted syncs elm_drv's host code;
+             the report lists where it runs.
     Refuses: driver files that already carry the calls, modules in data_types/ of the same
              name that this pass did not generate.
     Design: device/DESIGN.md.

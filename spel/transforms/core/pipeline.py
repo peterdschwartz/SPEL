@@ -312,7 +312,7 @@ class Pipeline:
     def run(self, fut, srcroot: Optional[Path] = None, sink: Optional[Sink] = None, dry_run: bool = False,
             verify: bool = False, manifest: bool = False,
             on_step: Optional[Callable[[int, StepResult], None]] = None,
-            overlay: Optional[Callable] = None) -> PipelineResult:
+            overlay: Optional[Callable] = None, config=None) -> PipelineResult:
         """Plan every step, then (unless `dry_run`) write the net result through `sink` once.
         `overlay(fut, srcroot)` makes the analysis overlay (default AnalysisOverlay; the snippet
         harness passes its own)."""
@@ -331,7 +331,7 @@ class Pipeline:
                 sources.put(p, text)
             vfs = VirtualFS(texts, capture=False)
             with vfs.active():
-                ctx = Context(overlay.fut, srcroot, sources)
+                ctx = Context(overlay.fut, srcroot, sources, config.fresh() if config is not None else None)
                 res = apply_plan(t.build(ctx, opts), ctx, dry_run=True)
             changed = {Path(p): s for p, s in res.outputs.items() if texts.get(Path(p), _disk(p)) != s}
             for p in changed:
@@ -357,7 +357,8 @@ class Pipeline:
                 for (t, opts), step, files in zip(self.steps, out.steps, per_step):
                     mine = [sink.target(p) for p in sorted(files) if p in out.outputs]
                     if mine:
-                        write_manifest(sink, t, opts, step.result.plan, mine, Path(srcroot))
+                        write_manifest(sink, t, opts, step.result.plan, mine, Path(srcroot),
+                                       config.source if config is not None else None)
         return out
 
 

@@ -425,6 +425,12 @@ def infer_condition_expectations(
     if isinstance(expr, Identifier) and expr.value in variables:
         return Expectation(expr.value, str(truth))
 
+    # a logical function of no arguments named like a cascade variable, e.g.
+    # get_do_transient_pfts() for the cascade of the do_transient_pfts namelist variable
+    if (isinstance(expr, FuncExpression) and not expr.args and isinstance(expr.function, Identifier)
+            and expr.function.value in variables):
+        return Expectation(expr.function.value, str(truth))
+
     # logical arrays/components, e.g. lun_pp%ispolygon(l) for the cascade var ispolygon
     if isinstance(expr, FuncExpression):
         expr = expr.function

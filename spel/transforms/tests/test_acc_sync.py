@@ -274,9 +274,24 @@ def test_boundary_segments_and_cond():
 def test_targeted_strip_removes_an_application():
     from spel.transforms.device import targeted
 
-    src = ["  call a()", f"  !$acc update self(p, &", f"  !$acc&   q) if_present if({targeted.COND})",
+    # an application before 2026-11-01: updates guarded by the whole-state fallback flag
+    src = ["  call a()", f"  !$acc update self(p, &", f"  !$acc&   q) if_present if({targeted.LEGACY_COND})",
            f"  call elm_device_pull_all()  {targeted.TAG}", "  !$acc update self(r) if_present", "  call b()"]
     assert targeted.strip(src) == ["  call a()", "  !$acc update self(r) if_present", "  call b()"]
+
+
+def test_targeted_strip_removes_tagged_blocks_only():
+    from spel.transforms.device import targeted
+
+    # the current form: a TAG comment line above each inserted update; the hand-written update
+    # after a tagged call (not a comment) and the second, untagged update stay
+    src = ["  call a()", f"  {targeted.TAG}: device data this host code uses",
+           "  !$acc update self(p, &", "  !$acc&   q) if_present if(elm_device_ready)",
+           "  !$acc update device(h) if_present",
+           f"  {targeted.TAG}", "  !$acc update device(w) if_present",
+           f"  call elm_device_pull_all()  {targeted.TAG}", "  !$acc update self(r) if_present", "  call b()"]
+    assert targeted.strip(src) == ["  call a()", "  !$acc update device(h) if_present",
+                                   "  !$acc update self(r) if_present", "  call b()"]
 
 
 def test_targeted_transform_refuses_an_applied_driver(tmp_path):
@@ -484,3 +499,34 @@ def test_pointer_association_is_not_a_write():
     sub = SimpleNamespace(id="m::s", record=rec, startline=lns[0], endline=lns[-1])
     # the association is not a write: nothing to say about the push through p
     assert stale_updates(sub, lines) == []
+
+
+def test_only_declared_module_scalars_have_a_device_copy(tmp_path):
+    # a module scalar without `!$acc declare` has no device copy: kernels take its host value, so
+    # acc-sync pushes nothing for it (DaylengthMod's host flag first_step, 2026-11-01)
+    from types import SimpleNamespace as NS
+
+    from spel.transforms.acc_sync import _Types
+
+    src = tmp_path / "flagsmod.F90"
+    src.write_text("module flagsmod\n  logical :: host_flag = .true.\n  logical :: dev_flag = .true.\n"
+                   "  !$acc declare create(dev_flag)\nend module flagsmod\n")
+    mod = NS(name="flagsmod", filepath=str(src), global_vars={
+        "host_flag": NS(type="logical", dim=0, declaration="flagsmod"),
+        "dev_flag": NS(type="logical", dim=0, declaration="flagsmod")})
+    types = _Types(NS(type_dict={}, module_dict={"flagsmod": mod}))
+    assert types.declared("dev_flag") and not types.declared("host_flag")
+    assert types.declared("unknown_name")  # not a known module variable: conservative
+
+
+def test_dedupe_drops_an_update_another_one_covers():
+    # an earlier run pushed do_eval_suppstat too (a module scalar with no device copy): the new
+    # plan's narrower push adds nothing next to it (EcosystemDynMod, 2026-11-01)
+    old = ["    !$acc update device(carbon_only, crop_supln, &",
+           "    !$acc&   do_eval_suppstat, nu_com_nfix) if_present"]
+    new = ["    !$acc update device(carbon_only, crop_supln, &",
+           "    !$acc&   nu_com_nfix) if_present"]
+    self_ = ["    !$acc update self(carbon_only) if_present if(elm_device_ready)"]
+    assert acc_sync.dedupe_sync_blocks(new + old + ["    call x()"]) == old + ["    call x()"]
+    # a different form (update self) or other clauses are not covered
+    assert acc_sync.dedupe_sync_blocks(self_ + old) == self_ + old

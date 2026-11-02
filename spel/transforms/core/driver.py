@@ -97,7 +97,8 @@ def run(t: Transform, ctx: Context, opts=None, sink: Optional[Sink] = None, dry_
     opts = opts if opts is not None else t.Options()
     res = apply_plan(t.build(ctx, opts), ctx, sink, dry_run, verify)
     if manifest and res.written:
-        write_manifest(sink or InPlace(), t, opts, res.plan, res.written, ctx.srcroot)
+        write_manifest(sink or InPlace(), t, opts, res.plan, res.written, ctx.srcroot,
+                       ctx.config.source if ctx.config is not None else None)
     return res
 
 
@@ -142,7 +143,8 @@ def _git_commit(root: Path) -> Optional[str]:
         return None
 
 
-def write_manifest(sink: Sink, t: Transform, opts, plan: Plan, written: list[Path], srcroot: Path) -> Path:
+def write_manifest(sink: Sink, t: Transform, opts, plan: Plan, written: list[Path], srcroot: Path,
+                   config: Optional[str] = None) -> Path:
     """Append this run to `.spel-transforms.json` in the sink's root (the srcroot when in place)."""
     root = sink.root or srcroot
     path = Path(root) / MANIFEST
@@ -153,15 +155,21 @@ def write_manifest(sink: Sink, t: Transform, opts, plan: Plan, written: list[Pat
         "source_commit": _git_commit(srcroot),
         "files": sorted(str(p) for p in written),
         "refused": [str(r) for r in plan.refusals],
+        **({"config": config} if config else {}),
     })
     path.write_text(json.dumps({"runs": runs}, indent=1) + "\n")
     return path
 
 
-def context(fut=None, srcroot: Optional[Path] = None, reanalyze: bool = False) -> Context:
-    """A Context on the cached analysis of the srcroot (loaded unless `fut` is given)."""
+def context(fut=None, srcroot: Optional[Path] = None, reanalyze: bool = False, config=None) -> Context:
+    """A Context on the cached analysis of the srcroot (loaded unless `fut` is given). `config`:
+    a run configuration (a preset name or a .cfg/lnd_in path, see core/config.py)."""
     if fut is None:
         from spel.scripts.analysis_cache import load_analysis
 
         fut = load_analysis(reanalyze=reanalyze)
-    return Context(fut, srcroot, Sources())
+    if isinstance(config, (str, Path)):
+        from spel.transforms.core.config import Configuration
+
+        config = Configuration.load(str(config), fut)
+    return Context(fut, srcroot, Sources(), config)

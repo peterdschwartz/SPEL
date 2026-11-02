@@ -150,7 +150,7 @@ def test_spec_pipeline_writes_the_net_result_once(tmp_path, monkeypatch, capsys)
 
     ctx = snippet_context(BEFORE, tmp_path / "src")
     monkeypatch.setattr(config, "E3SM_SRCROOT", str(ctx.srcroot))
-    monkeypatch.setattr(driver, "context", lambda fut=None, srcroot=None, reanalyze=False: ctx)
+    monkeypatch.setattr(driver, "context", lambda fut=None, srcroot=None, reanalyze=False, config=None: ctx)
     monkeypatch.setattr(pipeline, "AnalysisOverlay", SnippetOverlay)
     monkeypatch.setitem(registry.REGISTRY, "test-tag-assignments", TagAssignments)
     spec = tmp_path / "s.toml"

@@ -105,6 +105,25 @@ class _Types:
         self.globals = {n: vs[0] for n, vs in seen.items() if len(vs) == 1}
         self.modules = fut.module_dict
 
+    def declared(self, name: str) -> bool:
+        """Whether the module variable `name` is in an `!$acc declare` of its module (has a device
+        copy); unknown modules count as declared (conservative)."""
+        from spel.transforms.device.generate import _acc_declared_names
+
+        v = self.globals.get(name.lower())
+        mod = str(getattr(v, "declaration", "") or "").lower() if v is not None else ""
+        m = self.modules.get(mod)
+        if m is None:
+            return True
+        cache = self.__dict__.setdefault("_declared", {})
+        if mod not in cache:
+            try:
+                cache[mod] = {n.lower() for n in _acc_declared_names(_path(m))}
+            except Exception:
+                cache[mod] = None
+        names = cache[mod]
+        return True if names is None else name.lower() in names
+
     def expand(self, sub, path: str) -> list[str]:
         """
         The variables `path` names: through a pointer component with recorded targets
@@ -235,7 +254,7 @@ def _data_entries(sub, maps) -> list[tuple[str, str, int, str]]:
 def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
          device_spans: Optional[dict[str, list[tuple[int, int]]]] = None,
          boundary: Optional[dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]]] = None,
-         off_by_default: Optional[Iterable[str]] = None) -> SyncPlan:
+         off_by_default: Optional[Iterable[str]] = None, config=None) -> SyncPlan:
     """
     The host segments of the call tree's routines and what each must sync.
 
@@ -247,6 +266,8 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
     the root's first statement, what is read after and written by device code is pulled
     at its end (elm_drv: the coupler import and export around it).
     off_by_default: the switches whose if constructs count as cold (default OFF_BY_DEFAULT).
+    config: a run configuration (core.config.Configuration): the branches that cannot run in it,
+    and the routines reached only through them, get no syncs (they are not host code of the run).
     """
     from spel.scripts.fortran_parser.module_spec import parse_modules
     from spel.scripts.record_access import AccessMapper
@@ -256,7 +277,8 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
     types = _Types(fut)
     mapper = AccessMapper(fut.subroutine_dict)
     roots = list(roots)
-    tree = {sid: s for sid, s in call_tree(fut, roots).items() if s.record is not None}
+    full = config.call_tree(fut, roots) if config is not None else call_tree(fut, roots)
+    tree = {sid: s for sid, s in full.items() if s.record is not None}
     out = SyncPlan()
     directives = {sid: find_directives(facts.lines(s), s.startline, s.endline) for sid, s in tree.items()}
     out.seq = {sid for sid, ds in directives.items() if any(d.construct == "routine" for d in ds)} | set(extra_seq)
@@ -348,7 +370,7 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
             continue
         rs = RoutineSync(sid, path)
         _segments(rs, s, node, device_lines[sid], _data_entries(s, maps[sid]), facts.lines(s), types, out,
-                  (boundary or {}).get(sid), cold_switches)
+                  (boundary or {}).get(sid), cold_switches, config)
         if rs.segments:
             out.routines.append(rs)
         out.notes += excluded_calls_in(sid, path, node)
@@ -446,7 +468,7 @@ def _header_lines(st) -> list[int]:
 
 
 def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries, lines: list[str],
-              types: _Types, out: SyncPlan, boundary=None, cold_switches=OFF_BY_DEFAULT) -> None:
+              types: _Types, out: SyncPlan, boundary=None, cold_switches=OFF_BY_DEFAULT, config=None) -> None:
     from spel.scripts.fortran_parser import spel_ast as A
     from spel.transforms.core.query import first_executable
 
@@ -495,6 +517,8 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
                 continue  # scalar dummy or local: a host value (firstprivate/private in a kernel)
             if kind == "global" and "%" not in path and key not in out.device_written and "w" not in status:
                 continue  # module variable the host only reads and no device code writes
+            if kind == "global" and "%" not in path and dim == 0 and not types.declared(path):
+                continue  # module scalar with no `!$acc declare`: no device copy (kernels take the host value)
             stale, written = key in out.device_written, "w" in status
             if not (stale or written):
                 continue
@@ -542,6 +566,8 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
 
         if not isinstance(st, A.IfConstruct):
             return False
+        if config is not None and any(st.lineno <= a and b <= hi for a, b in config.dead_branches(sub)):
+            return True  # a branch that cannot run in the configuration: sync the others inside them
         names = {n.lower() for n in expr_names(st.condition)}
         return (any(st.lineno <= ln <= hi for ln in aborts) or any(n.startswith(PREFIX) for n in names)
                 or bool(names & cold_switches)
@@ -567,6 +593,8 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
             if st.lineno < first_exec:
                 continue
             hi = _end_of(st, lines)
+            if config is not None and not config.span_active(sub, st.lineno, hi):
+                continue  # in a branch that cannot run in the configuration
             if not touches_device(st.lineno, hi) and not cold(st, hi):
                 run.append(st)
                 continue
@@ -581,6 +609,9 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
                 if seg.stale:
                     rs.segments.append(seg)
                 for k in kids:
+                    if config is not None and k.statements and not config.span_active(
+                            sub, k.statements[0].lineno, _end_of(k.statements[-1], lines)):
+                        continue  # a branch that cannot run in the configuration
                     block(k.statements)
         flush()
 
@@ -704,7 +735,10 @@ def dedupe_sync_blocks(lines: list[str]) -> list[str]:
     if_present` statements with their `!$acc&` continuations, the text `edits` writes),
     keep each statement once, in order, and the TAG comment once before the first
     `update self`. Repeated runs of the sync (the analysis reads directives as comments,
-    so it plans them again) then leave the source as one run does.
+    so it plans them again) then leave the source as one run does. A statement whose names
+    another statement of the run covers (same `update self`/`device` and clauses, a superset of
+    the names) is dropped too: a later plan that names less (a module scalar without a device
+    copy left out) adds nothing next to the earlier statement.
     """
     out: list[str] = []
     i = 0
@@ -741,18 +775,47 @@ def dedupe_sync_blocks(lines: list[str]) -> list[str]:
         seen: set[str] = set()
         tag = next((b[1] for b in block if b[0] == "tag"), None)
         tagged = False
-        for kind, text in block:
+        parsed = [_update_parts(text) if kind == "upd" else None for kind, text in block]
+        for k, (kind, text) in enumerate(block):
             if kind == "tag":
                 continue
             key = " ".join(t.strip() for t in text)
             if key in seen:
                 continue
+            me = parsed[k]
+            if me is not None and any(
+                    o is not None and o[0] == me[0] and o[2] == me[2] and me[1] < o[1] for o in parsed):
+                continue  # covered by a statement of the run that names more
             seen.add(key)
             if tag is not None and not tagged and text[0].lstrip().lower().startswith("!$acc update self"):
                 out.extend(tag)
                 tagged = True
             out.extend(text)
     return out
+
+
+def _update_parts(text: list[str]) -> Optional[tuple[str, frozenset, str]]:
+    """(head, names, trailing clauses) of an `!$acc update self|device(...) ...` statement as acc-sync
+    writes it (its own output, joined over `!$acc&` continuations); None if it is not one."""
+    from spel.transforms.core.source import matching_paren, split_top_level
+
+    pieces = []
+    for t in text:
+        t = t.strip()
+        t = t[len("!$acc&"):] if t.lower().startswith("!$acc&") else t[len("!$acc"):]
+        pieces.append(t.rstrip().rstrip("&"))  # the continuation mark is not part of the list
+    body = " ".join(pieces).strip()
+    low = body.lower()
+    for head in ("update self", "update device"):
+        if low.startswith(head) and low[len(head):].lstrip().startswith("("):
+            o = body.index("(", len(head))
+            c = matching_paren(body, o)
+            if c < 0:
+                return None
+            names = frozenset(n.strip().lower() for n in split_top_level(body[o + 1:c], ","))
+            tail = " ".join(body[c + 1:].lower().split())
+            return head, names, tail
+    return None
 
 
 def sync_texts(plan_: SyncPlan, texts: dict[Path, list[str]]) -> dict[Path, tuple[list[str], int]]:
@@ -798,6 +861,9 @@ class Options:
                              metadata={"help": "the call trees to synchronize"})
     off_by_default: list[str] = field(default_factory=list, metadata={
         "help": "switches whose if constructs are treated as cold, replacing the built-in list (empty: built-in)"})
+    exclude: list[str] = field(default_factory=lambda: ["elm_driver::elm_drv"], metadata={
+        "help": "routines whose own host code another pass syncs (elm_drv: device-targeted); their callees "
+                "are still synced"})
 
 
 @transform
@@ -815,7 +881,10 @@ class AccSync(Transform):
     Options = Options
 
     def build(self, ctx, opts):
-        return text_plan(ctx, plan(ctx.fut, opts.roots, off_by_default=opts.off_by_default or None))
+        sp = plan(ctx.fut, opts.roots, off_by_default=opts.off_by_default or None, config=ctx.config)
+        skip = {r.lower() for r in opts.exclude}
+        sp.routines = [r for r in sp.routines if r.routine.lower() not in skip]
+        return text_plan(ctx, sp)
 
 
 @dataclass

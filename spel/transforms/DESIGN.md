@@ -359,6 +359,19 @@ Built:
   against the pre-port code on a frozen E3SM commit, master, and master plus the removal of the
   unused nutrient types, except for the fixes below.
 
+- 2026-11-01: `loop-fusion` (`loop_fusion.py`): adjacent sibling nests whose headers agree level by
+  level (`lbound`/`ubound` of arrays with the same recorded allocation bounds count as equal) become
+  one nest when the record shows the same computation (same-element array accesses, per-iteration
+  scalar temporaries, no calls/exits/directives). Pipeline step after `section-loops` (which writes
+  one nest per section assignment, so five initializations became five kernels), before `acc-apply`.
+- 2026-11-01: the device passes follow the run model without host/device transitions:
+  `device-data` inserts no `elm_device_update` calls (the copy at the end of initialize2 and the
+  fallback in elm_drv set `elm_device_fullsync = .false.`; `host_calls` reports where elm_drv runs
+  host code), and `device-targeted` drops the `.not. elm_device_fullsync` guard and the whole-instance
+  `update_<type>` copies around calls into excluded modules (reported instead: their configurations
+  abort in elm_drv's GPU guard). Its update blocks carry a TAG line, which `strip` keys on; the older
+  guarded form is still stripped.
+
 Deliberate behaviour changes:
 
 - compact `rewrite_initialize` finds `elm_initializemod::initialize2` outside the analysis

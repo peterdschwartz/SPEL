@@ -1,9 +1,10 @@
 """
-Targeted host/device transitions for elm_drv.
+Targeted host/device updates for elm_drv.
 
-The whole-state transitions (`elm_device_update` before every elm_drv call that changes
-sides) copy ~13 GB per step on the stride-8 case. Here the transitions only switch
-`elm_device_ready`, and acc-sync moves the data each host segment of elm_drv uses:
+The state lives on the device for the whole run (device-data copies it at the end of
+initialization; there are no host/device transitions and `elm_device_ready` stays on, so
+compute constructs always run on the device). acc-sync moves the data each host segment of
+elm_drv uses:
 
 - `update self` of what a host segment reads or writes that device code writes, before it;
   `update device` of what it writes, after it (acc_sync.plan rooted at elm_drv, with the
@@ -16,15 +17,17 @@ sides) copy ~13 GB per step on the stride-8 case. Here the transitions only swit
   member) through `elm_device_filters_update` around the segments that touch them;
 - the whole state before `restFile_write` (`elm_device_pull_all`): it reads the state
   through the pointers registered by restartvar, which the analysis does not follow;
-- around elm_drv's calls into modules the analysis excludes (ndep_interp, VOCEmission: their
-  calls are removed before the analysis, so what they read and write is unknown): every
-  derived-type instance they are passed is pulled whole before and pushed whole after
-  (`update_<type>` of the device data layer).
+- elm_drv's calls into modules the analysis excludes (ndep_interp, VOCEmission: their calls
+  are removed before the analysis, so what they read and write is unknown) get no copies:
+  they are reported, and a configuration that runs one aborts in elm_drv's GPU guard (or the
+  module gets ported). Before 2026-11-01 every derived-type instance they were passed was
+  pulled whole before and pushed whole after.
   History needs nothing extra: hist_htapes_wrapup writes the hbuf (pulled in
   hist_compute_update_host) and ldomain/level constants the device never writes.
 
-Every inserted update carries `if(.not. elm_device_fullsync)`: with SPEL_DEVICE_FULLSYNC=1
-the whole-state transitions run instead, so both modes are in one build for A/B runs.
+Every inserted update block has a TAG comment line above it, so `strip` finds exactly what an
+earlier application inserted (it also removes the older form, whose updates carried
+`if(.not. elm_device_fullsync)`). Pulls (`update self`) carry acc-sync's `if(elm_device_ready)`.
 Everything placed by the analysis's lines: the driver must be the file `spel analyze` read
 (`strip` removes an earlier application first; `apply` refuses a mismatch).
 """
@@ -43,14 +46,16 @@ from spel.transforms.core.transform import Change, Plan as TPlan, Refusal, Trans
 from spel.transforms.device.generate import MODULE_NAME, DeviceDataError, call_kinds
 
 TAG = "! spel targeted"
-COND = ".not. elm_device_fullsync"
+# the guard of the updates of applications before 2026-11-01 (whole-state transitions as a
+# fallback); `strip` still removes them
+LEGACY_COND = ".not. elm_device_fullsync"
 DRV = "elm_driver::elm_drv"
 # the coupler routine that calls elm_drv, and the modules of the code it runs around it
 RUN_ROUTINE = ("lnd_comp_mct", "lnd_run_mct")
 CPL_MODULES = ("lnd_import_export", "lnd_downscale_atm_forcing", "lnd_disagg_forc", "lnd_comp_mct")
 FILTER_INSTANCES = ("filter", "filter_inactive_and_active")
 PULL_ALL_BEFORE = {"restfile_write"}
-USE_NAMES = ("elm_device_fullsync", "elm_device_pull_all", "elm_device_filters_update")
+USE_NAMES = ("elm_device_pull_all", "elm_device_filters_update")
 
 
 @dataclass
@@ -202,23 +207,13 @@ def excluded_calls(fut, drv: Path) -> list[tuple[int, int, list[tuple[str, str]]
     return out
 
 
-def _update_routines(srcroot: Path) -> dict[str, str]:
-    """update_<type> -> the DeepCopy*Mod that has it (the generated device data layer)."""
-    out = {}
-    for f in sorted((srcroot / "components" / "elm" / "src" / "data_types").glob("DeepCopy*Mod.F90")):
-        for line in f.read_text(errors="replace").split("\n"):
-            t = line.strip().lower()
-            if t.startswith("subroutine update_") and t.endswith("(this, to_device)"):
-                out[t.split()[1].split("(")[0]] = f.stem
-    return out
-
-
-def plan(fut, drv: Path) -> Targeted:
+def plan(fut, drv: Path, config=None) -> Targeted:
     from spel.transforms import acc_sync
 
     lines = drv.read_text().split("\n")
     before, after, notes = step_boundary(fut)
-    sp = acc_sync.plan(fut, [DRV], device_spans={DRV: device_spans(fut, lines)}, boundary={DRV: (before, after)})
+    sp = acc_sync.plan(fut, [DRV], device_spans={DRV: device_spans(fut, lines)}, boundary={DRV: (before, after)},
+                       config=config)
     sp.routines = [r for r in sp.routines if r.routine == DRV]
     t = Targeted(sp, before, after, notes)
     for rs in sp.routines:
@@ -237,21 +232,26 @@ def plan(fut, drv: Path) -> Targeted:
 
 
 def strip(lines: list[str]) -> list[str]:
-    """Remove an earlier application (TAG lines and the COND updates with their continuations)."""
+    """Remove an earlier application: TAG lines, the update statement (with its continuations)
+    right below a TAG line, and the older applications' updates guarded by LEGACY_COND."""
     out: list[str] = []
     i = 0
+    after_tag = False  # the previous line was a TAG comment line (it heads one update statement)
     while i < len(lines):
         s = lines[i].lstrip().lower()
         if TAG in lines[i]:
+            after_tag = s.startswith("!") and not s.startswith("!$")
             i += 1
             continue
         if s.startswith("!$acc update"):
             j = i
             while lines[j].rstrip().endswith("&") and j + 1 < len(lines) and lines[j + 1].lstrip().startswith("!$acc&"):
                 j += 1
-            if f"if({COND})" in lines[j]:
+            if after_tag or f"if({LEGACY_COND})" in lines[j]:
+                after_tag = False
                 i = j + 1
                 continue
+        after_tag = False
         out.append(lines[i])
         i += 1
     return out
@@ -261,17 +261,20 @@ def driver_path(srcroot: Path) -> Path:
     return Path(srcroot) / "components" / "elm" / "src" / "main" / "elm_driver.F90"
 
 
-def edit_set(fut, srcroot: Path, lines: list[str]) -> tuple[Targeted, EditSet]:
+def edit_set(fut, srcroot: Path, lines: list[str], config=None) -> tuple[Targeted, EditSet]:
     """The plan and the insertions into the driver `lines`, which must be the analyzed file on
     disk without an earlier application (`check_lines`)."""
     from spel.transforms import acc_sync
 
     drv = driver_path(srcroot)
     check_lines(fut, drv)
-    t = plan(fut, drv)
-    ins = acc_sync.edits(t.plan, {drv: lines}, cond=COND).get(drv, [])
-    # acc-sync's own lines (its comment, use statements for callees' globals) carry its TAG
+    t = plan(fut, drv, config)
+    ins = acc_sync.edits(t.plan, {drv: lines}).get(drv, [])
+    # acc-sync's own lines (its comment, use statements for callees' globals) carry its TAG;
+    # every update block gets a TAG line above it (what `strip` keys on)
     ins = [(ln, order, [x.replace(acc_sync.TAG, TAG) for x in new]) for ln, order, new in ins]
+    ins = [(ln, order, ([f"{indent(new[0])}{TAG}"] + new) if new and new[0].lstrip().lower().startswith("!$acc update")
+            else new) for ln, order, new in ins]
     from spel.transforms.acc_directives import find_directives
     from spel.transforms.core.query import above_directives as _above_directives
 
@@ -295,25 +298,18 @@ def edit_set(fut, srcroot: Path, lines: list[str]) -> tuple[Targeted, EditSet]:
     for ln in pulls:
         ind = indent(lines[ln])
         ins.append((ln, 5, [f"{ind}call elm_device_pull_all()  {TAG}: restart writes read the whole state"]))
-    # calls the analysis cannot see into: their derived-type arguments whole, pulled before and pushed after
-    upd = _update_routines(srcroot)
-    needed: dict[str, set[str]] = {}
+    # calls the analysis cannot see into get no copies: host-only code, so their configurations
+    # must abort in elm_drv's GPU guard (or the modules get ported)
+    sub = fut.subroutine_dict[DRV]
     for first, last, insts in excluded_calls(fut, drv):
-        ind = indent(lines[first])
-        for inst, typ in insts:
-            r = f"update_{typ}"
-            if r not in upd:
-                t.report.append(f"excluded call at line {first + 1}: no {r} for {inst} (left unsynced)")
-                continue
-            needed.setdefault(upd[r], set()).add(r)
-            ins.append((first, 6, [f"{ind}if (.not. elm_device_fullsync) call {r}({inst}, .false.)  {TAG}: called code the analysis excludes"]))
-            ins.append((last + 1, -3, [f"{ind}if (.not. elm_device_fullsync) call {r}({inst}, .true.)  {TAG}"]))
-        t.report.append(f"excluded call at line {first + 1}: {', '.join(i for i, _ in insts) or 'no instances'}")
+        if config is not None and not config.span_active(sub, first, last):
+            continue  # in a branch that cannot run in the configuration
+        t.report.append(f"excluded call at line {first + 1}: host-only code, not synced "
+                        f"(instances {', '.join(i for i, _ in insts) or 'none'}): the GPU guard must abort its configuration")
     use_ln = next((i for i, x in enumerate(lines) if x.lstrip().lower().startswith(f"use {MODULE_NAME.lower()}")), None)
     if use_ln is None:
         raise DeviceDataError(f"{drv.name}: no `use {MODULE_NAME}`")
-    ins.append((use_ln + 1, 0, [f"  use {MODULE_NAME}, only : {', '.join(USE_NAMES)}  {TAG}"]
-                               + [f"  use {m}, only : {', '.join(sorted(rs))}  {TAG}" for m, rs in sorted(needed.items())]))
+    ins.append((use_ln + 1, 0, [f"  use {MODULE_NAME}, only : {', '.join(USE_NAMES)}  {TAG}"]))
     return t, EditSet(drv).extend(stacked((ln, new, order) for ln, order, new in ins))
 
 
@@ -343,14 +339,15 @@ class DeviceTargeted(Transform):
     """
     Matches: elm_drv's host segments (acc-sync rooted at elm_drv), the clump filters, the
              restart write, calls into modules the analysis excludes.
-    Changes: elm_drv's host/device transitions only switch `elm_device_ready`; acc-sync updates
-             move the data each host segment uses, guarded by `.not. elm_device_fullsync`.
+    Changes: acc-sync updates move the data each host segment of elm_drv uses (the state stays
+             on the device: no transitions); calls into excluded modules are reported, not
+             synced (their configurations must abort in elm_drv's GPU guard).
     Refuses: a driver that carries an earlier application (`targeted.strip` it and re-analyze).
     Design: device/targeted.py.
     """
 
     name = "device-targeted"
-    summary = "targeted host/device updates in elm_drv instead of whole-state transitions"
+    summary = "targeted host/device updates for the host code of elm_drv (no transitions)"
     Options = Options
 
     def build(self, ctx, opts) -> TPlan:
@@ -360,7 +357,7 @@ class DeviceTargeted(Transform):
         if strip(lines) != lines:
             return out.add(Refusal(drv.name, "carries an earlier application: strip it, then `spel analyze` again"))
         try:
-            t, es = edit_set(ctx.fut, ctx.srcroot, lines)
+            t, es = edit_set(ctx.fut, ctx.srcroot, lines, ctx.config)
         except DeviceDataError as err:
             return out.add(Refusal(drv.name, str(err)))
         out.notes += t.report + [f"{drv.name}: {len(es)} insertions"]

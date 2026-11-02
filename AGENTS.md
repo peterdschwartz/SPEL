@@ -325,6 +325,12 @@ feature that needs to know what a statement *is* or which names it uses must get
   history|restart`) are removed and only print their replacement (`cli.py::REMOVED`); don't add new
   rewrite commands outside the registry. `spel compact inventory`, `spel nutrient common|procedures`
   and `spel accplan` are reports and stay commands.
+- Filter-to-filter maps: `core/filter_maps.py` knows clumpfilter's `soilc_soilp_beg/end` (the soil patches
+  of soil column fc are `soilp(beg(fc):end(fc))`), which filter instance holds which patches, and finds the
+  loops over a filtered column's patches (`pfti(c)..pftf(c)`, `pfti(c)+pi-1`) with an exactness verdict
+  (`ctx.child_loops` in a transform). `spel transform filter-map` rewrites the exact ones and threads the map
+  (and `filter_soilp` where missing) through the analyzed callers as keyword actuals; callers outside the
+  analysis (elm_interface_funcsMod) need the same by hand.
 - The driver keeps each file's line endings (CRLF stays CRLF: `driver.newline_of`); transforms see
   `\n`-split lines.
 - A refused transform writes nothing and still exits 0 (exit 1 only on `--verify` problems, 2 on a

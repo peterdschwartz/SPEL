@@ -283,7 +283,13 @@ class Lexer:
                 tok = new_token(tokens.TokenTypes.ARRAY_RBRACKET, self.ch)
             case _:
                 cur_ch = self.ch
-                if cur_ch.isalpha() or cur_ch == "_":
+                if cur_ch in "bBoOzZ" and self.peek_char() in ("'", '"'):
+                    # a BOZ literal constant (z'7ff4000000000000'): one INT token, text as written
+                    self.read_char()
+                    delim = self.ch
+                    digits: str = self.read_to_delim(delim)
+                    tok = new_token(tokens.TokenTypes.INT, f"{cur_ch}{delim}{digits}{delim}")
+                elif cur_ch.isalpha() or cur_ch == "_":
                     lit: str = self.read_identifier()
                     tok_type = tokens.lookup_identifer(lit)
                     tok = new_token(tok_type, lit)

@@ -476,6 +476,8 @@ class SectionLoops(Transform):
 
             stmts, notes = find_section_statements(sub, lines, device, rank)
             plan.notes += notes
+            # in a branch that cannot run in the configuration: left alone
+            stmts = [s for s in stmts if ctx.active(sub, s.ln, s.end_ln)]
             if stmts:
                 edits, k = section_edits(sub, lines, stmts, ctx.facts.tree(sub), plan.notes)
                 why = f"{k} section assignments -> loops (" + ", ".join(str(s.ln + 1) for s in stmts) + ")"

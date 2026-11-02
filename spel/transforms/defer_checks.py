@@ -358,13 +358,15 @@ def plan_routine(sub, lines: list[str], tree, rec, start_k: int = 1) -> Plan:
     return out
 
 
-def plan(fut, roots: Iterable[str]) -> Plan:
+def plan(fut, roots: Iterable[str], config=None) -> Plan:
+    """The deferrals in the call trees of `roots` (`config`: only through the branches that run)."""
     from spel.transforms.acc_apply import DeviceFacts as _Facts
     from spel.transforms.core.query import call_tree
 
     facts = _Facts(fut)
     out = Plan()
-    for sid, sub in sorted(call_tree(fut, roots).items()):
+    tree = config.call_tree(fut, roots) if config is not None else call_tree(fut, roots)
+    for sid, sub in sorted(tree.items()):
         if sub.record is None:
             continue
         try:
@@ -425,7 +427,7 @@ class DeferChecks(Transform):
     Options = Options
 
     def build(self, ctx, opts):
-        return edit_plan(ctx, plan(ctx.fut, opts.roots))
+        return edit_plan(ctx, plan(ctx.fut, opts.roots, ctx.config))
 
 
 def edit_plan(ctx, found: Plan) -> TPlan:

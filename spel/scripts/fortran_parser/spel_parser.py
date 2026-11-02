@@ -330,6 +330,12 @@ class Parser:
 
     def parseIntegerLiteral(self) -> Expression:
         lit = self.cur_token.literal
+        if lit[:1].lower() in ("b", "o", "z") and lit[1:2] in ("'", '"'):
+            # a BOZ literal constant: its value, printed back as written
+            val = int(lit[2:-1], {"b": 2, "o": 8, "z": 16}[lit[0].lower()])
+            node = IntegerLiteral(tok=self.cur_token, val=val, prec="")
+            node.boz = lit
+            return node
         if "_" in lit:
             val, prec = lit.split("_")
             val = int(val)

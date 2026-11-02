@@ -199,9 +199,11 @@ class IntegerLiteral(Expression):
         self.token: Token = tok
         self.value: int = val
         self.precision: str = prec
+        self.boz: Optional[str] = None  # a BOZ literal constant as written (z'7ff4...'), else None
 
     def token_literal(self) -> str:
-        return str(self.value)
+        boz = getattr(self, "boz", None)  # absent on nodes built without __init__ (copies, older pickles)
+        return boz if boz is not None else str(self.value)
 
     def expression_node(self) -> None:
         pass

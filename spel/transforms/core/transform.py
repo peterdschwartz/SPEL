@@ -153,7 +153,7 @@ def _new_file_diff(path, old: list[str], text: str) -> str:
 class Context:
     """What a transform reads: the analysis, the sources (read once), the srcroot."""
 
-    def __init__(self, fut, srcroot: Optional[Path] = None, sources: Optional[Sources] = None):
+    def __init__(self, fut, srcroot: Optional[Path] = None, sources: Optional[Sources] = None, config=None):
         self.fut = fut
         if srcroot is None:
             from spel.scripts.config import E3SM_SRCROOT
@@ -161,6 +161,8 @@ class Context:
             srcroot = Path(E3SM_SRCROOT)
         self.srcroot = Path(srcroot)
         self.sources = sources or Sources()
+        # a run configuration (core/config.py): only the code active in it is transformed
+        self.config = config
 
     def path(self, sub) -> Path:
         """Absolute source file of a routine."""
@@ -177,16 +179,48 @@ class Context:
         return routine(self.fut, rid)
 
     def routines(self, ids: Optional[Iterable[str]] = None, analyzed: bool = True) -> list:
-        """The routines `ids` (default: all analyzed ones), sorted by id."""
+        """The routines `ids` (default: all analyzed ones), sorted by id. With a configuration,
+        the default is the routines the time step runs in it (`ACTIVE_ROOTS`' active tree)."""
         subs = self.fut.subroutine_dict
-        keys = sorted(set(ids)) if ids is not None else sorted(subs)
+        if ids is None and self.config is not None:
+            keys = sorted(self.config.call_tree(self.fut, ACTIVE_ROOTS))
+        else:
+            keys = sorted(set(ids)) if ids is not None else sorted(subs)
         return [subs[k] for k in keys if k in subs and (not analyzed or subs[k].record is not None)]
 
-    def call_tree(self, roots: Iterable[str]) -> dict:
-        """id -> Subroutine of the routines reachable from `roots` (the roots included)."""
+    def call_tree(self, roots: Iterable[str], exclude=None) -> dict:
+        """id -> Subroutine of the routines reachable from `roots` (the roots included); with a
+        configuration, only through the branches that run in it."""
+        if self.config is not None:
+            return self.config.call_tree(self.fut, roots, exclude)
         from spel.transforms.core.query import call_tree
 
-        return call_tree(self.fut, roots)
+        return call_tree(self.fut, roots, exclude)
+
+    def active(self, sub, lo: int, hi: Optional[int] = None) -> bool:
+        """Whether lines lo..hi of `sub` can run (always, without a configuration)."""
+        if self.config is None:
+            return True
+        return self.config.span_active(sub, lo, lo if hi is None else hi)
+
+    @cached_property
+    def child_loops(self) -> dict[str, list]:
+        """
+        id -> the routine's loops over the patches of a filtered column (`do p = pfti(c), pftf(c)`,
+        `p = pfti(c) + pi - 1`), each with the filter map that replaces it and whether that is exact
+        (core/filter_maps.py); with a configuration, only the loops that run in it.
+        """
+        from spel.transforms.core import filter_maps
+
+        routines = None
+        if self.config is not None:
+            routines = set(self.config.call_tree(self.fut, (filter_maps.DRIVER_ID,)))
+        out: dict[str, list] = {}
+        for cl in filter_maps.scan(self.fut, routines=routines):
+            sub = self.fut.subroutine_dict[cl.sub_id]
+            if self.active(sub, cl.loop.start_ln, cl.loop.end_ln):
+                out.setdefault(cl.sub_id, []).append(cl)
+        return out
 
     @cached_property
     def facts(self):
@@ -194,6 +228,11 @@ class Context:
         from spel.transforms.acc_apply import DeviceFacts
 
         return DeviceFacts(self.fut)
+
+
+# what a time step runs: elm_drv's tree and the lnd2atm averaging lnd_run_mct calls after it
+# (the device roots of device/generate.py)
+ACTIVE_ROOTS = ("elm_driver::elm_drv", "lnd2atmmod::lnd2atm", "lnd2atmmod::lnd2atm_minimal")
 
 
 @dataclass
