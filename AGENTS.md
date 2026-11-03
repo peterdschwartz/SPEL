@@ -334,6 +334,25 @@ feature that needs to know what a statement *is* or which names it uses must get
   (`ctx.child_loops` in a transform). `spel transform filter-map` rewrites the exact ones and threads the map
   (and `filter_soilp` where missing) through the analyzed callers as keyword actuals; callers outside the
   analysis (elm_interface_funcsMod) need the same by hand.
+- Transforms that replace hand edits of the GPU branch (2026-11-03; all bit-for-bit on the RD/ECA/FATES
+  regression, `$SCRATCH/prsplit/v2/tools/regress.sh`): `scalarize-locals` (local_forms' per-iteration
+  arrays -> scalars), `filter-locals` (clump-sized work arrays stored on their filter, across calls as
+  groups: filter_locals_ip.py), `drop-dummies` (unused `bounds` dummies and their actuals),
+  `acc-routines` (`!$acc routine seq` exactly on the routines kernels reach), `acc-declares`
+  (`acc declare create` for module data device code uses; scalars in kernels are firstprivate),
+  `acc-strip` (remove directives; `--sync-only` = acc-sync's updates). Dropping clump sections of
+  type components (`x(bounds%begc:bounds%endc)` -> `x`) is NOT safe: components span the process
+  bounds, a clump is a slice of them.
+- `spel gates [--config PRESET|lnd_in] [--allow TEXT...]`: collapse-bounds, acc-declares and
+  acc-routines have nothing left to do, acc-sync's syncs are all present (config-aware), no stale
+  pushes; exit 1 on a failure. Replaces spelval/tools sync_drift/stale_updates/collapse_inquiry_scan/
+  missing_declares and scope.py.
+- The record can miss uses the file has: the analysis walks copies whose namelist-inactive
+  branches are commented out (`!#py`, e.g. DUSTMod's `dust_emis_scheme == 1` block), and I/O
+  statements are blanked. A transform that changes every use of a name (filter-locals) must check
+  the span-parsed original routine (`parse_routine(..., keep_spans=True, skip_io=True, cpp=True)`)
+  and refuse when it holds uses the plan did not cover; an uncovered use segfaulted all three
+  regression runs on 2026-11-03.
 - The driver keeps each file's line endings (CRLF stays CRLF: `driver.newline_of`); transforms see
   `\n`-split lines.
 - A refused transform writes nothing and still exits 0 (exit 1 only on `--verify` problems, 2 on a

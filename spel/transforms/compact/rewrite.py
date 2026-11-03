@@ -74,6 +74,7 @@ from spel.scripts.fortran_parser.spel_ast import (
     FieldAccessExpression,
     FuncExpression,
     Identifier,
+    IfConstruct,
     InfixExpression,
     KeywordArgument,
     PointerAssignment,
@@ -147,6 +148,11 @@ def iter_expressions(node, root: bool = True) -> Iterator[Expression]:
         return
     if not hasattr(node, "__dict__"):
         return
+    if root and isinstance(node, IfConstruct):
+        # the `else if (...)` conditions belong to the construct's own lines (ElseIf is a
+        # Statement, so the generic walk below would skip them)
+        for elif_ in node.else_ifs:
+            yield from iter_expressions(elif_.condition, False)
     for key, value in vars(node).items():
         if key in ("token", "parent", "span", "args_close") or isinstance(value, (str, int, float, bool, Enum, type(None))):
             continue

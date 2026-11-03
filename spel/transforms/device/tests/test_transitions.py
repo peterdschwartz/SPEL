@@ -84,9 +84,13 @@ def test_device_data_transform_keeps_the_legacy_order_at_one_line(tmp_path, monk
     assert out[drv.parent.parent / "data_types" / "ElmDeviceDataMod.F90"] == "module x\nend module\n"
 
 
-def test_device_data_transform_refuses_an_applied_driver(tmp_path, monkeypatch):
-    plan, _, _ = _build(tmp_path, monkeypatch, f"a\n  call x()  {generate.TAG}\nc")
-    assert not plan.changes and "already carries" in plan.refusals[0].reason
+def test_device_data_transform_regenerates_modules_on_a_wired_driver(tmp_path, monkeypatch):
+    # a driver that already carries the calls is left alone; the modules are still regenerated
+    # (a partial copy of regenerated modules once left a stale DeepCopySubgridMod on the branch)
+    plan, ctx, drv = _build(tmp_path, monkeypatch, f"a\n  call x()  {generate.TAG}\nc")
+    assert not plan.refusals and not plan.changes
+    assert any(p.name == "ElmDeviceDataMod.F90" for p in plan.new_files)
+    assert any("already carries" in n for n in plan.notes)
 
 
 def test_device_data_transform_refuses_to_overwrite_a_hand_written_module(tmp_path, monkeypatch):

@@ -132,6 +132,24 @@ def accplan(args):
         print()
 
 
+def gates(args):
+    from spel.transforms import gates as G
+    from spel.transforms.core.driver import context
+
+    ctx = context(reanalyze=args.reanalyze, config=args.config)
+    results = G.run(ctx, roots=args.roots, only=args.only)
+    for r in results:
+        waived = [f for f in r.findings if any(a in f for a in args.allow or [])]
+        r.findings = [f for f in r.findings if f not in waived]
+        print(r)
+        for f in waived:
+            print(f"    waived (--allow): {f}")
+    bad = [r.gate for r in results if not r.ok]
+    print(f"gates: {len(results) - len(bad)} of {len(results)} pass" + (f"; failed: {', '.join(bad)}" if bad else ""))
+    if bad:
+        raise SystemExit(1)
+
+
 def analyze(args):
     from spel.scripts.analysis_cache import build_analysis
 
@@ -592,6 +610,21 @@ def main():
                                 help="judge the loops that already carry a directive: gang loops over a level with the "
                                      "filter loop inside, column arrays written from a patch filter (report only)")
     accplan_parser.set_defaults(func=accplan)
+
+    gates_parser = subparsers.add_parser(
+        "gates",
+        help="checks a GPU-ported tree must pass before building: collapse-bounds, acc-declares, acc-routines "
+             "have nothing left to do, acc-sync's syncs are all in place, no stale pushes (exit 1 on a failure)",
+    )
+    gates_parser.add_argument("--roots", nargs="*", default=["elm_driver::elm_drv"], help="call-tree roots")
+    gates_parser.add_argument("--only", nargs="*", help="run only these gates (collapse-bounds acc-declares "
+                              "acc-routines sync-drift stale-updates)")
+    gates_parser.add_argument("--config", help="run configuration: a preset (spel/db presets/NAME.cfg) or a case's "
+                              "lnd_in; only the code that runs in it is checked")
+    gates_parser.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
+    gates_parser.add_argument("--allow", nargs="*", help="accepted findings: a finding containing one of these texts "
+                              "is listed as waived and does not fail (e.g. 'ch4mod::ch4_prod: line')")
+    gates_parser.set_defaults(func=gates)
 
     compact_parser = subparsers.add_parser(
         "compact",

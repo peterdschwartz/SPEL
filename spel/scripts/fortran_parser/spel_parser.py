@@ -1471,12 +1471,14 @@ class Parser:
         name = self.cur_token.literal
 
         args: list[str] = []
+        arg_spans: list = []
         if self.peekTokenIs(Tok.LPAREN):
             self.next_token()
             for arg in self.parse_args():
                 if not isinstance(arg, Identifier):
                     self.fatal(f"Invalid dummy argument '{arg}' in {name}")
                 args.append(arg.value)
+                arg_spans.append(getattr(arg, "span", None))
             args_close = self.cur_token.span  # the ')' closing the dummy arguments
         else:
             args_close = None
@@ -1535,6 +1537,7 @@ class Parser:
         stmt.contains_ln = contains_ln
         if self.keep_spans:
             stmt.args_close = args_close
+            stmt.arg_spans = arg_spans  # the dummy names in the header (removing an argument)
         return stmt
 
     @Trace.trace_decorator("parse_entity_list")
@@ -1578,7 +1581,11 @@ class Parser:
             name = expr.left_expr.get_name()
             init = expr.right_expr
 
-        return EntityDecl(tok=Token(Tok.IDENT, name), bounds=bounds, init=init)
+        ent = EntityDecl(tok=Token(Tok.IDENT, name), bounds=bounds, init=init)
+        if self.keep_spans:
+            # the declarator `x(a:b)` without its initializer (in-line edits of the declaration)
+            ent.span = getattr(expr.left_expr if isinstance(expr, InfixExpression) else expr, "span", None)
+        return ent
 
     def parse_attr_spec(self) -> AttributeSpec:
         """
