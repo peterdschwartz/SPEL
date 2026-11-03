@@ -97,6 +97,7 @@ contains
       use decompMod, only: bounds_type, clumps, procinfo, get_clump_bounds
       use decompMod, only: clump_pproc
       use filterMod, only: filter, filter_inactive_and_active
+      !#INIT_CLUMPS_USE
       type(bounds_type), intent(in) :: bounds_proc
       type(bounds_type), intent(in) :: bounds_set   ! one set (before duplication)
       integer, intent(in) :: nsets, nclumps
@@ -166,6 +167,8 @@ contains
       end do
       if (clumps(nclumps)%endc /= bounds_proc%endc .or. clumps(nclumps)%endp /= bounds_proc%endp) &
          stop "(init_clumps) clumps don't cover the process bounds"
+      ! decompMod's global bounds (bounds_proc, bounds_by_clump), when the srcroot has them
+      !#INIT_CLUMPS_END
 
       print *, "(init clumps)", nclumps, " clump(s)"
       do nc = 1, nclumps

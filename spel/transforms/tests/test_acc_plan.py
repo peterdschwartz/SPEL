@@ -234,3 +234,47 @@ def test_lookup_on_two_indices_depends_on_both():
     sub.filepath = None
     (p,) = propose(sub, AccessMapper({sub.id: sub}), source=SRC_TWO_INDEX_LOOKUP.splitlines())
     assert "wt" in p.scatter.get("t", []), (p.kind, p.scatter)
+
+
+SRC_LINT = """
+subroutine stress(nlevgrnd, numf, filter, colof, watsat, ice, dz, eff_por, rootr, rootfr)
+  implicit none
+  integer, intent(in) :: nlevgrnd, numf, filter(:), colof(:)
+  real(r8), intent(in) :: watsat(:,:), ice(:,:), dz(:,:), rootfr(:,:)
+  real(r8), intent(inout) :: eff_por(:,:), rootr(:,:)
+  integer :: j, fp, p, c
+  real(r8) :: vol_ice
+  !$acc parallel loop gang default(present)
+  do j = 1, nlevgrnd
+     !$acc loop vector private(p, c, vol_ice)
+     do fp = 1, numf
+        p = filter(fp)
+        c = colof(p)
+        vol_ice = min(watsat(c,j), ice(c,j)/dz(c,j))
+        eff_por(c,j) = watsat(c,j) - vol_ice
+     end do
+  end do
+  !$acc parallel loop gang vector default(present)
+  do fp = 1, numf
+     p = filter(fp)
+     c = colof(p)
+     rootr(p,1) = rootfr(p,1) * eff_por(c,1)
+     eff_por(c,2) = eff_por(c,2) * rootfr(p,2)
+  end do
+end subroutine stress
+"""
+
+
+def test_lint_judges_covered_loops():
+    """`--lint`: a level-outer kernel with the filter loop inside, and column arrays written from a
+    patch filter: redundant (nothing read through p) in the first kernel, a race in the second."""
+    sub = StubSub(SRC_LINT)
+    sub.filepath = None
+    mapper = AccessMapper({sub.id: sub})
+    assert [p.kind for p in propose(sub, mapper, source=SRC_LINT.splitlines())] == ["has-directive", "has-directive"]
+    level, patch = propose(sub, mapper, source=SRC_LINT.splitlines(), lint=True)
+    assert level.covered and patch.covered and not level.directive_lines()
+    assert any("gang loop over `j` (nlevgrnd gangs) with the filter loop `fp` inside" in f for f in level.lint), level.lint
+    assert any("eff_por written through colof" in f and "redundant work" in f for f in level.lint), level.lint
+    assert any("eff_por written through colof" in f and "race" in f and "rootfr" in f for f in patch.lint), patch.lint
+    assert "HAS-DIRECTIVE" in str(level) and "lint:" in str(level)

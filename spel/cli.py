@@ -127,8 +127,8 @@ def accplan(args):
     subs = [s for s in fut.subroutine_dict.values() if s.module in mods and (not args.routine or s.name in args.routine)]
     if not subs:
         raise SystemExit(f"accplan: no analyzed routines in {', '.join(sorted(mods))}")
-    for p in report(subs, mapper, min_lines=args.min_lines):
-        print(p)
+    for p in report(subs, mapper, min_lines=args.min_lines, lint=args.lint):
+        print(p.lint_report() if args.lint else p)
         print()
 
 
@@ -588,6 +588,9 @@ def main():
     accplan_parser.add_argument("--routine", nargs="*", help="only these routines")
     accplan_parser.add_argument("--min-lines", dest="min_lines", type=int, default=2, help="skip loops shorter than this")
     accplan_parser.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
+    accplan_parser.add_argument("--lint", action="store_true",
+                                help="judge the loops that already carry a directive: gang loops over a level with the "
+                                     "filter loop inside, column arrays written from a patch filter (report only)")
     accplan_parser.set_defaults(func=accplan)
 
     compact_parser = subparsers.add_parser(

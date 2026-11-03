@@ -232,7 +232,9 @@ feature that needs to know what a statement *is* or which names it uses must get
   After editing E3SM sources, pass `--reanalyze`; otherwise the generated test may contain
   stale routine code. SPEL warns when HEAD or uncommitted `components/elm` changes differ
   from the cache, but it does not rebuild automatically. The analysis is pickled, so changes to
-  the parser, AST or walker (`spel/scripts/fortran_parser/`) also need `--reanalyze`.
+  the parser, AST or walker (`spel/scripts/fortran_parser/`) also need `--reanalyze`. So do changes
+  to `spel/scripts/edit_files.py`: the edited ELM sources `spel create` copies into a case are cached
+  too (`<cache>/elm_drv/src/`), so a generator fix shows up only after `--reanalyze`.
 - `meta.json` in the cache lists `failures`/`incomplete` routines; a refactor that doesn't parse
   shows up there (e.g. `SemanticError: Undeclared symbol ...`) and `spel create` refuses it.
 - **Line numbers are 0-based indices** into the source file everywhere (`LineTuple.ln`,
@@ -324,7 +326,8 @@ feature that needs to know what a statement *is* or which names it uses must get
   (`spel acc2omp`, `compact rewrite`, `device-data`, `split`, `nutrient extract|species|merge|groups|
   history|restart`) are removed and only print their replacement (`cli.py::REMOVED`); don't add new
   rewrite commands outside the registry. `spel compact inventory`, `spel nutrient common|procedures`
-  and `spel accplan` are reports and stay commands.
+  and `spel accplan` are reports and stay commands. `spel accplan MODULES --lint` judges the loops that already carry a
+  directive (level-outer gang loops with a filter loop inside, coarser-level arrays written from a filter loop).
 - Filter-to-filter maps: `core/filter_maps.py` knows clumpfilter's `soilc_soilp_beg/end` (the soil patches
   of soil column fc are `soilp(beg(fc):end(fc))`), which filter instance holds which patches, and finds the
   loops over a filtered column's patches (`pfti(c)..pftf(c)`, `pfti(c)+pi-1`) with an exactness verdict

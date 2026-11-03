@@ -75,6 +75,8 @@ def var_use_statements(
             else:
                 stmt = f"{tabs}use {var.declaration}, only : {var.name}\n"
         lines.add(stmt)
+    # the IO routines take `bounds` whether or not a bounds_type instance is captured
+    lines.add(f"{tabs}use decompMod, only : bounds_type\n")
 
     return (list(lines), elm_inst_vars)
 
@@ -112,9 +114,13 @@ def get_active_instances(type_dict: TypeDict) -> dict[str, Variable]:
 
     return {
         inst_var.name: inst_var
-        for dtype in type_dict.values()
+        for type_name, dtype in type_dict.items()
         for inst_var in dtype.instances.values()
         if inst_var.active and active_mask(dtype, inst_var.name)
+        # decompMod's bounds_proc / bounds_by_clump(:) are the test's own decomposition
+        # (elm_initializeMod::init_clumps), not captured data; the synthetic `bounds`
+        # instance (UnitTestforELM) carries the captured process bounds and stays
+        and not (type_name == "bounds_type" and inst_var.name != "bounds")
     }
 
 

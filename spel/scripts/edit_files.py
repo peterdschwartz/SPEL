@@ -732,6 +732,18 @@ def keep_lhs_write(state: ParseState, l_cont: str) -> bool:
     bad = flat_names(state.bad_names)
     if any(n.lower() in bad for n in re.findall(r"[A-Za-z_]\w*", lhs)):
         return False
+    base = re.match(r"[A-Za-z_]\w*", lhs).group(0).lower()
+    if base in state.opaque_names:
+        # an object of a header type (an integer stand-in, see unittest_defs.h): `x%...`
+        # does not compile, so the statement goes with the excluded module
+        # (AllocationMod: `elm_fates%fates(ci)%bc_in(s)%plant_nh4_uptake_flux(f,1) = ...`)
+        return False
+    frame = state.routine_stack[-1] if state.routine_stack else None
+    if lhs.lower() == base and not (frame and base in frame.dummy_args):
+        # a bare scalar that is not a dummy: no caller or global sees the write, and a
+        # self-assignment inside a kernel makes nvfortran treat the scalar as loop-variant
+        # (AllocationMod: `n_pcomp = n_pcomp` -> NVFORTRAN-S-1047 on `do f = 1, n_pcomp`)
+        return False
     rewrite_statement(state, f"{lhs} = {lhs}  ! spel: the right-hand side used an excluded module")
     return True
 
@@ -1273,13 +1285,17 @@ def remove_cpp_directives(
 SOURCE_OVERRIDES: dict[str, str] = {}
 
 
-def apply_preprocessor(fn: Path) -> list[str]:
+def apply_preprocessor(fn: Path, extra_macros: tuple[str, ...] = ()) -> list[str]:
+    """
+    cpp output of `fn` with the analysis macros (plus `extra_macros`, e.g. `_OPENACC`
+    to see the lines a GPU build activates).
+    """
     fn = Path(fn)
     base_fn = fn.name
     new_fn = Path(f"{spel_output_dir}/cpp_{base_fn}")
 
     # Set up cmd for preprocessing. Get macros used:
-    macros_string = "-D" + " -D".join(macros)
+    macros_string = "-D" + " -D".join(list(macros) + list(extra_macros))
     text = SOURCE_OVERRIDES.get(os.path.abspath(fn))
     if text is None:
         cmd = f"gfortran -I{E3SM_SRCROOT}/share/include {macros_string} -cpp -E {fn} > {new_fn}"
@@ -1378,6 +1394,7 @@ def modify_file(
         in_func=0,
     )
     comment_bad_references(state, pass_manager, fort_mod.end_of_head_ln)
+    comment_bad_calls_in_acc_blocks(state, fn)
 
     if cpp_file:
         # take the commented work_lines and comment corresponding orig_lines
@@ -1406,6 +1423,41 @@ def modify_file(
             ofile.writelines(write_lines)
 
     return state.sub_init_dict, parsed_lines
+
+
+# cpp macros the builds define but the analysis doesn't: their blocks are inactive in the
+# parse, yet a build with them on compiles every line in them
+BUILD_ONLY_MACROS = ("_OPENACC",)
+
+
+def comment_bad_calls_in_acc_blocks(state: ParseState, fn: Path) -> None:
+    """
+    Comment `call <unavailable>` in the lines that only a build-time macro activates
+    (`#ifdef _OPENACC`), including internal procedures of such blocks: cpp drops them from
+    the parse, so comment_bad_references never sees them, and a GPU build then fails to
+    link (`shr_sys_abort` in subgridAveViewMod::subgrid_ave_view_attach's `check`).
+    """
+    if not state.cpp_file:
+        return
+    seen = {lt.ln for lt in state.work_lines}
+    extra = [
+        lt
+        for lt in remove_cpp_directives(
+            apply_preprocessor(fn, BUILD_ONLY_MACROS), str(fn), state.logger
+        )
+        if lt.ln not in seen
+    ]
+    if not extra:
+        return
+    pattern = NameSetPattern(state.bad_names, r"\s*(call)[\s]+({names})", re.IGNORECASE)
+    it = LogicalLineIterator(extra)
+    for fline in it:
+        if fline.line and pattern.search(fline.line):
+            it.comment_cont_block()
+    for lt in extra:
+        if lt.commented:
+            state.orig_lines[lt.ln].commented = True
+            state.logger.debug(f"commented build-only line {lt.ln + 1} of {fn.name}: {lt.line.strip()}")
 
 
 def process_for_unit_test(

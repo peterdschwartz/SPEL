@@ -263,6 +263,24 @@ class Guards:
     notes: list[str] = field(default_factory=list)
 
 
+def _history_registrations(fut) -> dict[str, list[tuple]]:
+    """type -> the guards (enclosing ifs, `registrations.Guard`) of each of its history registrations."""
+    out: dict[str, list[tuple]] = {}
+    inst_type = {i.name.lower(): t.type_name.lower() for t in fut.type_dict.values() for i in t.instances.values()}
+    for sub in fut.subroutine_dict.values():
+        for r in getattr(sub, "registrations", []) or []:
+            if r.kind != "hist" or not r.field:
+                continue
+            var = sub.arguments.get(r.base) if hasattr(sub, "arguments") else None
+            if var is not None:
+                tname = str(var.type).lower().replace("class(", "").replace("type(", "").rstrip(")")
+            else:
+                tname = inst_type.get(r.base.lower(), "")
+            if tname:
+                out.setdefault(tname, []).append(tuple(getattr(r, "guards", ()) or ()))
+    return out
+
+
 def _history_components(fut) -> set[tuple[str, str]]:
     """(type, first component) of every history registration: hist_update_hbuf (outside the
     analysis) reads these on the device whatever the analyzed routines do."""
@@ -281,6 +299,26 @@ def _history_components(fut) -> set[tuple[str, str]]:
             if tname:
                 out.add((tname, first))
     return out
+
+
+def _cond_key(text: str) -> str:
+    return str(text).replace(" ", "").replace("(", "").replace(")", "").lower()
+
+
+def _registration_implies(guards: tuple, cond) -> bool:
+    """Whether a registration's enclosing ifs imply `cond` (the copy guard): some disjunct of `cond`
+    has all its literals among the (non-negated) guards. Conservative: anything else is False."""
+    from spel.scripts.fortran_parser.boolen_expression import AllOf, AnyOf
+
+    keys = {_cond_key(g) for g in guards if not getattr(g, "negated", False)}
+    if not keys:
+        return False
+    disjuncts = cond.items if isinstance(cond, AnyOf) else (cond,)
+    for d in disjuncts:
+        lits = d.items if isinstance(d, AllOf) else (d,)
+        if all(_cond_key(_fortran(lit)) in keys for lit in lits):
+            return True
+    return False
 
 
 def _fortran(cond) -> str:
@@ -319,7 +357,10 @@ def access_guards(fut, type_dict) -> Guards:
     instance that accesses it, is copied/updated only under that condition (shared by the
     instances: the per-type routines serve them all). An instance whose accessed fields are
     all gated is handled only under the or of their conditions (c13_col_cf: use_c13).
-    Kept unguarded: history-registered components (the hbuf kernels read them), and
+    Kept unguarded: history-registered components, and instances owning a history field registered outside the
+    instance's own guard
+    (the hbuf kernels read them; 2026-11-02 subgrid_weights_diagnostics was gated by
+    active_dynamic_subgrid and the PCT_* history fields found it absent), and
     conditions with string comparisons (no spel_streq in ELM).
 
     The accesses come from every device root (`DEVICE_ROOTS`): elm_drv's tree and the
@@ -372,11 +413,21 @@ def access_guards(fut, type_dict) -> Guards:
     fields_of: dict[str, list[str]] = {}
     for v in sorted(accessed):
         fields_of.setdefault(v.split("%")[0].lower(), []).append(v)
+    hist_regs = _history_registrations(fut)
+    inst_type = {i.name.lower(): t.type_name.lower() for t in type_dict.values() for i in t.instances.values()}
     for inst, fields in fields_of.items():
         conds = [raw.get(v) for v in fields]
         if any(c is None for c in conds):
             continue
         cond = simplify(AnyOf(tuple(dict.fromkeys(conds))))
+        regs = hist_regs.get(inst_type.get(inst, ""), [])
+        if regs and not all(_registration_implies(r, cond) for r in regs):
+            # the hbuf kernels read its history sources whenever they are registered, whatever the analyzed
+            # routines do (subgrid_weights_diagnostics: PCT_* registered unconditionally, written only under
+            # active_dynamic_subgrid). Kept gated when every registration sits under the copy's own condition
+            # (top_ws: WATER_FROM_UPHILL only if use_im2_hillslope_hydrology).
+            g.notes.append(f"guards: {inst} owns history sources registered outside {_fortran(cond)}, copied unguarded")
+            continue
         text = usable(cond)
         if text is not None:
             g.instances[inst] = text

@@ -116,10 +116,16 @@ module nc_io
   public :: nc_read_timeslices
 contains
 
-subroutine check(status)
+subroutine check(status, name)
+   ! name: the variable of a failed lookup/read, so 'Variable not found' says which
    integer, intent(in) :: status
+   character(len=*), intent(in), optional :: name
    if (status /= nf90_noerr) then
-      print *, trim(nf90_strerror(status))
+      if (present(name)) then
+         print *, trim(nf90_strerror(status)), ' (', trim(name), ')'
+      else
+         print *, trim(nf90_strerror(status))
+      end if
       stop 2
    end if
 end subroutine check
@@ -638,7 +644,7 @@ subroutine nc_read_double_0(ncid, varname, var, timestep)
    real(8) :: tmp(1)
    integer :: var_id, start(1), count(1)
 
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    if (timestep > 0) then 
        start = [timestep]
        call check(nf90_get_var(ncid, var_id, tmp, start=[timestep],count=[1]))
@@ -672,7 +678,7 @@ end subroutine nc_read_double_0
        count(1:ndim) = shape(var)
     end if
 
-     call check(nf90_inq_varid(ncid, trim(varname), var_id))
+     call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
      call nc_file_subgrid(ncid, var_id, ndim, sd, nfile)
      if (sd > 0) then
         if (size(var, sd) /= spel_nsets*nfile) sd = 0
@@ -718,7 +724,7 @@ end subroutine nc_read_double_0
        count(1:ndim) = shape(var)
     end if
 
-     call check(nf90_inq_varid(ncid, trim(varname), var_id))
+     call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
      call nc_file_subgrid(ncid, var_id, ndim, sd, nfile)
      if (sd > 0) then
         if (size(var, sd) /= spel_nsets*nfile) sd = 0
@@ -766,7 +772,7 @@ end subroutine nc_read_double_0
        count(1:ndim) = shape(var)
     end if
 
-     call check(nf90_inq_varid(ncid, trim(varname), var_id))
+     call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
      call nc_file_subgrid(ncid, var_id, ndim, sd, nfile)
      if (sd > 0) then
         if (size(var, sd) /= spel_nsets*nfile) sd = 0
@@ -801,7 +807,7 @@ subroutine nc_read_integer_0(ncid, varname, var, timestep)
    integer :: tmp(1)
    integer :: var_id, start(1), count(1)
 
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    if (timestep > 0) then 
        start = [timestep]
        call check(nf90_get_var(ncid, var_id, tmp, start=[timestep],count=[1]))
@@ -835,7 +841,7 @@ end subroutine nc_read_integer_0
        count(1:ndim) = shape(var)
     end if
 
-     call check(nf90_inq_varid(ncid, trim(varname), var_id))
+     call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
      call nc_file_subgrid(ncid, var_id, ndim, sd, nfile)
      if (sd > 0) then
         if (size(var, sd) /= spel_nsets*nfile) sd = 0
@@ -881,7 +887,7 @@ end subroutine nc_read_integer_0
        count(1:ndim) = shape(var)
     end if
 
-     call check(nf90_inq_varid(ncid, trim(varname), var_id))
+     call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
      call nc_file_subgrid(ncid, var_id, ndim, sd, nfile)
      if (sd > 0) then
         if (size(var, sd) /= spel_nsets*nfile) sd = 0
@@ -929,7 +935,7 @@ end subroutine nc_read_integer_0
        count(1:ndim) = shape(var)
     end if
 
-     call check(nf90_inq_varid(ncid, trim(varname), var_id))
+     call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
      call nc_file_subgrid(ncid, var_id, ndim, sd, nfile)
      if (sd > 0) then
         if (size(var, sd) /= spel_nsets*nfile) sd = 0
@@ -1038,7 +1044,7 @@ subroutine nc_read_string(ncid, varname, dim_name, var)
    integer :: var_id, dimid, strlen,i
    character(:), allocatable :: buf
 
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call check(nf90_inq_dimid(ncid, trim(dim_name), dimid))
    call check(nf90_inquire_dimension(ncid, dimid, len=strlen))
    allocate(character(strlen) :: buf); 
@@ -1091,7 +1097,7 @@ subroutine nc_write_integer(ncid, ndim, dims, dim_names, var, varname, timestep)
       count(ndim+1) = 1
    endif
 
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    select case (ndim)
    case (1)
       allocate (data_1d(ldims(1))); data_1d = reshape(buffer, [ldims(1)])
@@ -1147,7 +1153,7 @@ subroutine nc_write_double(ncid, ndim, dims, dim_names, var, varname, timestep)
       count(ndim+1) = 1
    endif
 
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    select case (ndim)
    case (1)
       allocate (data_1d(ldims(1))); data_1d = reshape(buffer, [ldims(1)])
@@ -1171,7 +1177,7 @@ subroutine nc_write_integer_scalar(ncid, var, varname)
    !! locals:
    integer :: var_id
 
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call check(nf90_put_var(ncid, var_id, var))
 
 end subroutine nc_write_integer_scalar
@@ -1183,7 +1189,7 @@ subroutine nc_write_double_scalar(ncid, var, varname)
    !! locals:
    integer :: var_id
 
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call check(nf90_put_var(ncid, var_id, var))
 
 end subroutine nc_write_double_scalar
@@ -1193,7 +1199,7 @@ subroutine nc_write_string(ncid, var, varname)
    character(len=*), intent(in) :: varname
    character(len=*), intent(in) :: var
    integer :: var_id, i
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call check(nf90_put_var(ncid, var_id, trim(var)))
 end subroutine nc_write_string
 
@@ -1235,7 +1241,7 @@ subroutine nc_write_logical(ncid, ndim, dims, dim_names, var, varname, timestep)
       count(ndim+1) = 1
    endif
 
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    select case (ndim)
    case (1)
       allocate (data_1d(ldims(1))); data_1d = reshape(int_buf, [ldims(1)])
@@ -1259,7 +1265,7 @@ subroutine nc_write_logical_scalar(ncid, var, varname)
    integer :: var_id, buf
    buf = 0
    if (var) buf = 1
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call check(nf90_put_var(ncid, var_id, buf))
 end subroutine nc_write_logical_scalar
 
@@ -1308,7 +1314,7 @@ subroutine nc_buf_load_double_0(ncid, varname, vshape, buf, t0, nt, chunk, sd, n
    real(8), allocatable, intent(inout) :: buf(:)
    integer, intent(inout) :: sd, nfile
    integer :: var_id, nd, t
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    sd = 0; nfile = 0
    if (allocated(buf)) then
       if (size(buf) /= chunk) then
@@ -1357,7 +1363,7 @@ subroutine nc_buf_load_double_1(ncid, varname, vshape, buf, t0, nt, chunk, sd, n
    integer, intent(inout) :: sd, nfile
    integer :: var_id, nd, t
    integer :: fshape(1)
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call nc_file_subgrid(ncid, var_id, 1, sd, nfile)
    fshape = vshape
    if (sd > 0) then
@@ -1430,7 +1436,7 @@ subroutine nc_buf_load_double_2(ncid, varname, vshape, buf, t0, nt, chunk, sd, n
    integer, intent(inout) :: sd, nfile
    integer :: var_id, nd, t
    integer :: fshape(2)
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call nc_file_subgrid(ncid, var_id, 2, sd, nfile)
    fshape = vshape
    if (sd > 0) then
@@ -1507,7 +1513,7 @@ subroutine nc_buf_load_double_3(ncid, varname, vshape, buf, t0, nt, chunk, sd, n
    integer, intent(inout) :: sd, nfile
    integer :: var_id, nd, t
    integer :: fshape(3)
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call nc_file_subgrid(ncid, var_id, 3, sd, nfile)
    fshape = vshape
    if (sd > 0) then
@@ -1587,7 +1593,7 @@ subroutine nc_buf_load_integer_0(ncid, varname, vshape, buf, t0, nt, chunk, sd, 
    integer, allocatable, intent(inout) :: buf(:)
    integer, intent(inout) :: sd, nfile
    integer :: var_id, nd, t
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    sd = 0; nfile = 0
    if (allocated(buf)) then
       if (size(buf) /= chunk) then
@@ -1636,7 +1642,7 @@ subroutine nc_buf_load_integer_1(ncid, varname, vshape, buf, t0, nt, chunk, sd, 
    integer, intent(inout) :: sd, nfile
    integer :: var_id, nd, t
    integer :: fshape(1)
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call nc_file_subgrid(ncid, var_id, 1, sd, nfile)
    fshape = vshape
    if (sd > 0) then
@@ -1709,7 +1715,7 @@ subroutine nc_buf_load_integer_2(ncid, varname, vshape, buf, t0, nt, chunk, sd, 
    integer, intent(inout) :: sd, nfile
    integer :: var_id, nd, t
    integer :: fshape(2)
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call nc_file_subgrid(ncid, var_id, 2, sd, nfile)
    fshape = vshape
    if (sd > 0) then
@@ -1786,7 +1792,7 @@ subroutine nc_buf_load_integer_3(ncid, varname, vshape, buf, t0, nt, chunk, sd, 
    integer, intent(inout) :: sd, nfile
    integer :: var_id, nd, t
    integer :: fshape(3)
-   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
    call nc_file_subgrid(ncid, var_id, 3, sd, nfile)
    fshape = vshape
    if (sd > 0) then
