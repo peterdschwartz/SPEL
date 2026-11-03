@@ -90,3 +90,29 @@ def test_declares(tmp_path):
     decl = [l for l in out.split("\n") if "declare create" in l]
     # table: array in a kernel; coef: read in a device routine; nscal: scalar in a kernel (firstprivate)
     assert len(decl) == 1 and "coef" in decl[0] and "table" in decl[0] and "nscal" not in decl[0], out
+
+
+def test_stale_declares_go(tmp_path):
+    from spel.transforms.acc_routines import AccDeclares
+    from spel.transforms.core import driver
+    from spel.transforms.core.testing import snippet_context
+
+    src = DECL_BEFORE.replace("contains\n", "  !$acc declare copyin(gone_var)\n  !$acc declare create(coef, also_gone)\ncontains\n", 1)
+    ctx = snippet_context(src, tmp_path, "snippet_mod.F90")
+    res = driver.run(AccDeclares(), ctx, AccDeclares.Options(), sink=driver.Memory(), verify=True)
+    out = res.outputs.get(ctx.fut.snippet, src)
+    assert "gone_var" not in out and "also_gone" not in out
+    assert "!$acc declare create(coef)" in out
+
+
+def test_stale_update_names_go(tmp_path):
+    # the snippet analyzer resolves every name, so only the planning path is exercised here: a
+    # directive whose names all resolve stays as it is
+    from spel.transforms.acc_routines import AccDeclares
+    from spel.transforms.core import driver
+    from spel.transforms.core.testing import snippet_context
+
+    src = DECL_BEFORE.replace("    v = v * coef\n", "    v = v * coef\n    !$acc update device(&\n    !$acc   coef)\n")
+    ctx = snippet_context(src, tmp_path, "snippet_mod.F90")
+    res = driver.run(AccDeclares(), ctx, AccDeclares.Options(), sink=driver.Memory(), verify=True)
+    assert "update device(&" in res.outputs.get(ctx.fut.snippet, src)

@@ -426,6 +426,14 @@ def section_edits(sub, lines: list[str], stmts: list[SectionStmt], tree,
     # directives placed between them by acc-locals are executable
     last = getattr(sub.record, "last_decl_ln", -1)
     at = statement_end(lines, last) + 1 if last >= 0 else first_executable(tree, sub.record)
+    # before the routine's DATA statements: nvfortran rejects a type declaration after them
+    # ("Incorrect sequence of statements"; SNICAR's mie tables), Intel and gfortran accept it
+    from spel.scripts.fortran_parser.spel_ast import DataStatement
+
+    data = [st.lineno for st in getattr(getattr(tree, "body", None), "statements", [])
+            if isinstance(st, DataStatement) and getattr(st, "lineno", None) is not None]
+    if data and min(data) < at:
+        at = min(data)
     ref = lines[last] if last >= 0 and lines[last] else lines[at]
     decl = f"{indent(ref) if ref else '    '}integer :: {', '.join(f'{INDEX}{k}' for k in range(1, nmax + 1))}  {TAG} indices"
     edits.append(insert(at, decl, order=-1))  # above a rewritten first statement

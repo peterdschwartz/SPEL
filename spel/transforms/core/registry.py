@@ -60,6 +60,8 @@ BUILTINS = [
     "spel.transforms.acc_apply",
     "spel.transforms.acc_sync",
     "spel.transforms.acc_strip",
+    "spel.transforms.acc_stale",
+    "spel.transforms.cpp_resolve",
     "spel.transforms.acc_routines",
     "spel.transforms.acc_to_omp",
     "spel.transforms.device.generate",

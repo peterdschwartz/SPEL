@@ -75,11 +75,40 @@ def device_routines(fut) -> tuple[set[str], list[str]]:
     return reached, missing + deep
 
 
+def _named_in_unanalyzed_kernels(ctx) -> set[str]:
+    """Words in the text of routines the analysis did not walk but that hold compute constructs
+    (glc2lnd_vars_update_glc2lnd_acc calls col_itype_to_icemec_class in its kernels): their
+    callees cannot be resolved, so no routine of such a name is pruned (a text search that only
+    refuses)."""
+    import re
+
+    words: set[str] = set()
+    for sub in ctx.fut.subroutine_dict.values():
+        if sub.record is not None or getattr(sub, "filepath", None) is None:
+            continue
+        try:
+            lines = ctx.lines(ctx.path(sub))
+        except OSError:
+            continue
+        lo, hi = sub.startline, min(sub.endline, len(lines) - 1)
+        if lo < 0 or hi < lo:
+            continue
+        try:
+            ds = find_directives(lines, lo, hi)
+        except DirectiveError:
+            ds = []
+        if any(d.is_compute_loop or d.is_compute_region for d in ds):
+            for l in lines[lo:hi + 1]:
+                words |= {w.lower() for w in re.findall(r"[A-Za-z_]\w*", l.split("!")[0])}
+    return words
+
+
 @dataclass
 class Options:
     prune: bool = True  # remove `routine` directives from routines no kernel reaches
     add: bool = True  # add `routine seq` to device routines without one
     keep: list[str] = field(default_factory=list)  # routine ids (module::name) left alone
+    routines: list[str] = field(default_factory=list)  # only these routines change (default: all analyzed)
 
 
 @transform
@@ -103,8 +132,12 @@ class AccRoutines(Transform):
         out.notes.append(f"{len(device)} routines reached from kernels")
         out.notes += [f"unresolved: {m}" for m in sorted(set(missing))]
         keep = {k.lower() for k in opts.keep}
+        only = {r.lower() for r in opts.routines}
+        protected = _named_in_unanalyzed_kernels(ctx)
+        if protected:
+            out.notes.append(f"kept: {len(protected)} names called from kernels of unanalyzed routines")
         for sub in sorted((s for s in ctx.fut.subroutine_dict.values() if s.record is not None), key=lambda s: s.id):
-            if sub.id.lower() in keep:
+            if sub.id.lower() in keep or (only and sub.id.lower() not in only):
                 continue
             path = ctx.path(sub)
             lines = ctx.lines(path)
@@ -126,7 +159,7 @@ class AccRoutines(Transform):
                         out.add(Change(path, [insert(ins.ln, new, order=ins.order)], where=sub.id,
                                        why="called from a kernel"))
                 continue
-            if opts.prune:
+            if opts.prune and sub.name.lower() not in protected:
                 drop = [d for d in ds if not d.construct_args]
                 if drop:
                     out.add(Change(path, [delete(d.start_ln, d.end_ln - d.start_ln + 1, why="no kernel reaches it")
@@ -136,7 +169,7 @@ class AccRoutines(Transform):
 
 @dataclass
 class DeclareOptions:
-    pass
+    routines: list[str] = field(default_factory=list)  # only the module data these routines use (default: all)
 
 
 @transform
@@ -177,8 +210,9 @@ class AccDeclares(Transform):
             return specs[path]
 
         wanted: dict[Path, set[str]] = defaultdict(set)  # module file -> names
+        only = {r.lower() for r in opts.routines}
         for sub in fut.subroutine_dict.values():
-            if sub.record is None:
+            if sub.record is None or (only and sub.id.lower() not in only):
                 continue
             lines = ctx.lines(ctx.path(sub))
             # a device routine needs every module variable it uses on the device; a kernel of a
@@ -216,6 +250,7 @@ class AccDeclares(Transform):
                 if not in_routine and info.rank == 0:
                     continue
                 wanted[path].add(name)
+        self._stale(ctx, fut, out, spec_of, only)
         for path, names in sorted(wanted.items()):
             spec = spec_of(path)
             mlines = ctx.lines(path)
@@ -228,3 +263,66 @@ class AccDeclares(Transform):
                 new = [l.replace("! spel acc-apply", TAG) for l in ins.lines]
                 out.add(Change(path, [insert(ins.ln, new, order=ins.order)], where=spec.name, why=", ".join(need)))
         return out
+
+    @staticmethod
+    def _stale(ctx, fut, out: Plan, spec_of, only) -> None:
+        """`declare` directives naming variables the module does not have (upstream elm_varctl:
+        pf_clmnstep0, use_nitrif_denitrif, which were removed long ago): such a directive does not
+        compile under -acc. The stale names go; a directive left without names goes entirely."""
+        from spel.transforms.acc_apply import _path
+
+        mods = getattr(fut, "module_dict", {}) or {}
+        paths = sorted({_path(m) for m in mods.values()}) if mods else sorted({ctx.path(s) for s in fut.subroutine_dict.values()})
+        for path in paths:
+            spec = spec_of(path)
+            if spec is None:
+                continue
+            lines = ctx.lines(path)
+            edits, gone = [], []
+            for d in find_directives(lines):
+                if d.construct != "declare" or d.start_ln != d.end_ln:
+                    continue
+                stale = [v for c in d.clauses for v in c.variables() if v.lower() not in spec.variables]
+                if not stale:
+                    continue
+                keep = [(c.name, [v for v in c.variables() if v.lower() in spec.variables]) for c in d.clauses]
+                keep = [(n, vs) for n, vs in keep if vs]
+                if any("(" in (c.args or "") for c in d.clauses):
+                    continue  # array sections in the clause: rebuilding it is not this pass's job
+                gone += stale
+                if not keep:
+                    edits.append(delete(d.start_ln, why="stale declare"))
+                else:
+                    text = d.indent + "!$acc declare " + " ".join(f"{n}({', '.join(vs)})" for n, vs in keep)
+                    from spel.transforms.core.edits import replace
+                    edits.append(replace(d.start_ln, text, why="stale declare"))
+            if edits:
+                out.add(Change(path, edits, where=spec.name, why="names that are no longer variables: " + ", ".join(gone)))
+        # `update` directives in routines naming what their scope does not know (PhenologyInit's
+        # update device of the former module variables crit_dayl, ndays_on, ...: now components
+        # of PhenolParamsInst): they do not compile under -acc
+        from spel.transforms.core.edits import replace
+
+        for sub in sorted((s for s in fut.subroutine_dict.values() if s.record is not None), key=lambda s: s.id):
+            lines = ctx.lines(ctx.path(sub))
+            try:
+                ds = find_directives(lines, sub.startline, min(sub.endline, len(lines) - 1))
+            except DirectiveError:
+                continue
+            for d in ds:
+                if d.construct != "update" or any("(" in (c.args or "") for c in d.clauses):
+                    continue
+                data = [c for c in d.clauses if c.name in ("device", "self", "host")]
+                stale = [v for c in data for v in c.variables() if sub.record.lookup(v.lower()) is None]
+                if not stale:
+                    continue
+                kept = [(c.name, [v for v in c.variables() if sub.record.lookup(v.lower()) is not None]) for c in data]
+                kept = [(n, vs) for n, vs in kept if vs]
+                rest = " ".join(str(c) for c in d.clauses if c.name not in ("device", "self", "host"))
+                n = d.end_ln - d.start_ln + 1
+                if not kept:
+                    e = delete(d.start_ln, n, why="stale update")
+                else:
+                    text = d.indent + "!$acc update " + " ".join(f"{c}({', '.join(vs)})" for c, vs in kept) + (f" {rest}" if rest else "")
+                    e = replace(d.start_ln, text, n=n, why="stale update")
+                out.add(Change(ctx.path(sub), [e], where=sub.id, why="update of names not in scope: " + ", ".join(stale)))

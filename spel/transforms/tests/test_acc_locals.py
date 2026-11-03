@@ -119,3 +119,41 @@ def test_host_initialized_locals_are_copied_in(tmp_path):
     assert r.host_initialized == ["dzmin", "scale"]      # a DATA statement, an initializer
     assert r.host_accessed == ["work"]                   # written by host code: copied around the kernel
     # plan_fix emits `enter data copyin(dzmin, scale)` for them (it needs a module file: not exercised here)
+
+
+SHARED = """\
+module snippet_mod
+  implicit none
+  integer, parameter :: r8 = 8
+contains
+  subroutine s(n, y)
+    integer, intent(in) :: n
+    real(r8), intent(inout) :: y(:)
+    real(r8) :: w(n)
+    integer :: i
+    do i = 1, n
+       w(i) = real(i, r8)
+    end do
+    !$acc parallel loop gang vector default(present)
+    do i = 1, n
+       y(i) = w(i)
+    end do
+  end subroutine s
+end module snippet_mod
+"""
+
+
+def test_host_shared_locals_are_resident_not_copied(tmp_path):
+    # user rule (2026-11-03): no structured data regions; acc-sync syncs the transitions
+    from spel.transforms.acc_locals import AccLocals
+    from spel.transforms.core import driver
+    from spel.transforms.core.testing import snippet_context
+
+    ctx = snippet_context(SHARED, tmp_path, "snippet_mod.F90")
+    res = driver.run(AccLocals(), ctx, AccLocals.Options(), sink=driver.Memory(), verify=True)
+    out = res.outputs.get(ctx.fut.snippet, SHARED)
+    assert "enter data create(w)" in out and "exit data delete(w)" in out, out
+    assert "data copy" not in out and "end data" not in out, out
+    res = driver.run(AccLocals(), snippet_context(SHARED, tmp_path / "b", "snippet_mod.F90"),
+                     AccLocals.Options(structured=True), sink=driver.Memory(), verify=True)
+    assert "data copy(w)" in "\n".join(res.outputs.values())

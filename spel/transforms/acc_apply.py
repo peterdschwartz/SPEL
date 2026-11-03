@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from spel.transforms.acc_plan import DEVICE_FLAG
 from spel.transforms.acc_directives import find_directives
 from spel.transforms.acc_plan import LoopProposal, propose
 from spel.transforms.core.query import ABORTS, abort_calls, call_tree, cold_branches, routine_tree  # noqa: F401
@@ -612,6 +613,22 @@ def _loop_edits(p: Port, lines: list[str]) -> list[Insertion]:
     return out
 
 
+def _flag_use_edit(sub, lines: list[str]) -> Optional[Insertion]:
+    """`use elm_varctl, only : elm_device_ready` after the routine's last use statement (or its header)."""
+    from spel.scripts.fortran_parser import spel_ast as A
+    from spel.transforms.core.source import statement_end
+
+    try:
+        tree = routine_tree(sub)
+    except BaseException:  # the parser exits on what it cannot read
+        return None
+    uses = [st for st in tree.body.statements if isinstance(st, A.UseStatement)]
+    after = statement_end(lines, uses[-1].lineno if uses else sub.startline)
+    at = after + 1
+    ind = _indent(lines[at]) if at < len(lines) and lines[at].strip() else "    "
+    return Insertion(at, [f"{ind}use elm_varctl, only : {DEVICE_FLAG}  {TAG}"], order=-10)
+
+
 def _routine_seq_edit(sub, lines: list[str]) -> Optional[Insertion]:
     """`!$acc routine seq` before the first executable statement (after the declarations)."""
     from spel.scripts.fortran_parser import spel_ast as A
@@ -651,6 +668,14 @@ def edit_plan(ctx, pp: PortPlan) -> Plan:
         if p.interchange:  # same line count: the insertion lines stay valid
             _swap(p, lines_of(path))
         by_file.setdefault(path, []).extend(_loop_edits(p, lines_of(path)))
+    for rid in sorted({p.routine for p in pp.ports}):
+        # the kernels' if(elm_device_ready) clause needs the flag in scope (a CPU build never
+        # notices: the directives are comments there)
+        sub = fut.subroutine_dict[rid]
+        if sub.record is not None and sub.record.lookup(DEVICE_FLAG) is None:
+            e = _flag_use_edit(sub, lines_of(_path(sub)))
+            if e is not None:
+                by_file.setdefault(_path(sub), []).append(e)
     for cid in sorted(pp.routine_seq):
         sub = fut.subroutine_dict[cid]
         path = _path(sub)

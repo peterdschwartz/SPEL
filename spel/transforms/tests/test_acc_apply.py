@@ -365,3 +365,37 @@ end subroutine interp"""
     facts = object.__new__(_Facts)
     facts.tree = lambda s: (_ for _ in ()).throw(RuntimeError("no tree"))
     assert facts.excluded_lines(sub) == [8]
+
+
+FLAG_SRC = """\
+module snippet_mod
+  implicit none
+  integer, parameter :: r8 = 8
+contains
+  subroutine s(num, filter, x)
+    use shr_kind_mod, only : r8_ => shr_kind_r8
+    integer, intent(in) :: num, filter(:)
+    real(r8), intent(inout) :: x(:)
+    integer :: fc, c
+    do fc = 1, num
+       c = filter(fc)
+       x(c) = 2._r8 * x(c)
+    end do
+  end subroutine s
+end module snippet_mod
+"""
+
+
+def test_device_flag_use_goes_after_the_last_use(tmp_path):
+    # if(elm_device_ready) needs the flag in scope: acc-apply adds `use elm_varctl, only :
+    # elm_device_ready` after the routine's last use statement when its scope lacks it (the
+    # snippet analyzer resolves every unknown name, so the placement is tested directly)
+    from spel.transforms.acc_apply import _flag_use_edit
+    from spel.transforms.core.testing import snippet_context
+
+    ctx = snippet_context(FLAG_SRC, tmp_path, "snippet_mod.F90")
+    sub = ctx.fut.subroutine_dict["snippet_mod::s"]
+    lines = FLAG_SRC.split("\n")
+    ins = _flag_use_edit(sub, lines)
+    assert lines[ins.ln - 1].strip().startswith("use shr_kind_mod")
+    assert ins.lines == ["    use elm_varctl, only : elm_device_ready  ! spel acc-apply"]

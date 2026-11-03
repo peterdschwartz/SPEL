@@ -98,3 +98,28 @@ def test_array_valued_calls_are_left_alone_and_expression_bounds_are_sections():
     assert "do spel_i2 = n+1, nlevgrnd" in text.replace("(n+1)", "n+1")
     assert "rootfr(spel_i1, spel_i2) = 0._r8" in text
     assert "x(spel_i1) = max(x(spel_i1), 0._r8)" in text
+
+
+def test_index_declaration_goes_before_data_statements():
+    # nvfortran: a type declaration after a DATA statement is "Incorrect sequence of statements"
+    src = """\
+subroutine s(n, x)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(inout) :: x(:)
+  real(r8) :: tab(3)
+  data tab(:) /1._r8, 2._r8, 3._r8/
+  x(1:n) = tab(1)
+end subroutine s
+"""
+    lines = src.split("\n")
+    rec = walk(src)
+
+    class Sub:
+        id = "m::s"
+        record = rec
+    stmts, _ = find_section_statements(Sub, lines, device=[])
+    assert apply_to_lines(Sub, lines, stmts, parse_statements(src).statements[0]) == 1
+    i = next(k for k, l in enumerate(lines) if "spel section-loop indices" in l)
+    j = next(k for k, l in enumerate(lines) if l.strip().startswith("data tab"))
+    assert i < j, "\n".join(lines)

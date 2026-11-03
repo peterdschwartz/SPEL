@@ -19,6 +19,8 @@ from the source text by pattern.
 
 from __future__ import annotations
 
+from spel.transforms.core.source import statement_end
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -263,7 +265,8 @@ _indent = indent
 _wrap_directive = directive_list  # `!$acc head(a, b, ...)` with `!$acc&` continuations
 
 
-def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
+def plan_fix(sub, report: RoutineReport, lines: list[str], structured: bool = False,
+             notes: Optional[list[str]] = None) -> list[Insertion]:
     """
     Device storage for the routine's uncovered local arrays:
     - device-only locals: `enter data create` after the declarations and `exit data
@@ -289,7 +292,21 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
     first_exec = _above_directives(first_executable(tree, rec), find_directives(lines, sub.startline, sub.endline))
     ind = _indent(lines[first_exec])
     out: list[Insertion] = []
-    device_only = [n for n in report.locals_needed if n not in report.host_accessed]
+    def allocatable(n: str) -> bool:
+        d = rec.declaration(n)
+        return d is not None and "allocatable" in {a.lower() for a in d.attrs}
+
+    if structured:
+        resident_shared: list[str] = []
+    else:
+        # no structured data regions (user rule 2026-11-03): locals the host also uses are resident
+        # too; acc-sync adds the update device/self at the host<->device transitions. Allocatables
+        # cannot be created before their allocate: they keep a copy region (reported)
+        resident_shared = [n for n in report.host_accessed if n in report.locals_needed and not allocatable(n)]
+        kept = [n for n in report.host_accessed if n in report.locals_needed and allocatable(n)]
+        if kept and notes is not None:
+            notes.append(f"{sub.id}: allocatable host-shared locals keep a data copy region: {', '.join(kept)}")
+    device_only = [n for n in report.locals_needed if n not in report.host_accessed] + resident_shared
     created = [n for n in device_only if n not in report.host_initialized]
     initialized = [n for n in device_only if n in report.host_initialized]
     if device_only:
@@ -301,11 +318,14 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
             block += _wrap_directive(ind, "enter data copyin", initialized)
         out.append(Insertion(first_exec, block))
     at: dict[int, list[str]] = {}
-    for name in device_only:
+    for name in [n for n in device_only if n not in resident_shared]:
         for ln in report.cold_reads.get(name, []):
             at.setdefault(ln, []).append(name)
+    sub_directives = find_directives(lines, sub.startline, sub.endline)
     for ln, names in sorted(at.items()):
-        out.append(Insertion(ln, _wrap_directive(_indent(lines[ln]), "update self", names), order=1))
+        # above the directives attached to the statement (a `parallel loop` and its loop stay together)
+        at_ln = _above_directives(ln, sub_directives)
+        out.append(Insertion(at_ln, _wrap_directive(_indent(lines[ln]), "update self", names), order=1))
     to_delete = device_only + [n for n in report.leaked if n not in device_only]
     if to_delete:
         # the end of the executable part: the routine's `contains` when it has internal subprograms
@@ -314,7 +334,7 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
         for ln in ends:
             out.append(Insertion(ln, _wrap_directive(_indent(lines[ln]) if ln != last else ind,
                                                      "exit data delete", to_delete), order=-1))
-    host = set(report.host_accessed)
+    host = set(report.host_accessed) - set(resident_shared)
     if host:
         # the constructs and calls of the findings that use host-accessed locals
         spans: dict[tuple[int, int], set[str]] = {}
@@ -325,7 +345,9 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
             if f.variable not in host:
                 continue
             if f.kind == "call":
-                span = (f.ln, next_of.get(f.ln, f.ln + 1))
+                # right after the call statement (its continuation lines included): the next
+                # statement may be in another block (the next `case`)
+                span = (f.ln, statement_end(lines, f.ln) + 1)
             else:
                 lo, hi = ranges[f.ln]
                 span = (lo, hi + 1)
@@ -347,6 +369,9 @@ def fix_edits(ins: list[Insertion]) -> list[Edit]:
 class Options:
     routines: list[str] = field(default_factory=list,
                                 metadata={"help": "routine names or ids (default: every routine with device code)"})
+    structured: bool = field(default=False, metadata={
+        "help": "locals the host also uses get `data copy` regions around device uses (default: resident, "
+                "enter/exit data, the transitions synced by acc-sync)"})
 
 
 @transform
@@ -372,7 +397,7 @@ class AccLocals(Transform):
         if routines is None and ctx.config is not None:
             # only the routines the time step runs in the configuration (not PHS under use_hydrstress = .false.)
             routines = {s.id for s in ctx.routines()}
-        plan = fix_plan(ctx, check(ctx.fut, routines))
+        plan = fix_plan(ctx, check(ctx.fut, routines), structured=opts.structured)
         # device-only work arrays that copy regions move every launch: create once instead
         for sid, sub in sorted(ctx.fut.subroutine_dict.items()):
             if routines and sid not in routines and sid.split("::")[-1].lower() not in routines:
@@ -388,7 +413,7 @@ class AccLocals(Transform):
         return plan
 
 
-def fix_plan(ctx, reports: list[RoutineReport]) -> Plan:
+def fix_plan(ctx, reports: list[RoutineReport], structured: bool = False) -> Plan:
     """The insertions fixing `reports` (from `check`), per file."""
     plan = Plan(AccLocals.name)
     by_file: dict[Path, list] = {}
@@ -399,7 +424,7 @@ def fix_plan(ctx, reports: list[RoutineReport]) -> Plan:
         lines = ctx.lines(path)
         ins: list[Insertion] = []
         for sub, r in items:
-            ins += plan_fix(sub, r, lines)
+            ins += plan_fix(sub, r, lines, structured=structured, notes=plan.notes)
             plan.notes.append(f"{path.name}: {r.routine}: create "
                               f"{[n for n in r.locals_needed if n not in r.host_accessed and n not in r.host_initialized]}"
                               f", copyin {r.host_initialized}, copy around device use {r.host_accessed}")
