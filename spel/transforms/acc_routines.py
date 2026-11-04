@@ -76,28 +76,37 @@ def device_routines(fut) -> tuple[set[str], list[str]]:
 
 
 def _named_in_unanalyzed_kernels(ctx) -> set[str]:
-    """Words in the text of routines the analysis did not walk but that hold compute constructs
-    (glc2lnd_vars_update_glc2lnd_acc calls col_itype_to_icemec_class in its kernels): their
-    callees cannot be resolved, so no routine of such a name is pruned (a text search that only
-    refuses)."""
+    """Words in the text of routines holding compute constructs the analysis did not walk
+    (glc2lnd_vars_update_glc2lnd_acc calls col_itype_to_icemec_class in its kernels; it is not in
+    the analysis at all): their callees cannot be resolved, so no routine of such a name is pruned.
+    Every ELM file is scanned; a plain text search that only refuses."""
     import re
 
+    head = re.compile(r"^\s*(?:(?:pure|elemental|recursive|impure)\s+)*(?:subroutine|function)\s+\w+", re.I)
+    tail = re.compile(r"^\s*end\s*(?:subroutine|function)\b", re.I)
+    analyzed: dict[str, list[tuple[int, int]]] = {}
+    for s in ctx.fut.subroutine_dict.values():
+        if s.record is not None and getattr(s, "filepath", None):
+            analyzed.setdefault(str(ctx.path(s)), []).append((s.startline, s.endline))
+    elm = ctx.srcroot / "components" / "elm" / "src"
+    files = ([f for f in sorted(elm.rglob("*.F90")) if "external_models" not in f.parts] if elm.is_dir()
+             else sorted({ctx.path(s) for s in ctx.fut.subroutine_dict.values()}))
     words: set[str] = set()
-    for sub in ctx.fut.subroutine_dict.values():
-        if sub.record is not None or getattr(sub, "filepath", None) is None:
-            continue
+    for f in files:
+        lines = ctx.lines(f)
         try:
-            lines = ctx.lines(ctx.path(sub))
-        except OSError:
-            continue
-        lo, hi = sub.startline, min(sub.endline, len(lines) - 1)
-        if lo < 0 or hi < lo:
-            continue
-        try:
-            ds = find_directives(lines, lo, hi)
+            # compute constructs, and `acc routine` routines (device code too: glc2lnd's routine at
+            # line 264 calls col_itype_to_icemec_class)
+            ds = [d for d in find_directives(lines) if d.is_compute_loop or d.is_compute_region
+                  or (d.construct == "routine" and not d.construct_args)]
         except DirectiveError:
-            ds = []
-        if any(d.is_compute_loop or d.is_compute_region for d in ds):
+            continue
+        spans = analyzed.get(str(f), [])
+        for d in ds:
+            if any(lo <= d.start_ln <= hi for lo, hi in spans):
+                continue
+            lo = next((k for k in range(d.start_ln, -1, -1) if head.match(lines[k].split("!")[0])), 0)
+            hi = next((k for k in range(d.start_ln, len(lines)) if tail.match(lines[k].split("!")[0])), len(lines) - 1)
             for l in lines[lo:hi + 1]:
                 words |= {w.lower() for w in re.findall(r"[A-Za-z_]\w*", l.split("!")[0])}
     return words

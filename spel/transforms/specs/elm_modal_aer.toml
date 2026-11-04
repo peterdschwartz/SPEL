@@ -1,0 +1,4 @@
+# MODAL_AER is the only aerosol path (user decision 2026-11-03): remove the non-modal code.
+transform = "cpp-resolve"
+[options]
+define = ["MODAL_AER"]
