@@ -421,6 +421,15 @@ feature that needs to know what a statement *is* or which names it uses must get
   finite values on the CPU, so a GPU-only NaN often means an uninitialized private or a local that
   is never copied to the device.
 
+## Comparing E3SM timings
+
+Use `./elm_timing_compare.py CASE_A CASE_B --labels a b --top 30 [--format markdown]` (repo root; takes a case,
+run or timing directory, or a saved stats file). Don't write a new parser. For a repeated comparison, copy
+`RUNDIR/timing/model_timing_stats` after each run (the next run replaces it) and compare the saved files. Timers
+are inclusive and `max` is the slowest process. Repeat on an otherwise idle node before quoting a timer (a build
+sharing the node invalidates it), alternate the two cases, and name the configuration, including gridcells per
+task. Timers a change doesn't touch are the control: they should come out near 1.00x.
+
 ## Verifying changes
 
 - `spel run` diffs `fut-outputs*.nc` against `spel-outputs*.nc` in `unit-tests/input-data/<case>/`.
