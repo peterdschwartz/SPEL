@@ -83,19 +83,19 @@ declin = -0.4030289369547867
 #ifdef _OPENACC
    call update_params_acc()
 
-   ! Manual deep copy of the unit-test data (SpelAccDataMod)
-   !#ACC_COPYIN
-
    call get_proc_bounds(bounds_proc)
    call get_clump_bounds(1, bounds_clump)
-   !$acc enter data copyin(bounds_clump)
-
-   ! Set the filters now that the data they read is on the device (filterMod
-   ! may build them in compute regions), then sync the host and device copies
+   ! Build the filters on the host before the device copy-in, as ELM's initialization does
+   ! (filterMod's serial loops fill the patch filters on the host; the deep copy then takes
+   ! them to the device; after copy-in a setFilters call would mix host- and device-built filters)
    allocate (icemask_dummy_arr(bounds_clump%begg:bounds_clump%endg))
    icemask_dummy_arr(:) = 0._r8
    call setFilters(bounds_clump, icemask_dummy_arr)
-   call spel_acc_update_filters()
+   ! Manual deep copy of the unit-test data (SpelAccDataMod)
+   !#ACC_COPYIN
+
+   !$acc enter data copyin(bounds_clump)
+
 
    ! Keep the time-step input buffers on the device; read_elmtypes then
    ! copies each step's inputs on the device

@@ -51,6 +51,7 @@ from spel.scripts.fortran_parser.scope_walk import (
     LoopInfo,
     SubroutineRecord,
 )
+from spel.transforms.core.fortran import directive_clauses
 from spel.transforms.acc_directives import (
     DATA_CONSTRUCTS,
     AccDirective,
@@ -155,14 +156,7 @@ def _var_clauses(name: str, names: list[str], width: int = 60) -> list[str]:
 
 def format_directive(indent: str, head: str, clauses: list[str]) -> list[str]:
     """`!$omp head clauses`, continued with `&` / `!$omp` when too long."""
-    lines = [f"{indent}!$omp {head}"]
-    for c in clauses:
-        if len(lines[-1]) + 1 + len(c) <= MAX_LINE:
-            lines[-1] += f" {c}"
-        else:
-            lines[-1] += " &"
-            lines.append(f"{indent}!$omp   {c}")
-    return lines
+    return directive_clauses(indent, head, clauses, MAX_LINE)
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +416,7 @@ def plan_compute_loop(
     for var, (kind, accesses) in sorted(inside.items(), key=lambda kv: kv[1][1][0]):
         if var in par_idx or var in red_vars:
             continue
-        decl = rec.declaration(var)
+        decl = rec.declaration(var, host=True)  # a host-associated array is an array, not a scalar
         if decl is not None and "parameter" in decl.attrs:
             continue
         written = any("w" in s for _, s, _ in accesses)
@@ -701,3 +695,57 @@ def case_modules(fut, case_dir: Path) -> list[str]:
             if any(d.is_compute_loop for d in find_directives(path.read_text().splitlines())):
                 out.append(name)
     return sorted(out)
+
+
+# --- the transform ----------------------------------------------------------------------------
+
+from spel.transforms.core.registry import transform as _register  # noqa: E402
+from spel.transforms.core.transform import Transform as _Transform  # noqa: E402
+
+
+@dataclass
+class Options:
+    modules: list[str] = field(default_factory=list, metadata={"help": "modules to translate"})
+    case: Optional[str] = field(default=None, metadata={
+        "help": "unit-test case: translate the case's copies (its modules with OpenACC loops by default)"})
+
+
+@_register
+class AccToOmp(_Transform):
+    """
+    Matches: OpenACC loop constructs of the given modules (or of a unit-test case's modules).
+    Changes: each becomes the equivalent OpenMP directive (`parallel do` with privatized
+             scalars and reductions, `atomic`), data directives are removed.
+    Refuses: (reports) constructs it can't translate; non-loop compute regions stay serial.
+    """
+
+    name = "acc2omp"
+    summary = "translate OpenACC loop directives to OpenMP (CPU threading of ported code)"
+    Options = Options
+
+    def build(self, ctx, opts):
+        from spel.scripts.config import unittests_dir
+        from spel.transforms.core.edits import replace
+        from spel.transforms.core.transform import Change, Plan, Refusal
+
+        case_dir = Path(unittests_dir) / opts.case if opts.case else None
+        if case_dir is not None and not case_dir.is_dir():
+            raise SystemExit(f"no unit-test case {case_dir}")
+        modules = opts.modules or (case_modules(ctx.fut, case_dir) if case_dir else [])
+        if not modules:
+            raise SystemExit("acc2omp: name the modules to translate, or give --case")
+        plan = Plan(self.name)
+        for tr in translate_modules(ctx.fut, modules):
+            plan.notes.append(tr.report())
+            plan.refusals += [Refusal(tr.path.name, str(n)) for n in tr.notes if n.level == "error"]
+            if case_dir is None:
+                path = tr.path if tr.path.is_absolute() else ctx.srcroot / tr.path
+                plan.add(Change(path, [replace(e.start_ln, list(e.new), n=e.end_ln - e.start_ln + 1)
+                                       for e in tr.edits], where=tr.path.name))
+                continue
+            dest = case_dir / tr.path.name
+            try:
+                plan.new_files[dest] = "".join(tr.apply(dest.read_text().splitlines(keepends=True)))
+            except TranslationError as err:
+                plan.refusals.append(Refusal(dest.name, str(err)))
+        return plan

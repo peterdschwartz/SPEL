@@ -153,7 +153,7 @@ come from `nsets` (`spel run <case> 128`), not from a new capture.
   flag, so gfortran timings are meaningless (coverage counters also contend under threads).
   Profile with nvfortran (`-fast`).
 - gfortran `ACC=MULTICORE` runs on one thread (GCC has no multicore OpenACC target). To run a
-  case multithreaded with gfortran, translate it with `spel acc2omp --case <case>` and build with
+  case multithreaded with gfortran, translate it with `spel transform acc2omp --case <case>` and build with
   `SPEL_ACC=OPENMP` (`-fopenmp -U_OPENMP`; threads from `OMP_NUM_THREADS`). `-U_OPENMP` keeps
   ELM's own `#ifdef _OPENMP` clump-threading code off, as in the analysis (it needs
   `shr_sys_abort` and aborts outside threaded regions). `spel create` undoes the translation, so
@@ -209,6 +209,13 @@ feature that needs to know what a statement *is* or which names it uses must get
   strings and keyword arguments counted as variables, continuation lines missed). Regexes are fine
   only for pure text work that classifies nothing: placing an edit at a known line, renaming a
   token the parser has already identified, or reading non-Fortran text.
+- In-line edits (rewrite a subscript, add an argument, replace an expression) take their columns
+  from the parser: `parse_routine(..., keep_spans=True)` (or `Parser(keep_spans=True)`) gives every
+  token and expression node a `span` `(ln0, c0, ln1, c1)` into the file's physical lines (0-based,
+  `c1` exclusive; continuations, comment lines and `;` handled), `SubroutineDefinitionConstruct
+  .args_close` the `)` of the dummy list. Edit with `core.edits.replace_span`/`replace_cols`
+  (`TextEdit`), not a regex over the line (`compact/rewrite.py::rewrite_site` is the example). Spans
+  are off by default and not in the pickled record: re-parse the routine where you need them.
 - If the parser or walker lacks what you need (a construct it rejects, a node that drops
   information, an event the walker doesn't record), **extend the parser** rather than working around
   it: add the node/field/event, make any behaviour change opt-in when existing callers depend on the
@@ -225,12 +232,17 @@ feature that needs to know what a statement *is* or which names it uses must get
   After editing E3SM sources, pass `--reanalyze`; otherwise the generated test may contain
   stale routine code. SPEL warns when HEAD or uncommitted `components/elm` changes differ
   from the cache, but it does not rebuild automatically. The analysis is pickled, so changes to
-  the parser, AST or walker (`spel/scripts/fortran_parser/`) also need `--reanalyze`.
+  the parser, AST or walker (`spel/scripts/fortran_parser/`) also need `--reanalyze`. So do changes
+  to `spel/scripts/edit_files.py`: the edited ELM sources `spel create` copies into a case are cached
+  too (`<cache>/elm_drv/src/`), so a generator fix shows up only after `--reanalyze`.
 - `meta.json` in the cache lists `failures`/`incomplete` routines; a refactor that doesn't parse
   shows up there (e.g. `SemanticError: Undeclared symbol ...`) and `spel create` refuses it.
 - **Line numbers are 0-based indices** into the source file everywhere (`LineTuple.ln`,
   `Subroutine.startline`, the record's events and loops). Add 1 when printing file lines.
-  (Files with `#include "shr_assert.h"` used to be off by one; fixed in `remove_cpp_directives`.)
+  (Files with `#include "shr_assert.h"` used to be off by one; fixed in `remove_cpp_directives`.
+  Lines after a removed cpp block of about 8+ lines, which cpp collapses into one line marker, were
+  shifted until 2026-10-28; fixed in `modify_file`/`check_sections`. Edits placed by earlier analyses
+  in such files may be misplaced.)
 - `Subroutine.record` (`SubroutineRecord`, `scope_walk.py`) is the source of truth for a routine:
   declarations (rank, attributes, intent), every access with line, status and origin, calls,
   associate frames, and `loop_nest` (`LoopInfo`: extent, index, parent/children, variables read by
@@ -302,10 +314,69 @@ feature that needs to know what a statement *is* or which names it uses must get
 - The loader must load every table in `schema.TABLES` (it checks the CSVs exist, not that it reads
   them: `module_deps` was once silently skipped). Add a loader step with any new table.
 
+## Source transforms (`spel transform`, `spel/transforms/core`)
+
+- New transforms subclass `core.transform.Transform` (`name`, `summary`, an `Options` dataclass,
+  `build(ctx, opts) -> Plan`), register with `@transform` and get listed in
+  `core/registry.py::BUILTINS`. Build edits with `core.edits` (`insert`/`replace`/`stacked`), find
+  code with `core.query` and the record, emit Fortran with `core.fortran`; never write files in a
+  transform (the driver does). Status and the
+  remaining phases are in `spel/transforms/DESIGN.md` §7.
+- Every source rewrite is a `spel transform NAME` (`spel transform list`). The former commands
+  (`spel acc2omp`, `compact rewrite`, `device-data`, `split`, `nutrient extract|species|merge|groups|
+  history|restart`) are removed and only print their replacement (`cli.py::REMOVED`); don't add new
+  rewrite commands outside the registry. `spel compact inventory`, `spel nutrient common|procedures`
+  and `spel accplan` are reports and stay commands. `spel accplan MODULES --lint` judges the loops that already carry a
+  directive (level-outer gang loops with a filter loop inside, coarser-level arrays written from a filter loop).
+- Filter-to-filter maps: `core/filter_maps.py` knows clumpfilter's `soilc_soilp_beg/end` (the soil patches
+  of soil column fc are `soilp(beg(fc):end(fc))`), which filter instance holds which patches, and finds the
+  loops over a filtered column's patches (`pfti(c)..pftf(c)`, `pfti(c)+pi-1`) with an exactness verdict
+  (`ctx.child_loops` in a transform). `spel transform filter-map` rewrites the exact ones and threads the map
+  (and `filter_soilp` where missing) through the analyzed callers as keyword actuals; callers outside the
+  analysis (elm_interface_funcsMod) need the same by hand.
+- Transforms that replace hand edits of the GPU branch (2026-11-03; all bit-for-bit on the RD/ECA/FATES
+  regression, `$SCRATCH/prsplit/v2/tools/regress.sh`): `scalarize-locals` (local_forms' per-iteration
+  arrays -> scalars), `filter-locals` (clump-sized work arrays stored on their filter, across calls as
+  groups: filter_locals_ip.py), `drop-dummies` (unused `bounds` dummies and their actuals),
+  `acc-routines` (`!$acc routine seq` exactly on the routines kernels reach), `acc-declares`
+  (`acc declare create` for module data device code uses; scalars in kernels are firstprivate),
+  `acc-strip` (remove directives; `--sync-only` = acc-sync's updates). Dropping clump sections of
+  type components (`x(bounds%begc:bounds%endc)` -> `x`) is NOT safe: components span the process
+  bounds, a clump is a slice of them.
+- `spel gates [--config PRESET|lnd_in] [--allow TEXT...]`: collapse-bounds, acc-declares and
+  acc-routines have nothing left to do, acc-sync's syncs are all present (config-aware), no stale
+  pushes; exit 1 on a failure. Replaces spelval/tools sync_drift/stale_updates/collapse_inquiry_scan/
+  missing_declares and scope.py.
+- The record can miss uses the file has: the analysis walks copies whose namelist-inactive
+  branches are commented out (`!#py`, e.g. DUSTMod's `dust_emis_scheme == 1` block), and I/O
+  statements are blanked. A transform that changes every use of a name (filter-locals) must check
+  the span-parsed original routine (`parse_routine(..., keep_spans=True, skip_io=True, cpp=True)`)
+  and refuse when it holds uses the plan did not cover; an uncovered use segfaulted all three
+  regression runs on 2026-11-03.
+- The driver keeps each file's line endings (CRLF stays CRLF: `driver.newline_of`); transforms see
+  `\n`-split lines.
+- A refused transform writes nothing and still exits 0 (exit 1 only on `--verify` problems, 2 on a
+  pipeline stop); scripts must check for the output they expect (`e3sm_casegen.sh --compact` checks
+  for `.spel-compact.json`).
+- Test a transform on a snippet with `core/testing.py` (`check_transform(T, before, after,
+  tmp_path)`, `check_pipeline` for several steps): it analyzes one file (undeclared names become
+  module globals) and checks the result parses and that a second run changes nothing.
+- A multi-step `--spec` runs as `core/pipeline.py::Pipeline` (each step plans on the previous one's
+  text, the touched routines re-parsed in memory, written once). Anything that reads sources in a
+  transform must go through `ctx.lines`, `Path.read_text`/`open` or `apply_preprocessor` so the
+  pipeline's overlay (`VirtualFS`, `edit_files.SOURCE_OVERRIDES`) serves it the edited text; a new
+  parse cache must key on that text, as `module_spec._key` does.
+- Refactoring a transform: compare golden outputs before and after, on a fixed srcroot, with
+  `python -m spel.transforms.tools.golden OUT --srcroot SRC --only PASS ...` (old code from a
+  `git worktree` of HEAD) and `diff -r`; `--chain nutrient` replays the nutrient refactor (through `spel transform`). Plans must
+  not depend on set order: run a pass under two `PYTHONHASHSEED`s if outputs look flaky.
+- pytest needs `DJANGO_DEBUG=true` in the environment (the Django settings refuse to load without
+  a secret otherwise).
+
 ## Compact layout (`spel compact`)
 
 - Since 2026-10-22 the E3SM branch no longer carries the compact rewrite: the layout is applied per
-  case at build time, `e3sm_casegen.sh --compact` (= `spel compact rewrite --srcroot SRC --reanalyze
+  case at build time, `e3sm_casegen.sh --compact` (= `spel transform compact-rewrite --srcroot SRC --reanalyze
   -o CASE/SourceMods/src.elm`, case name gets `.compact`; `COMPACT_ARGS` env adds options such as
   `--roles`). The branch does carry `CompactLayoutMod.F90` (the history readers use it); the rewrite
   requires it to equal the SPEL template `spel/transforms/compact/templates/CompactLayoutMod.F90` and
@@ -316,7 +387,7 @@ feature that needs to know what a statement *is* or which names it uses must get
   Design and rules: `spel/transforms/compact/DESIGN.md`; deferred fields: `DEFERRED.md`.
 - The inventory is deliberately conservative: false positives (e.g. value-dependent guards like
   `ch4_prod`'s `lake`) are reviewed by hand, not analyzed away.
-- `rewrite` needs the analysis of exactly the sources it edits (`spel analyze` first) and refuses
+- `compact-rewrite` needs the analysis of exactly the sources it edits (`spel analyze` first) and refuses
   sources that already have `CompactBindMod.F90` or `.spel-compact.json`. Test it with
   `-o $CASE/SourceMods/src.elm` against a baseline case built from the same commit (bit-for-bit
   history files; `$SCRATCH/prsplit/validate_level.sh LABEL SRC REF` with `COMPACT_ARGS` does this).
@@ -341,7 +412,7 @@ feature that needs to know what a statement *is* or which names it uses must get
   patches) in a per-column parallel loop with `!$acc loop seq` inside, not with OpenACC
   `reduction` clauses or reordered partial sums. List every scalar assigned in a compute loop in
   `private`, and give local work arrays a `!$acc data create(...)` region.
-- `spel acc2omp --dry-run` doubles as a race check for OpenACC code: `added vs OpenACC` lists
+- `spel transform acc2omp --dry-run` doubles as a race check for OpenACC code: `added vs OpenACC` lists
   scalars the analysis privatizes but the OpenACC clauses don't.
 - `private` arrays need compile-time bounds: nvfortran `ACC=MULTICORE` corrupts the heap
   (`free(): invalid pointer`, even on one thread) with automatic ones such as `x(-nlevsno+1:0)`.
@@ -349,6 +420,15 @@ feature that needs to know what a statement *is* or which names it uses must get
   (`x(-nlevsno+1:0) = ...`). Private elements a thread never sets are NaN on the GPU but stale
   finite values on the CPU, so a GPU-only NaN often means an uninitialized private or a local that
   is never copied to the device.
+
+## Comparing E3SM timings
+
+Use `./elm_timing_compare.py CASE_A CASE_B --labels a b --top 30 [--format markdown]` (repo root; takes a case,
+run or timing directory, or a saved stats file). Don't write a new parser. For a repeated comparison, copy
+`RUNDIR/timing/model_timing_stats` after each run (the next run replaces it) and compare the saved files. Timers
+are inclusive and `max` is the slowest process. Repeat on an otherwise idle node before quoting a timer (a build
+sharing the node invalidates it), alternate the two cases, and name the configuration, including gridcells per
+task. Timers a change doesn't touch are the control: they should come out near 1.00x.
 
 ## Verifying changes
 

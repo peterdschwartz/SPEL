@@ -177,3 +177,44 @@ def test_multi_trigger_cascades():
 def test_multi_trigger_guard_has_no_trigger_expectation():
     guard = AllOf((Expectation("carbon_only", "True"),))
     assert simplify(cascade_to_triggers(guard)) == NO_EXPECTATION
+
+
+# if (get_do_transient_pfts()) then   (dynSubgridDriverMod: dynpft_interp)
+TRANSIENT_PFTS = FuncExpression(tok=tok, fn=Identifier(tok=tok, value="get_do_transient_pfts"), args=[])
+
+
+def test_function_of_no_arguments_is_a_cascade_variable():
+    assert infer_condition_expectations(TRANSIENT_PFTS, {"get_do_transient_pfts"}) == Expectation(
+        "get_do_transient_pfts", "True")
+    # an array element of the same name is not (only functions of no arguments)
+    elem = FuncExpression(tok=tok, fn=Identifier(tok=tok, value="get_do_transient_pfts"),
+                          args=[Identifier(tok=tok, value="i")])
+    assert infer_condition_expectations(elem, {"get_do_transient_pfts"}) == NO_EXPECTATION
+
+
+def test_transient_data_accessors_follow_the_dynamic_subgrid_namelist():
+    for what in ("pfts", "crops"):
+        dep = NML_CASCADES[f"get_do_transient_{what}"]
+        assert dep.trigger_name == f"do_transient_{what}"
+        assert dep.trigger_defaults == (".false.",)
+        cond = infer_condition_expectations(
+            FuncExpression(tok=tok, fn=Identifier(tok=tok, value=f"get_do_transient_{what}"), args=[]),
+            {f"get_do_transient_{what}"})
+        assert cascade_to_triggers(cond) == Expectation(f"do_transient_{what}", "True")
+
+
+def test_configuration_takes_the_trigger_defaults():
+    from types import SimpleNamespace as NS
+
+    from spel.transforms.core.config import Configuration
+
+    f = NS(start_ln=10, end_ln=14, nml_vars={}, nml_cascades={"get_do_transient_pfts": NML_CASCADES["get_do_transient_pfts"]},
+           condtional_expectation=Expectation("get_do_transient_pfts", "True"))
+    fut = NS(subroutine_dict={"m::s": NS(id="m::s", flat_ifs=[f])})
+    cfg = Configuration({})
+    cfg.add_defaults(fut)
+    assert cfg.values["do_transient_pfts"] is False
+    assert cfg.dead_branches(fut.subroutine_dict["m::s"]) == [(11, 13)]
+    on = Configuration({"do_transient_pfts": True})
+    on.add_defaults(fut)
+    assert on.dead_branches(fut.subroutine_dict["m::s"]) == []

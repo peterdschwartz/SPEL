@@ -202,12 +202,14 @@ directly with [`spel repl`](#spel-repl).
 Some changes touch a large number of files and are only practical with the analysis behind them.
 SPEL's formal parsing approach facillitates programmatic querying and transformation of ELM source code.
 Examples include:
-- [`spel compact`](#spel-compact) inventories the flux fields zeroed every step and rewrites a
-  type's fields to a compact subgrid layout.
-- `spel split` moves type definitions and their procedures out of large modules into new ones and
-  rewrites every `use` of a moved name.
+- [`spel compact`](#spel-compact) inventories the flux fields zeroed every step;
+  `spel transform compact-rewrite` rewrites a type's fields to a compact subgrid layout.
+- `spel transform split` moves type definitions and their procedures out of large modules into new
+  ones and rewrites every `use` of a moved name.
 - `spel nutrient` finds the fields the carbon, nitrogen and phosphorus variants of a type share,
-  as candidates for a common base type, and can extract and merge them.
+  as candidates for a common base type; the `spel transform nutrient-*` steps extract and merge them.
+
+All source rewrites go through [`spel transform`](#spel-transform).
 
 ## Directory layout
 
@@ -279,10 +281,9 @@ All commands are subcommands of `spel`. Run `spel <command> --help` for the auth
 | [`spel subset`](#gridcell-subsets) | Write some gridcells of a case's reference data as a new case's |
 | [`spel run`](#spel-run) | Configure, build, and run a generated unit test, then validate it against ELM's data |
 | [`spel profile`](#spel-profile) | Build and run a unit test without outputs under Nsight Systems/Compute |
-| [`spel acc2omp`](#spel-acc2omp) | Translate modules' OpenACC directives to OpenMP (to run multithreaded with gfortran) |
-| [`spel compact`](#spel-compact) | Inventory flux fields for a compact subgrid layout, and rewrite a type's fields to use it |
+| [`spel transform`](#spel-transform) | Source-to-source transforms: OpenACC porting, `acc2omp`, compact layout, nutrient refactor, `split`, `prune`, ... (`spel transform list`) |
+| [`spel compact`](#spel-compact) | Inventory flux fields for a compact subgrid layout (the rewrite is `spel transform compact-rewrite`) |
 | [`spel accplan`](#spel-accplan) | Propose an OpenACC loop structure (collapse, column-parallel, interchange, scatter) per loop |
-| `spel split` | Move type definitions and their procedures into new modules, rewriting every `use` |
 | `spel nutrient` | Find the fields C/N/P type variants share (candidates for a common base type) |
 | [`spel restore`](#spel-restore) | Copy the files changed in a unit-test case back into the E3SM checkout |
 | [`spel diff`](#spel-diff) | Compare two netCDF files and report relative error |
@@ -560,7 +561,7 @@ and the like come from the machine file, and `make` gets `-j<make_jobs>`. Runnin
 | `OFF` (default) | none | `!$acc` directives are comments |
 | `MULTICORE` | nvfortran: `-acc=multicore -Minfo=accel` | compute regions run on host threads; set the count with `ACC_NUM_CORES` (default: all cores). gfortran only gets `-fopenacc -foffload=disable` and a warning: GCC has no multicore target, so regions run on one thread |
 | `GPU` | nvfortran: `-acc=gpu -gpu=deepcopy -Minfo=accel -cuda` | needs nvfortran (`-DGPU=ON` still works as an alias) |
-| `OPENMP` | gfortran: `-fopenmp -U_OPENMP`; nvfortran: `-mp -Minfo=mp -U_OPENMP` | threads the clump loop (`SPEL_CLUMPS`) and sources translated by [`spel acc2omp`](#spel-acc2omp); set the thread count with `OMP_NUM_THREADS`. `-U_OPENMP` keeps ELM's own `#ifdef _OPENMP` code off, as in the analysis |
+| `OPENMP` | gfortran: `-fopenmp -U_OPENMP`; nvfortran: `-mp -Minfo=mp -U_OPENMP` | threads the clump loop (`SPEL_CLUMPS`) and sources translated by [`spel transform acc2omp`](#acc2omp); set the thread count with `OMP_NUM_THREADS`. `-U_OPENMP` keeps ELM's own `#ifdef _OPENMP` code off, as in the analysis |
 
 ```bash
 # nvfortran needs its own netcdf-fortran build (.mod files are compiler specific) on
@@ -633,7 +634,71 @@ an `acc2omp` case, `--link-inputs` points a new case at the reference case's inp
 (`results.csv`, `summary.txt`, the `.nsys-rep` reports and build/run logs). For weak scaling,
 run it again with `nsets` proportional to the core count.
 
-### `spel acc2omp`
+### `spel transform`
+
+One front end for SPEL's source-to-source transforms (`spel/transforms/`). Each transform is a
+registered class that states what it matches, what it changes and what it refuses, and builds a
+plan (edits, refusals, notes); the shared driver reports, diffs, writes and verifies it.
+
+```bash
+spel transform list                                   # the transforms, one line each
+spel transform explain collapse-bounds                # what it does, and its options
+spel transform section-loops --dry-run --report       # plan only: what would change where
+spel transform acc-apply --where SoilTemperature      # before/after at matching locations
+spel transform acc-sync --diff -o /tmp/out --verify   # write flat into DIR, re-parse the result
+spel transform --spec steps.toml -o /tmp/out          # several steps, each on the previous one's output
+```
+
+Options of each transform are flags (`spel transform NAME --help`). A spec file names one
+`transform` with an `[options]` table, or a list of `[[step]]`s:
+
+```toml
+[[step]]
+transform = "section-loops"
+[[step]]
+transform = "acc-apply"
+options = { roots = ["elm_driver::elm_drv"] }
+```
+
+The steps of a spec run as a pipeline: each plans on the text the earlier ones produced (the
+analysis of the edited files is refreshed in memory, routine by routine), and the net result is
+written once; `--dry-run` shows each step's plan on its predecessors' output. A step whose output
+the in-memory analysis can't follow (new declarations or `use`s in a module head, a new Fortran
+file, a moved routine header) stops the pipeline before anything is written; `--reanalyze-steps`
+then runs the steps one at a time in place, with a full reanalysis in between.
+
+Each write appends to `.spel-transforms.json` in the output directory (or the srcroot). A transform
+that refuses the whole input reports why and writes nothing. `-o DIR` writes by basename and doesn't
+clear `DIR`: use a fresh directory (e.g. a new case's `SourceMods/src.elm`). The API and its
+status are in `spel/transforms/DESIGN.md`.
+
+The transforms replace the former commands `spel acc2omp`, `spel compact rewrite`,
+`spel device-data`, `spel split` and `spel nutrient extract|species|merge|groups|history|restart`,
+which now only print their replacement:
+
+| Former command | Now |
+|----------------|-----|
+| `spel acc2omp MOD ... [--case CASE]` | `spel transform acc2omp [--modules MOD ...] [--case CASE]` |
+| `spel compact rewrite [opts]` | `spel transform compact-rewrite [opts]` (same option names; `--replace` is gone: use an empty `-o` directory) |
+| `spel device-data [--print]` | `spel transform device-data [--dry-run --diff]` |
+| `spel nutrient STEP [opts]` | `spel transform nutrient-STEP [opts]` |
+| `spel split` | `spel transform split` |
+
+The reports stay commands: `spel compact inventory`, `spel nutrient common|procedures` and
+`spel accplan`. The nutrient refactor of a whole checkout, one commit per step, is
+`nutrient_refactor.sh`.
+
+#### `prune`
+
+`spel transform prune` deletes the derived-type members (of every analyzed type) that nothing
+uses: every `%name` reference under `components/elm` only declares, allocates, deallocates,
+nullifies or resets the member to a constant. Those statements go with it. References are
+matched by component name across types, so a name used anywhere keeps every member of that name.
+The EMI stub/demo and git submodules (FATES) are searched but never edited. `--report --verbose`
+lists the kept members with the reason. It edits type declarations, so in a spec it needs
+`--reanalyze-steps`.
+
+#### `acc2omp`
 
 Translates the OpenACC directives of analyzed modules to OpenMP, so a unit test can run
 multithreaded with gfortran (GCC has no OpenACC multicore target). The data-sharing clauses
@@ -654,13 +719,13 @@ version too). Data directives (`data`, `enter/exit data`, `update`, `declare`, .
 `!$acc parallel`/`kernels` regions without `loop` are left as OpenACC (serial) and reported.
 
 ```bash
-spel acc2omp --case soiltemp_acc --diff            # rewrite the case's copies in place
+spel transform acc2omp --case soiltemp_acc --diff                     # rewrite the case's copies in place
 SPEL_ACC=OPENMP OMP_NUM_THREADS=6 spel run soiltemp_acc
-spel acc2omp soiltemperaturemod -o /tmp/omp        # translated copies of the E3SM sources
-spel acc2omp soiltemperaturemod --dry-run          # report only
+spel transform acc2omp --modules soiltemperaturemod -o /tmp/omp       # translated copies of the E3SM sources
+spel transform acc2omp --modules soiltemperaturemod --dry-run --report # report only
 ```
 
-With `--case` and no module names, every analyzed module of the case with OpenACC compute
+With `--case` and no `--modules`, every analyzed module of the case with OpenACC compute
 loops is translated. Edits are located by content, so they apply to the case copies even
 though `spel create` shifted their lines. `spel create` regenerates the case without them.
 The analysis must include loop-nest information (rebuild an older cache with `spel analyze`).
@@ -671,14 +736,15 @@ Stores subgrid fields on the elements of their filter (contiguous per clump) ins
 whole `begp:endp` range. `inventory` traces one time step from `elm_drv` and reports, for every
 field the per-step `SetValues` zeroes, how each access indexes it, whether its value lives across
 steps (history, restart), and whether it can use the compact index directly, needs maps, or is
-blocked. `rewrite` gives the fields of one type that qualify compact storage in the E3SM sources
-(or writes the rewritten files to `-o DIR`, e.g. a case's `SourceMods/src.elm`). The design,
-rules and open items are in `spel/transforms/compact/DESIGN.md`.
+blocked. The transform `compact-rewrite` gives the fields of one type that qualify compact
+storage in the E3SM sources (or writes the rewritten files to `-o DIR`, e.g. a case's
+`SourceMods/src.elm`; `e3sm_casegen.sh --compact` does this). The design, rules and open items
+are in `spel/transforms/compact/DESIGN.md`.
 
 ```bash
 spel compact inventory --verdict blocked -o inventory.json
-spel compact rewrite --type vegetation_carbon_flux --dry-run --diff
-spel compact rewrite --type vegetation_carbon_flux -o $CASE/SourceMods/src.elm
+spel transform compact-rewrite --type vegetation_carbon_flux --dry-run --diff --excluded
+spel transform compact-rewrite --type vegetation_carbon_flux -o $CASE/SourceMods/src.elm
 ```
 
 ### `spel diff`

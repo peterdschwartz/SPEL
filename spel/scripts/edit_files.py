@@ -49,6 +49,8 @@ ModParseResult = tuple[dict[str, SubInit], list[str]]
 
 # Compile list of lower-case module names to remove
 # SPEL expects these all to be lower-case currently
+# (dynpftFileMod/dyncropFileMod were here until 2026-10-30: their dynVar* modules come from
+# genf90 templates, which spel.scripts.genf90 now generates for the analysis)
 bad_modules = {
     "abortutils",
     "shr_log_mod",
@@ -84,11 +86,8 @@ bad_modules = {
     "shr_mct_mod",
     "shr_pcdf_mod",
     "shr_pio_mod",
-    "ndepstreammod",
     "spmdgathscatmod",
     "perfmod_gpu",
-    "dynpftfilemod",
-    "dyncropfilemod",
     "dynfateslandusechangemod",
     "cnallocationbetrmod",
     "dynedmod",
@@ -460,7 +459,7 @@ def handle_bad_inst(state: ParseState, logger: Logger):
             start_index = state.get_start_index()
             _, _ = state.line_it.consume_until(regex_do_end, regex_do_start)
             state.line_it.comment_cont_block(index=start_index)
-        else:
+        elif not keep_lhs_write(state, l_cont):
             # simple statement just remove
             set_comment(state, logger)
     elif (
@@ -679,6 +678,74 @@ class NameSetPattern:
 
 def flat_names(names: set[str]) -> set[str]:
     return {n for el in names for n in el.split("|") if n}
+
+
+_NOT_ASSIGNMENT = re.compile(
+    r"^\s*(\w+\s*:\s*)?(if|do|call|where|forall|select|case|else|end|print|write|read|allocate|deallocate|"
+    r"nullify|return|cycle|exit|goto|go\s+to|stop|use|implicit|type|class|integer|real|logical|character)\b",
+    re.IGNORECASE,
+)
+_DESIGNATOR = re.compile(r"[A-Za-z_]\w*(\s*\([^=]*\))?(\s*%\s*[A-Za-z_]\w*(\s*\([^=]*\))?)*")
+
+
+def top_level_assignment(text: str) -> int | None:
+    """Index of the `=` of an assignment statement: at parenthesis depth 0, outside quotes,
+    not part of `==`, `/=`, `<=`, `>=` or `=>`."""
+    depth, quote = 0, ""
+    for i, c in enumerate(text):
+        if quote:
+            if c == quote:
+                quote = ""
+            continue
+        if c in "'\"":
+            quote = c
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == "=" and depth == 0:
+            if text[i + 1 : i + 2] in ("=", ">") or text[i - 1 : i] in ("=", "/", "<", ">"):
+                return None
+            return i
+    return None
+
+
+def keep_lhs_write(state: ParseState, l_cont: str) -> bool:
+    """
+    `lhs = <expression using a banned name>`: the statement cannot stay (the name is gone
+    from the unit test), but the analysis must keep the write of `lhs`. pdep_interp's
+    `atm2lnd_vars%forc_pdep_grc(g) = sdat%avs(1)%rAttr(1,ig) / ...` (sdat is a shr_strdata
+    type) was commented out whole, so no analysis saw forc_pdep written and the device data
+    layer never pushed it. The statement becomes the no-op `lhs = lhs`, which the scope
+    walker records as a write only (a self-assignment reads nothing). Returns False when the
+    statement is not such an assignment (the caller comments it out).
+    """
+    text = l_cont.split("!")[0].strip() if "'" not in l_cont and '"' not in l_cont else l_cont.strip()
+    if not text or _NOT_ASSIGNMENT.match(text):
+        return False
+    pos = top_level_assignment(text)
+    if pos is None:
+        return False
+    lhs = text[:pos].strip()
+    if not _DESIGNATOR.fullmatch(lhs):
+        return False
+    bad = flat_names(state.bad_names)
+    if any(n.lower() in bad for n in re.findall(r"[A-Za-z_]\w*", lhs)):
+        return False
+    base = re.match(r"[A-Za-z_]\w*", lhs).group(0).lower()
+    if base in state.opaque_names:
+        # an object of a header type (an integer stand-in, see unittest_defs.h): `x%...`
+        # does not compile, so the statement goes with the excluded module
+        # (AllocationMod: `elm_fates%fates(ci)%bc_in(s)%plant_nh4_uptake_flux(f,1) = ...`)
+        return False
+    frame = state.routine_stack[-1] if state.routine_stack else None
+    if lhs.lower() == base and not (frame and base in frame.dummy_args):
+        # a bare scalar that is not a dummy: no caller or global sees the write, and a
+        # self-assignment inside a kernel makes nvfortran treat the scalar as loop-variant
+        # (AllocationMod: `n_pcomp = n_pcomp` -> NVFORTRAN-S-1047 on `do f = 1, n_pcomp`)
+        return False
+    rewrite_statement(state, f"{lhs} = {lhs}  ! spel: the right-hand side used an excluded module")
+    return True
 
 
 def split_top_level(text: str, sep: str = ",") -> list[str]:
@@ -1213,19 +1280,42 @@ def remove_cpp_directives(
     return work_lines
 
 
-def apply_preprocessor(fn: Path) -> list[str]:
+# Text to preprocess instead of a file's content on disk (os.path.abspath -> text). Set while
+# transforms plan on edited text that isn't written yet (spel.transforms.core.capture.VirtualFS).
+SOURCE_OVERRIDES: dict[str, str] = {}
+
+
+def apply_preprocessor(fn: Path, extra_macros: tuple[str, ...] = ()) -> list[str]:
+    """
+    cpp output of `fn` with the analysis macros (plus `extra_macros`, e.g. `_OPENACC`
+    to see the lines a GPU build activates).
+    """
+    fn = Path(fn)
     base_fn = fn.name
     new_fn = Path(f"{spel_output_dir}/cpp_{base_fn}")
 
     # Set up cmd for preprocessing. Get macros used:
-    macros_string = "-D" + " -D".join(macros)
-    cmd = f"gfortran -I{E3SM_SRCROOT}/share/include {macros_string} -cpp -E {fn} > {new_fn}"
-    _ = sp.getoutput(cmd)
+    macros_string = "-D" + " -D".join(list(macros) + list(extra_macros))
+    text = SOURCE_OVERRIDES.get(os.path.abspath(fn))
+    if text is None:
+        cmd = f"gfortran -I{E3SM_SRCROOT}/share/include {macros_string} -cpp -E {fn} > {new_fn}"
+        _ = sp.getoutput(cmd)
+        with open(new_fn, "r") as file:
+            return file.readlines()
 
+    import io
+    import tempfile
+
+    # a same-named copy (cpp line markers name it; local includes still come from fn's directory)
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp) / base_fn
+        with io.open(copy, "w") as f:
+            f.write(text)
+        cmd = (f"gfortran -I{fn.parent} -I{E3SM_SRCROOT}/share/include {macros_string} "
+               f"-cpp -E {copy} > {new_fn}")
+        _ = sp.getoutput(cmd)
     with open(new_fn, "r") as file:
-        cpp_lines = file.readlines()
-
-    return cpp_lines
+        return [line.replace(f'"{copy}"', f'"{os.path.abspath(fn)}"') for line in file.readlines()]
 
 
 regex_end_module = re.compile(r"^\s*end\s*module\b", re.IGNORECASE)
@@ -1304,6 +1394,7 @@ def modify_file(
         in_func=0,
     )
     comment_bad_references(state, pass_manager, fort_mod.end_of_head_ln)
+    comment_bad_calls_in_acc_blocks(state, fn)
 
     if cpp_file:
         # take the commented work_lines and comment corresponding orig_lines
@@ -1318,7 +1409,13 @@ def modify_file(
         parsed_lts = apply_comments(state.work_lines)
         write_lines = [line.line for line in parsed_lts]
 
-    parsed_lines = [line.line for line in parsed_lts]
+    # one entry per line of the file, at its own index: callers number the lines by position
+    # (unwrap_section), and cpp collapses longer runs of removed lines (an inactive #ifdef
+    # block) into one marker that remove_cpp_directives skips, so a compact list would shift
+    # every line after such a block (the routines' cpp_start/cpp_end are file lines too)
+    parsed_lines = [""] * max(len(state.orig_lines), max((lt.ln for lt in parsed_lts), default=-1) + 1)
+    for lt in parsed_lts:
+        parsed_lines[lt.ln] = lt.line
 
     if overwrite:
         out_fn = f"{case_dir}/{fn.name}"
@@ -1326,6 +1423,41 @@ def modify_file(
             ofile.writelines(write_lines)
 
     return state.sub_init_dict, parsed_lines
+
+
+# cpp macros the builds define but the analysis doesn't: their blocks are inactive in the
+# parse, yet a build with them on compiles every line in them
+BUILD_ONLY_MACROS = ("_OPENACC",)
+
+
+def comment_bad_calls_in_acc_blocks(state: ParseState, fn: Path) -> None:
+    """
+    Comment `call <unavailable>` in the lines that only a build-time macro activates
+    (`#ifdef _OPENACC`), including internal procedures of such blocks: cpp drops them from
+    the parse, so comment_bad_references never sees them, and a GPU build then fails to
+    link (`shr_sys_abort` in subgridAveViewMod::subgrid_ave_view_attach's `check`).
+    """
+    if not state.cpp_file:
+        return
+    seen = {lt.ln for lt in state.work_lines}
+    extra = [
+        lt
+        for lt in remove_cpp_directives(
+            apply_preprocessor(fn, BUILD_ONLY_MACROS), str(fn), state.logger
+        )
+        if lt.ln not in seen
+    ]
+    if not extra:
+        return
+    pattern = NameSetPattern(state.bad_names, r"\s*(call)[\s]+({names})", re.IGNORECASE)
+    it = LogicalLineIterator(extra)
+    for fline in it:
+        if fline.line and pattern.search(fline.line):
+            it.comment_cont_block()
+    for lt in extra:
+        if lt.commented:
+            state.orig_lines[lt.ln].commented = True
+            state.logger.debug(f"commented build-only line {lt.ln + 1} of {fn.name}: {lt.line.strip()}")
 
 
 def process_for_unit_test(

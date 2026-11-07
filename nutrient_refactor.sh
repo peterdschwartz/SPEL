@@ -36,16 +36,16 @@ SPEL_ROOT=$(cd "$(dirname "$0")" && pwd)
 
 # step command | commit subject
 STEPS=(
-  "spel nutrient extract|Extract common nutrient base types as a \`core\` component (spel nutrient extract)"
-  "spel nutrient species|Give each nutrient core its species (spel nutrient species)"
-  "spel nutrient merge|Merge shared SetValues/ZeroDWT code into core-component routines"
-  "spel nutrient groups|Group the N/P-only fields into role components (spel nutrient groups)"
-  "spel nutrient merge --procedure init|Merge the shared allocations of the nutrient Init routines into the cores"
-  "spel nutrient history|One history registration per nutrient core field (spel nutrient history)"
-  "spel nutrient restart|One restartvar per nutrient core field (spel nutrient restart)"
-  "spel nutrient merge --procedure summary|Merge shared Summary code into core-component routines"
-  "spel split|Split Vegetation/Column/GridcellDataType into type modules (spel split)"
-  "spel prune|Delete derived-type members nothing accesses (spel prune)"
+  "spel transform nutrient-extract|Extract common nutrient base types as a \`core\` component (spel transform nutrient-extract)"
+  "spel transform nutrient-species|Give each nutrient core its species (spel transform nutrient-species)"
+  "spel transform nutrient-merge|Merge shared SetValues/ZeroDWT code into core-component routines"
+  "spel transform nutrient-groups|Group the N/P-only fields into role components (spel transform nutrient-groups)"
+  "spel transform nutrient-merge --procedure init|Merge the shared allocations of the nutrient Init routines into the cores"
+  "spel transform nutrient-history|One history registration per nutrient core field (spel transform nutrient-history)"
+  "spel transform nutrient-restart|One restartvar per nutrient core field (spel transform nutrient-restart)"
+  "spel transform nutrient-merge --procedure summary|Merge shared Summary code into core-component routines"
+  "spel transform split|Split Vegetation/Column/GridcellDataType into type modules (spel transform split)"
+  "spel transform prune|Delete derived-type members nothing accesses (spel transform prune)"
 )
 
 if [ "$LIST" = 1 ]; then

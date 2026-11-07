@@ -46,35 +46,7 @@ def create(args):
             _run_and_validate(unit_test.case_dir)
 
 
-def device_data(args):
-    from pathlib import Path
-
-    from spel.scripts.analysis_cache import load_analysis
-    from spel.scripts.config import E3SM_SRCROOT
-    from spel.transforms.device.generate import DeviceDataError, apply, generate
-
-    fut = load_analysis(reanalyze=args.reanalyze)
-    srcroot = Path(E3SM_SRCROOT)
-    if args.print_module:
-        texts, p = generate(fut, srcroot)
-        for name, text in texts.items():
-            print(f"! ===== {name}")
-            print(text)
-        for s in p.skipped:
-            print("! skipped:", s)
-        return
-    try:
-        p, report = apply(fut, srcroot, out_dir=Path(args.out_dir) if args.out_dir else None, dry_run=args.dry_run)
-    except DeviceDataError as exc:
-        sys.exit(f"device-data: {exc}")
-    for line in report:
-        print(("would write " if args.dry_run else "") + line)
-    for s in p.skipped:
-        print("skipped:", s)
-
-
 def compact(args):
-    args.type_given = "--type" in sys.argv
     from spel.scripts.analysis_cache import load_analysis
     from spel.transforms.compact.inventory import (
         FLUX_TYPES,
@@ -85,8 +57,6 @@ def compact(args):
     )
 
     fut = load_analysis(reanalyze=args.reanalyze)
-    if args.action == "rewrite":
-        return compact_rewrite(fut, args)
     instances = args.instances.split(",") if args.instances else None
     reports, tracer = build_inventory(fut, types=FLUX_TYPES, instances=instances)
     print(summary(reports))
@@ -101,116 +71,12 @@ def compact(args):
         print(f"\nnot followed (no analysis): {', '.join(sorted(tracer.unwalked))}")
 
 
-def compact_rewrite(fut, args):
-    from spel.scripts.analysis_cache import git_state
-    from spel.scripts.config import E3SM_SRCROOT
-    from spel.transforms.compact.rewrite import RewriteError, Rewriter, manifest
-    from spel.transforms.compact.select import select_fields
-
-    from spel.transforms.compact.holders import family_base, nutrient_manifest, role_types
-
-    types = list(args.type)
-    nm = nutrient_manifest(fut)
-    if nm is not None and not getattr(args, "type_given", False):
-        # nutrient-transformed sources: the shared fields live on the family base types
-        mapped = []
-        for dtype in types:
-            base = family_base(nm, dtype)
-            if base and base not in mapped:
-                mapped.append(base)
-            elif not base and dtype not in mapped:
-                mapped.append(dtype)
-        if getattr(args, "roles", False):
-            mapped += [r for r in role_types(nm, types) if r not in mapped]
-        print(f"types: {', '.join(mapped)} (from .spel-nutrient.json)")
-        types = mapped
-    if getattr(args, "no_map_sites", False):
-        import spel.transforms.compact.select as _sel
-
-        _sel.MAP_SITES = False
-    sels = []
-    for dtype in [] if args.loops_only else types:
-        sel = select_fields(fut, dtype)
-        if getattr(args, "exclude_fields", None):
-            for comp in args.exclude_fields.split(","):
-                if comp in sel.components:
-                    sel.components.pop(comp)
-                    sel.history.pop(comp, None)
-                    sel.levels.pop(comp, None)
-                    sel.restart.pop(comp, None)
-                    sel.excluded[comp] = "--exclude-fields"
-            drop = set(args.exclude_fields.split(","))
-            sel.sites = [st for st in sel.sites if st.components - drop]
-        if getattr(args, "fields", None):
-            keep = set(args.fields.split(","))
-            for comp in list(sel.components):
-                if comp not in keep:
-                    sel.components.pop(comp)
-                    sel.history.pop(comp, None)
-                    sel.levels.pop(comp, None)
-                    sel.excluded[comp] = "not in --fields"
-            sel.sites = [st for st in sel.sites if st.components & keep]
-            if not sel.components:
-                print(f"{dtype}: no selected field in --fields; skipped")
-                continue
-        sels.append(sel)
-        print(f"{dtype}: {len(sel.components)} fields, {len(sel.sites)} access sites")
-        nested = [c for c, why in sel.excluded.items() if why.startswith("lives on")]
-        if nested:
-            print(f"  {len(nested)} shared fields live on an embedded holder; pass --type <that type> (see --excluded)")
-        for comp, zc in sel.components.items():
-            print(f"  {comp:32s} zeroed: {zc:20s} history: {sel.history[comp]}")
-        if args.excluded:
-            for comp, why in sorted(sel.excluded.items()):
-                print(f"  excluded {comp:32s} {why}")
-        else:
-            print(f"  ({len(sel.excluded)} fields excluded; --excluded lists them)")
-        if sel.untraced:
-            print("  uses outside the elm_drv trace (text search; fields with a use of this type are excluded):")
-            for u in sel.untraced:
-                print(f"    {u}")
-    rewriter = Rewriter(fut, sels)
-    from spel.transforms.compact.inventory import FLUX_TYPES
-
-    try:
-        rewriter.build(loop_types=FLUX_TYPES if args.setvalues_loops else ())
-    except RewriteError as err:
-        raise SystemExit(f"compact rewrite: {err}")
-    for note in rewriter.notes:
-        print(note)
-    if args.diff:
-        print(rewriter.diff())
-    if args.dry_run:
-        return
-    spel_commit = git_state(Path(SPEL_ROOT)).get("commit")
-    e3sm = git_state(Path(E3SM_SRCROOT))
-    try:
-        written = rewriter.apply(
-            manifest(rewriter, spel_commit, e3sm),
-            output=Path(args.output) if args.output else None,
-            replace=args.replace,
-        )
-    except RewriteError as err:
-        raise SystemExit(f"compact rewrite: {err}")
-    print("wrote:")
-    for path in written:
-        print(f"  {path}")
-
-
 def nutrient(args):
     from spel.scripts.analysis_cache import load_analysis
     from spel.transforms.nutrient.common import detail, find_families, summary, to_json
 
     fut = load_analysis(reanalyze=args.reanalyze)
     families = find_families(fut.type_dict)
-    if args.action in ("extract", "groups"):
-        return nutrient_extract(fut, families, args)
-    if args.action == "merge":
-        return nutrient_merge(fut, families, args)
-    if args.action == "species":
-        return nutrient_species(fut, families, args)
-    if args.action in ("history", "restart"):
-        return nutrient_history(fut, families, args)
     if args.action == "procedures":
         from spel.transforms.nutrient import procedures
 
@@ -236,185 +102,18 @@ def nutrient(args):
         print(f"\nwrote {args.output}")
 
 
-def split(args):
-    from spel.scripts.analysis_cache import load_analysis
-    from spel.scripts.config import E3SM_SRCROOT
-    from spel.transforms.split.modules import PLANS, SplitError, Splitter
+def transform(args):
+    from spel.transforms.core.registry import main as transform_main
 
-    mods, plan = PLANS[args.plan]
-    fut = load_analysis(reanalyze=args.reanalyze)
-    try:
-        sp = Splitter(fut, mods, plan, Path(E3SM_SRCROOT))
-        sp.build()
-    except SplitError as err:
-        raise SystemExit(f"split: {err}")
-    for note in sp.notes:
-        print(note)
-    print(sp.report())
-    if args.diff:
-        print(sp.diff())
-    if args.dry_run:
-        return
-    for path in sp.apply():
-        print(f"  wrote {path}")
-
-
-def nutrient_extract(fut, families, args):
-    import difflib
-
-    from spel.scripts.analysis_cache import git_state
-    from spel.scripts.config import E3SM_SRCROOT, ELM_SRC
-    from spel.transforms.nutrient.extract import ExtractError, Extractor, core_edits, manifest
-
-    if args.family:
-        families = [f for f in families if f.name in args.family]
-    if args.action == "groups":
-        from spel.transforms.nutrient.groups import group_edits
-
-        try:
-            edits, skipped = group_edits(families), {}
-        except ExtractError as err:
-            raise SystemExit(f"nutrient groups: {err}")
-        key = "groups"
-    else:
-        edits, skipped = core_edits(families)
-        key = "families"
-    ex = Extractor(edits, fut.type_dict, Path(ELM_SRC), skipped)
-    try:
-        ex.build()
-    except ExtractError as err:
-        raise SystemExit(f"nutrient extract: {err}")
-    print(ex.report())
-    if args.diff:
-        for path, lines in ex.files.items():
-            old = Path(path).read_text(errors="replace").split("\n")
-            sys.stdout.writelines(
-                l + "\n" for l in difflib.unified_diff(old, lines, str(path), str(path), lineterm="")
-            )
-    if args.dry_run:
-        return
-    spel_commit = git_state(Path(SPEL_ROOT)).get("commit")
-    for path in ex.write(manifest(ex, spel_commit, git_state(Path(E3SM_SRCROOT)), key)):
-        print(f"  wrote {path}")
-
-
-def nutrient_merge(fut, families, args):
-    import difflib
-
-    from spel.transforms.nutrient.merge import DEFAULT_BINDINGS, Merger
-
-    if args.family:
-        families = [f for f in families if f.name in args.family]
-    m = Merger(families, fut, bindings=args.procedure or DEFAULT_BINDINGS)
-    m.build()
-    files = m.apply()
-    print(m.report())
-    if args.diff:
-        for path, lines in files.items():
-            old = m.lines(path)
-            sys.stdout.writelines(
-                l + "\n" for l in difflib.unified_diff(old, lines, str(path), str(path), lineterm="")
-            )
-    if args.dry_run:
-        return
-    for path, lines in files.items():
-        Path(path).write_text("\n".join(lines))
-        print(f"  wrote {path}")
-
-
-def nutrient_history(fut, families, args):
-    import difflib
-
-    from spel.transforms.nutrient.history import HISTORY, RESTART, HistoryMerger
-
-    if args.family:
-        families = [f for f in families if f.name in args.family]
-    hm = HistoryMerger(families, fut, RESTART if args.action == "restart" else HISTORY)
-    hm.build()
-    files = hm.apply()
-    print(hm.report())
-    if args.diff:
-        for path, lines in files.items():
-            old = Path(path).read_text(errors="replace").split("\n")
-            sys.stdout.writelines(
-                l + "\n" for l in difflib.unified_diff(old, lines, str(path), str(path), lineterm="")
-            )
-    if args.dry_run:
-        return
-    for path, lines in files.items():
-        Path(path).write_text("\n".join(lines))
-        print(f"  wrote {path}")
-
-
-def nutrient_species(fut, families, args):
-    import difflib
-
-    from spel.scripts.config import ELM_SRC
-    from spel.transforms.nutrient.extract import ExtractError
-    from spel.transforms.nutrient.species import SpeciesEditor
-
-    ed = SpeciesEditor(families, fut, Path(ELM_SRC))
-    try:
-        ed.build()
-    except ExtractError as err:
-        raise SystemExit(f"nutrient species: {err}")
-    for note in ed.notes:
-        print(note)
-    changed = {p: l for p, l in ed.files.items() if "\n".join(l) != p.read_text(errors="replace")}
-    if args.diff:
-        for path, lines in changed.items():
-            old = path.read_text(errors="replace").split("\n")
-            sys.stdout.writelines(
-                l + "\n" for l in difflib.unified_diff(old, lines, str(path), str(path), lineterm="")
-            )
-    if args.dry_run:
-        return
-    for path, lines in changed.items():
-        path.write_text("\n".join(lines))
-        print(f"  wrote {path}")
-
-
-def acc2omp(args):
-    from spel.scripts.analysis_cache import load_analysis
-    from spel.transforms.acc_to_omp import TranslationError, case_modules, translate_modules
-
-    case_dir = Path(f"{SPEL_ROOT}/unit-tests/{args.case}") if args.case else None
-    if case_dir is not None and not case_dir.is_dir():
-        raise SystemExit(f"no unit-test case {case_dir}")
-    fut = load_analysis(reanalyze=args.reanalyze)
-    modules = args.modules or (case_modules(fut, case_dir) if case_dir else [])
-    if not modules:
-        raise SystemExit("acc2omp: name the modules to translate, or give --case")
-
-    failed = False
-    for tr in translate_modules(fut, modules):
-        print(tr.report())
-        failed |= any(n.level == "error" for n in tr.notes)
-        if case_dir is not None:
-            dest = case_dir / tr.path.name
-            target = dest.read_text().splitlines(keepends=True)
-        else:
-            dest = Path(args.output) / tr.path.name if args.output else None
-            target = None
-        try:
-            new_lines = tr.apply(target)
-        except TranslationError as err:
-            if target is not None and not any("!$acc" in l.lower() for l in target):
-                print(f"  {dest} has no OpenACC directives left (already translated?)")
-            else:
-                print(f"  ERROR {err}")
-            failed = True
-            continue
-        if args.diff:
-            print(tr.diff(target))
-        if dest is not None and not args.dry_run:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text("".join(new_lines))
-            print(f"  wrote {dest}")
-    if case_dir is not None and not args.dry_run:
-        print(f"Build with OpenMP: SPEL_ACC=OPENMP OMP_NUM_THREADS=<n> spel run {args.case}")
-    if failed:
-        raise SystemExit(1)
+    rest, skip = [], False
+    for a in args.rest:  # --srcroot was applied already (apply_srcroot)
+        if skip:
+            skip = False
+        elif a == SRCROOT_OPTION:
+            skip = True
+        elif not a.startswith(SRCROOT_OPTION + "="):
+            rest.append(a)
+    sys.exit(transform_main(rest))
 
 
 def accplan(args):
@@ -428,9 +127,27 @@ def accplan(args):
     subs = [s for s in fut.subroutine_dict.values() if s.module in mods and (not args.routine or s.name in args.routine)]
     if not subs:
         raise SystemExit(f"accplan: no analyzed routines in {', '.join(sorted(mods))}")
-    for p in report(subs, mapper, min_lines=args.min_lines):
-        print(p)
+    for p in report(subs, mapper, min_lines=args.min_lines, lint=args.lint):
+        print(p.lint_report() if args.lint else p)
         print()
+
+
+def gates(args):
+    from spel.transforms import gates as G
+    from spel.transforms.core.driver import context
+
+    ctx = context(reanalyze=args.reanalyze, config=args.config)
+    results = G.run(ctx, roots=args.roots, only=args.only)
+    for r in results:
+        waived = [f for f in r.findings if any(a in f for a in args.allow or [])]
+        r.findings = [f for f in r.findings if f not in waived]
+        print(r)
+        for f in waived:
+            print(f"    waived (--allow): {f}")
+    bad = [r.gate for r in results if not r.ok]
+    print(f"gates: {len(results) - len(bad)} of {len(results)} pass" + (f"; failed: {', '.join(bad)}" if bad else ""))
+    if bad:
+        raise SystemExit(1)
 
 
 def analyze(args):
@@ -795,6 +512,25 @@ def add_subset_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+# command names removed in favour of `spel transform` (2026-10-31): first words -> replacement
+REMOVED = {
+    ("acc2omp",): "spel transform acc2omp [--modules M ...] [--case CASE]",
+    ("device-data",): "spel transform device-data",
+    ("split",): "spel transform split",
+    ("compact", "rewrite"): "spel transform compact-rewrite",
+    **{("nutrient", a): f"spel transform nutrient-{a}"
+       for a in ("extract", "species", "merge", "groups", "history", "restart")},
+}
+
+
+def removed_command(words: list[str]):
+    """The replacement of a removed command (None: not one)."""
+    for key, new in REMOVED.items():
+        if tuple(words[: len(key)]) == key:
+            return " ".join(key), new
+    return None
+
+
 def main():
     desc = (
         "spel create: "
@@ -862,28 +598,6 @@ def main():
     add_capture_args(create_parser, standalone=False)
     create_parser.set_defaults(func=create)
 
-    acc2omp_parser = subparsers.add_parser(
-        "acc2omp",
-        help="translate modules' OpenACC directives to OpenMP (clauses from SPEL's analysis)",
-    )
-    acc2omp_parser.add_argument(
-        "modules", nargs="*", help="modules to translate (default with --case: those with compute loops)"
-    )
-    acc2omp_parser.add_argument(
-        "--case", help="rewrite the module copies in unit-tests/<case> in place"
-    )
-    acc2omp_parser.add_argument(
-        "-o", "--output", help="write translated copies of the analyzed sources to this directory"
-    )
-    acc2omp_parser.add_argument("--diff", action="store_true", help="print the changes")
-    acc2omp_parser.add_argument(
-        "--dry-run", dest="dry_run", action="store_true", help="report only, write nothing"
-    )
-    acc2omp_parser.add_argument(
-        "--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first"
-    )
-    acc2omp_parser.set_defaults(func=acc2omp)
-
     accplan_parser = subparsers.add_parser(
         "accplan",
         help="propose an OpenACC loop structure (collapse / column-parallel / interchange / scatter) per loop, from the analysis",
@@ -892,70 +606,32 @@ def main():
     accplan_parser.add_argument("--routine", nargs="*", help="only these routines")
     accplan_parser.add_argument("--min-lines", dest="min_lines", type=int, default=2, help="skip loops shorter than this")
     accplan_parser.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
+    accplan_parser.add_argument("--lint", action="store_true",
+                                help="judge the loops that already carry a directive: gang loops over a level with the "
+                                     "filter loop inside, column arrays written from a patch filter (report only)")
     accplan_parser.set_defaults(func=accplan)
+
+    gates_parser = subparsers.add_parser(
+        "gates",
+        help="checks a GPU-ported tree must pass before building: collapse-bounds, acc-declares, acc-routines "
+             "have nothing left to do, acc-sync's syncs are all in place, no stale pushes (exit 1 on a failure)",
+    )
+    gates_parser.add_argument("--roots", nargs="*", default=["elm_driver::elm_drv"], help="call-tree roots")
+    gates_parser.add_argument("--only", nargs="*", help="run only these gates (collapse-bounds acc-declares "
+                              "acc-routines sync-drift stale-updates)")
+    gates_parser.add_argument("--config", help="run configuration: a preset (spel/db presets/NAME.cfg) or a case's "
+                              "lnd_in; only the code that runs in it is checked")
+    gates_parser.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
+    gates_parser.add_argument("--allow", nargs="*", help="accepted findings: a finding containing one of these texts "
+                              "is listed as waived and does not fail (e.g. 'ch4mod::ch4_prod: line')")
+    gates_parser.set_defaults(func=gates)
 
     compact_parser = subparsers.add_parser(
         "compact",
-        help="inventory of the per-step zeroed flux fields for a compact subgrid layout",
+        help="inventory of the per-step zeroed flux fields for a compact subgrid layout "
+        "(the rewrite is `spel transform compact-rewrite`)",
     )
-    compact_parser.add_argument(
-        "action",
-        choices=["inventory", "rewrite"],
-        help="inventory: report the fields; rewrite: give the selected fields of --type compact storage in the E3SM sources",
-    )
-    compact_parser.add_argument(
-        "--type",
-        nargs="+",
-        default=["vegetation_carbon_flux", "vegetation_nitrogen_flux", "vegetation_phosphorus_flux",
-                 "column_carbon_flux", "column_nitrogen_flux", "column_phosphorus_flux"],
-        help="rewrite: the derived types (default: the patch- and column-level C/N/P flux types; on "
-        "nutrient-transformed sources their family base types, vegetation_nutrient_flux and column_nutrient_flux)",
-    )
-    compact_parser.add_argument(
-        "--roles",
-        action="store_true",
-        help="rewrite: on nutrient-transformed sources also the role holders (mineral/uptake/retrans) of the default types",
-    )
-    compact_parser.add_argument("--diff", action="store_true", help="rewrite: print the changes")
-    compact_parser.add_argument(
-        "--dry-run", dest="dry_run", action="store_true", help="rewrite: report only, write nothing"
-    )
-    compact_parser.add_argument("--excluded", action="store_true", help="rewrite: list the excluded fields")
-    compact_parser.add_argument(
-        "--loops-only",
-        dest="loops_only",
-        action="store_true",
-        help="rewrite: only the SetValues loops, no compact layout (to measure the two separately)",
-    )
-    compact_parser.add_argument(
-        "--setvalues-loops",
-        dest="setvalues_loops",
-        action="store_true",
-        default=False,
-        help="rewrite: also turn the flux types' blocked SetValues loops (associate idx => filter(fi:...)) "
-        "into do concurrent loops, for all six types. Off by default: 7%% slower CNZero with Intel on the "
-        "stride-8 case (2026-10-24); it helped nvfortran",
-    )
-    compact_parser.add_argument(
-        "--no-setvalues-loops", dest="setvalues_loops", action="store_false", help="(the default)"
-    )
-    compact_parser.add_argument(
-        "--exclude-fields", dest="exclude_fields", default="",
-        help="rewrite: drop these components (comma-separated) from every selection, for bisecting",
-    )
-    compact_parser.add_argument(
-        "--fields", default="",
-        help="rewrite: keep only these components (comma-separated) of every selection, for bisecting",
-    )
-    compact_parser.add_argument(
-        "--no-map-sites", dest="no_map_sites", action="store_true",
-        help="rewrite: only filter-gathered sites (no x(compact_cidx_p(p)) for sub-filter or pfti-mapped members)",
-    )
-    compact_parser.add_argument(
-        "--replace",
-        action="store_true",
-        help="rewrite -o: remove the files of the earlier rewrite in the output directory (by its manifest) first",
-    )
+    compact_parser.add_argument("action", choices=["inventory"], help="inventory: report the fields")
     compact_parser.add_argument(
         "--instances",
         default="veg_cf,veg_nf,veg_pf,col_cf,col_nf,col_pf",
@@ -965,45 +641,22 @@ def main():
     compact_parser.add_argument(
         "--verdict", nargs="*", help="print the details of fields with these verdicts (e.g. blocked)"
     )
-    compact_parser.add_argument(
-        "-o",
-        "--output",
-        help="inventory: write the full inventory as JSON; rewrite: write the rewritten files "
-        "(by basename, e.g. a case's SourceMods/src.elm) here instead of in place",
-    )
+    compact_parser.add_argument("-o", "--output", help="write the full inventory as JSON")
     compact_parser.add_argument(
         "--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first"
     )
     compact_parser.set_defaults(func=compact)
 
-    device_parser = subparsers.add_parser(
-        "device-data",
-        help="generate ElmDeviceDataMod and the DeepCopy*Mod group modules (device init, first-step deep copy, whole-state updates) for a full OpenACC run",
-    )
-    device_parser.add_argument("--dry-run", action="store_true", help="report the plan and the edits, write nothing")
-    device_parser.add_argument("--print", dest="print_module", action="store_true", help="print the generated modules")
-    device_parser.add_argument(
-        "-o", "--out-dir", default=None,
-        help="write the modules and the edited driver files here (a case's SourceMods/src.elm) instead of in place",
-    )
-    device_parser.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
-    device_parser.set_defaults(func=device_data)
-
     nutrient_parser = subparsers.add_parser(
         "nutrient",
-        help="fields the C/N/P variants of a derived type share (candidates for a common base type)",
+        help="fields the C/N/P variants of a derived type share (candidates for a common base type; "
+        "the refactor itself is `spel transform nutrient-*`)",
     )
     nutrient_parser.add_argument(
         "action",
-        choices=["common", "procedures", "extract", "merge", "species", "groups", "history", "restart"],
+        choices=["common", "procedures"],
         help="common: match the C/N/P types' components by name; "
-        "procedures: compare the types' type-bound procedures statement by statement; "
-        "extract: move the shared fields to base types the C/N/P types extend (edits the E3SM sources); "
-        "merge: move the procedures' shared statements to base-type procedures (after extract); "
-        "species: give each core its element (core%species, set in Init; after extract); "
-        "groups: move N/P-only fields to role components (mineral, uptake, retrans; groups.py); "
-        "history: one history registration per core field for every species (after species, merge --procedure init); "
-        "restart: likewise one restartvar per core field",
+        "procedures: compare the types' type-bound procedures statement by statement",
     )
     nutrient_parser.add_argument(
         "--family",
@@ -1012,10 +665,7 @@ def main():
         "procedures: only these families",
     )
     nutrient_parser.add_argument(
-        "--procedure",
-        nargs="*",
-        help="procedures: print the statements of these bindings (e.g. init); "
-        "merge: the bindings to merge (default: setvalues zerodwt clean)",
+        "--procedure", nargs="*", help="procedures: print the statements of these bindings (e.g. init)"
     )
     nutrient_parser.add_argument(
         "--kinds",
@@ -1024,31 +674,19 @@ def main():
         help="procedures: statement kinds to print (generic guards longname differs own other)",
     )
     nutrient_parser.add_argument("-o", "--output", help="common: write all families as JSON")
-    nutrient_parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="extract, merge, species, groups, history, restart: report only")
-    nutrient_parser.add_argument("--diff", action="store_true", help="extract, merge, species, groups, history, restart: print the changes")
     nutrient_parser.add_argument(
         "--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first"
     )
     nutrient_parser.set_defaults(func=nutrient)
 
-    split_parser = subparsers.add_parser(
-        "split",
-        help="move type definitions and their procedures out of large modules into new ones "
-        "(instances stay; every `use` of a moved name is rewritten)",
+    transform_parser = subparsers.add_parser(
+        "transform",
+        help="source transforms: `spel transform list`, `explain NAME`, `NAME [options] [--dry-run] "
+        "[--diff] [--where TEXT] [-o DIR]`, `--spec FILE.toml`",
+        add_help=False,
     )
-    split_parser.add_argument(
-        "--plan",
-        default="elm-data-types",
-        choices=["elm-data-types"],
-        help="elm-data-types: Column/Vegetation/GridcellDataType -> Nutrient{State,Flux}Type, "
-        "{Vegetation,Column}{State,Flux}Types; instances stay in the *DataType modules",
-    )
-    split_parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="report only")
-    split_parser.add_argument("--diff", action="store_true", help="print the changes")
-    split_parser.add_argument(
-        "--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first"
-    )
-    split_parser.set_defaults(func=split)
+    transform_parser.add_argument("rest", nargs=argparse.REMAINDER)
+    transform_parser.set_defaults(func=transform)
 
     analyze_parser = subparsers.add_parser(
         "analyze",
@@ -1333,6 +971,16 @@ def main():
         p.add_argument(
             SRCROOT_OPTION, metavar="DIR", default=argparse.SUPPRESS, help=srcroot_help
         )
+
+    argv = sys.argv[1:]
+    words = [a for i, a in enumerate(argv) if not a.startswith("-")
+             and not (i > 0 and argv[i - 1] == SRCROOT_OPTION)]
+    if words[:1] == ["transform"] and not any(a in ("-h", "--help") for a in argv[:argv.index("transform")]):
+        # `spel transform` parses its own arguments (they may start with `--`, which REMAINDER rejects)
+        return transform(argparse.Namespace(rest=argv[argv.index("transform") + 1:]))
+    gone = removed_command(words)
+    if gone:
+        parser.exit(2, f"spel {gone[0]}: removed; use `{gone[1]}` (`spel transform list`)\n")
 
     args = parser.parse_args()
     try:

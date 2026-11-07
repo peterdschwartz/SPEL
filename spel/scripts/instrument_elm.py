@@ -640,7 +640,7 @@ def generate_capture_module(
     nc_io and with the subset's bounds; ranks without the subset write nothing.
 
     `compact` lists the (instance, subgrid, declaring module) of the types a
-    `spel compact rewrite` gave compact storage (see compact_capture_instances):
+    `spel transform compact-rewrite` gave compact storage (see compact_capture_instances):
     at a capture the components point at the compact storage of the clump's
     filter, so every capture first unpacks the clump into the full layout and
     switches the instance to it, and switches back after. The files then hold

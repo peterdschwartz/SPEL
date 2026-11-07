@@ -80,15 +80,19 @@ def timing_dirs(path: Path) -> list[Path]:
 
 
 def find_files(path: Path, job: str | None) -> tuple[Path, Path | None]:
+    if path.is_file():  # a saved stats file, e.g. one of several repeats of a run
+        return path, None
+
     def newest(pattern: str) -> list[Path]:
         found = [f for d in timing_dirs(path) for f in d.glob(pattern)]
         if job:
             found = [f for f in found if f".{job}." in f.name]
         return sorted(found, key=lambda f: f.stat().st_mtime, reverse=True)
 
-    stats = newest("e3sm_timing_stats*")
+    # model_timing_stats: runs started directly (run_e3sm.sh), which skip CIME's timing archive
+    stats = newest("e3sm_timing_stats*") or newest("model_timing_stats")
     if not stats:
-        sys.exit(f"no e3sm_timing_stats* for {path} (looked in {[str(d) for d in timing_dirs(path)]})")
+        sys.exit(f"no e3sm_timing_stats* or model_timing_stats for {path} (looked in {[str(d) for d in timing_dirs(path)]})")
     summaries = [f for f in newest("e3sm_timing.*") if "stats" not in f.name]
     # prefer the summary of the same job as the stats file
     job_id = re.search(r"e3sm_timing_stats\.(\d+)\.", stats[0].name)

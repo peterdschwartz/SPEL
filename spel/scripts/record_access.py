@@ -286,6 +286,8 @@ class AccessMapper:
                     arg_origin[(e.ln, e.path)] = e.origin
                 case Access(context=context) if context in ASSOCIATION_CONTEXTS:
                     maps.add(e.origin, e.path, e.status, e.ln, lines.get(e.ln))
+                case Access(context="inquiry"):
+                    pass  # lbound(x), size(x), allocated(x): no data access
                 case Access():
                     add(e.origin, e.path, e.status, e.ln)
                 case CallEvent():

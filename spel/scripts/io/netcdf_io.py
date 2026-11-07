@@ -1615,7 +1615,7 @@ def _gen_buf_load(dim: int, t: str, ftype: str) -> str:
         "   integer, intent(inout) :: sd, nfile\n"
         "   integer :: var_id, nd, t\n"
         f"{fshape_decl}"
-        "   call check(nf90_inq_varid(ncid, trim(varname), var_id))\n"
+        "   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)\n"
         f"{subgrid}"
         "   if (allocated(buf)) then\n"
         f"      if ({shape_check}) then\n"
@@ -1745,7 +1745,7 @@ def gen_read_numeric(dim: int, t: str) -> str:
 {tabs}     count(1:ndim) = shape(var)
 {tabs}  end if
 
-{tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+{tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
 {tabs}   call nc_file_subgrid(ncid, var_id, ndim, sd, nfile)
 {tabs}   if (sd > 0) then
 {tabs}      if (size(var, sd) /= spel_nsets*nfile) sd = 0
@@ -1776,7 +1776,7 @@ def gen_read_numeric(dim: int, t: str) -> str:
     {tabs}   {t_str} :: tmp(1)
     {tabs}   integer :: var_id, start(1), count(1)
 
-    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
     {tabs}   if (timestep > 0) then 
     {tabs}       start = [timestep]
     {tabs}       call check(nf90_get_var(ncid, var_id, tmp, start=[timestep],count=[1]))
@@ -1800,7 +1800,7 @@ def gen_read_str() -> str:
     {tabs}   integer :: var_id, dimid, strlen,i
     {tabs}   character(:), allocatable :: buf
 
-    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
     {tabs}   call check(nf90_inq_dimid(ncid, trim(dim_name), dimid))
     {tabs}   call check(nf90_inquire_dimension(ncid, dimid, len=strlen))
     {tabs}   allocate(character(strlen) :: buf); 
@@ -1873,10 +1873,16 @@ def gen_read_logical(dim: int) -> str:
 def gen_check() -> str:
     tabs = hio.indent(Tab.reset)
     return textwrap.dedent(f"""
-    {tabs}subroutine check(status)
+    {tabs}subroutine check(status, name)
+    {tabs}   ! name: the variable of a failed lookup/read, so 'Variable not found' says which
     {tabs}   integer, intent(in) :: status
+    {tabs}   character(len=*), intent(in), optional :: name
     {tabs}   if (status /= nf90_noerr) then
-    {tabs}      print *, trim(nf90_strerror(status))
+    {tabs}      if (present(name)) then
+    {tabs}         print *, trim(nf90_strerror(status)), ' (', trim(name), ')'
+    {tabs}      else
+    {tabs}         print *, trim(nf90_strerror(status))
+    {tabs}      end if
     {tabs}      stop 2
     {tabs}   end if
     {tabs}end subroutine check
@@ -2010,7 +2016,7 @@ def gen_nc_write_numeric_scalar() -> list[str]:
        {tabs}   !! locals:
        {tabs}   integer :: var_id
 
-       {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+       {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
        {tabs}   call check(nf90_put_var(ncid, var_id, var))
 
        {tabs}end subroutine nc_write_{t}_scalar
@@ -2066,7 +2072,7 @@ def gen_nc_write_numeric_array() -> list[str]:
     {tabs}      count(ndim+1) = 1
     {tabs}   endif
 
-    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
     {tabs}   select case (ndim)
     {tabs}   case (1)
     {tabs}      allocate (data_1d(ldims(1))); data_1d = reshape(buffer, [ldims(1)])
@@ -2095,7 +2101,7 @@ def gen_nc_write_string() -> str:
     {tabs}   character(len=*), intent(in) :: varname
     {tabs}   character(len=*), intent(in) :: var
     {tabs}   integer :: var_id, i
-    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
     {tabs}   call check(nf90_put_var(ncid, var_id, trim(var)))
     {tabs}end subroutine nc_write_string
     """)
@@ -2142,7 +2148,7 @@ def gen_nc_write_logical() -> str:
     {tabs}      count(ndim+1) = 1
     {tabs}   endif
 
-    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
     {tabs}   select case (ndim)
     {tabs}   case (1)
     {tabs}      allocate (data_1d(ldims(1))); data_1d = reshape(int_buf, [ldims(1)])
@@ -2166,7 +2172,7 @@ def gen_nc_write_logical() -> str:
     {tabs}   integer :: var_id, buf
     {tabs}   buf = 0
     {tabs}   if (var) buf = 1
-    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id))
+    {tabs}   call check(nf90_inq_varid(ncid, trim(varname), var_id), varname)
     {tabs}   call check(nf90_put_var(ncid, var_id, buf))
     {tabs}end subroutine nc_write_logical_scalar
     """)

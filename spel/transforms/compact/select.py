@@ -44,6 +44,7 @@ from spel.transforms.compact.inventory import (
 )
 from spel.transforms.compact.holders import Holder, find_holder, srcroot_of
 from spel.transforms.compact.index_forms import MAIN_FILTER, SUBSET_FILTERS
+from spel.transforms.core.filter_maps import requires_active as _requires_active
 
 
 @dataclass
@@ -126,12 +127,7 @@ def member_through_map(e: Entry, subgrid: str) -> bool:
     inner = form.inner
     if "col_pp%pfti(" not in text or inner is None or inner.kind != "filter" or "filter%soilc" not in inner.filter:
         return False
-    active = re.compile(rf"(?<![%\w])veg_pp%active\({re.escape(e.sub0)}\)")
-    for g in e.guards:
-        gt = str(g).replace(" ", "")
-        if active.search(gt) and ".or." not in gt and ".not." not in gt and "not(" not in gt:
-            return True
-    return False
+    return any(_requires_active(g, e.sub0) for g in e.guards)
 
 
 def level_bounds(rs) -> Optional[str]:

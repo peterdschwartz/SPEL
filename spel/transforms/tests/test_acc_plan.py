@@ -185,3 +185,96 @@ def test_patch_of_column_by_member_offset():
     assert guarded.kind == "interchange", guarded
     assert guarded.carried == {"pi": ["tot"]}
     assert unguarded.kind not in ("elementwise", "interchange", "column-parallel"), unguarded
+
+
+BOUNDS = """
+subroutine zero(bounds, x)
+  implicit none
+  type(bounds_type), intent(in) :: bounds
+  real(r8), intent(inout) :: x(:)
+  integer :: p
+  do p = bounds%begp, bounds%endp
+     x(p) = 0._r8
+  end do
+end subroutine zero
+"""
+
+
+def test_bounds_dummy_read_in_the_loop_gets_no_copyin():
+    """A kernel that reads the `bounds` dummy gets no copyin(bounds): a data clause on every loop is a
+    present lookup per launch; the bounds reach the device another way (user decision, 2026-10-31)."""
+    sub = StubSub(BOUNDS)
+    sub.filepath = None
+    (p,) = propose(sub, AccessMapper({sub.id: sub}), source=BOUNDS.splitlines())
+    assert p.kind == "elementwise" and p.copyin == []
+    assert not any("copyin(bounds)" in l for l in p.directive_lines())
+
+
+SRC_TWO_INDEX_LOOKUP = """
+subroutine weights(begt, endt, nl, idx, w, wt)
+  implicit none
+  integer, intent(in) :: begt, endt, nl, idx(:,:)
+  real(r8), intent(in) :: w(:)
+  real(r8), intent(inout) :: wt(:)
+  integer :: t, k, l
+  do t = begt, endt
+     do k = 1, nl
+        l = idx(k, t)
+        wt(l) = w(k)
+     end do
+  end do
+end subroutine weights
+"""
+
+
+def test_lookup_on_two_indices_depends_on_both():
+    # l = idx(k, t) (top_pp%landunit_indices): the alias used to take one of k, t at random
+    # (set order), so the outer loop was ported or not depending on PYTHONHASHSEED
+    sub = StubSub(SRC_TWO_INDEX_LOOKUP)
+    sub.filepath = None
+    (p,) = propose(sub, AccessMapper({sub.id: sub}), source=SRC_TWO_INDEX_LOOKUP.splitlines())
+    assert "wt" in p.scatter.get("t", []), (p.kind, p.scatter)
+
+
+SRC_LINT = """
+subroutine stress(nlevgrnd, numf, filter, colof, watsat, ice, dz, eff_por, rootr, rootfr)
+  implicit none
+  integer, intent(in) :: nlevgrnd, numf, filter(:), colof(:)
+  real(r8), intent(in) :: watsat(:,:), ice(:,:), dz(:,:), rootfr(:,:)
+  real(r8), intent(inout) :: eff_por(:,:), rootr(:,:)
+  integer :: j, fp, p, c
+  real(r8) :: vol_ice
+  !$acc parallel loop gang default(present)
+  do j = 1, nlevgrnd
+     !$acc loop vector private(p, c, vol_ice)
+     do fp = 1, numf
+        p = filter(fp)
+        c = colof(p)
+        vol_ice = min(watsat(c,j), ice(c,j)/dz(c,j))
+        eff_por(c,j) = watsat(c,j) - vol_ice
+     end do
+  end do
+  !$acc parallel loop gang vector default(present)
+  do fp = 1, numf
+     p = filter(fp)
+     c = colof(p)
+     rootr(p,1) = rootfr(p,1) * eff_por(c,1)
+     eff_por(c,2) = eff_por(c,2) * rootfr(p,2)
+  end do
+end subroutine stress
+"""
+
+
+def test_lint_judges_covered_loops():
+    """`--lint`: a level-outer kernel with the filter loop inside, and column arrays written from a
+    patch filter: redundant (nothing read through p) in the first kernel, a race in the second."""
+    sub = StubSub(SRC_LINT)
+    sub.filepath = None
+    mapper = AccessMapper({sub.id: sub})
+    assert [p.kind for p in propose(sub, mapper, source=SRC_LINT.splitlines())] == ["has-directive", "has-directive"]
+    level, patch = propose(sub, mapper, source=SRC_LINT.splitlines(), lint=True)
+    assert level.covered and patch.covered and not level.directive_lines()
+    assert any("gang loop over `j` (nlevgrnd gangs) with the filter loop `fp` inside" in f for f in level.lint), level.lint
+    assert any("eff_por written through colof" in f and "redundant work" in f for f in level.lint), level.lint
+    assert any("eff_por written through colof" in f and "race" in f and "rootfr" in f for f in patch.lint), patch.lint
+    assert "HAS-DIRECTIVE" in str(level) and "lint:" in str(level)

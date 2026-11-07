@@ -26,6 +26,9 @@ class SemanticError(Exception):
 
 # Base interface: Node
 class Node(ABC):
+    # (ln0, c0, ln1, c1) in the file lines, set by a parser with keep_spans (expressions)
+    span: Optional[tuple[int, int, int, int]] = None
+
     @abstractmethod
     def token_literal(self) -> str:
         """Return the literal value of the token."""
@@ -196,9 +199,11 @@ class IntegerLiteral(Expression):
         self.token: Token = tok
         self.value: int = val
         self.precision: str = prec
+        self.boz: Optional[str] = None  # a BOZ literal constant as written (z'7ff4...'), else None
 
     def token_literal(self) -> str:
-        return str(self.value)
+        boz = getattr(self, "boz", None)  # absent on nodes built without __init__ (copies, older pickles)
+        return boz if boz is not None else str(self.value)
 
     def expression_node(self) -> None:
         pass
@@ -486,15 +491,15 @@ class FuncExpression(Expression):
         base = name.split("%")[0]
         sym = scope.resolve(base, context=str(self))
         if sym.is_data or (sym.kind is SymbolKind.EXTERNAL and "%" in name):
-            return ArrayRef(self.token, self.function, self.args)
+            return with_span(ArrayRef(self.token, self.function, self.args), self)
         if "%" in name:
             raise SemanticError(f"'{base}' is not a data object in {self}")
-        return FunctionCall(
+        return with_span(FunctionCall(
             self.token,
             self.function,
             [to_actual_arg(a) for a in self.args],
             intrinsic=sym.kind is SymbolKind.INTRINSIC,
-        )
+        ), self)
 
 
 class ArrayRef(FuncExpression):
@@ -556,8 +561,15 @@ def to_actual_arg(arg: Expression) -> Expression:
         and arg.operator == "="
         and isinstance(arg.left_expr, Identifier)
     ):
-        return KeywordArgument(arg.token, arg.left_expr.value, arg.right_expr)
+        return with_span(KeywordArgument(arg.token, arg.left_expr.value, arg.right_expr), arg)
     return arg
+
+
+def with_span(new: Node, old: Node) -> Node:
+    """`new` (a refined `old`) with `old`'s source span."""
+    if old.span is not None:
+        new.span = old.span
+    return new
 
 
 class BoundsExpression(Expression):
@@ -1283,6 +1295,29 @@ class SaveStatement(Statement):
         return {"Node": "SaveStatement", "Names": self.names}
 
 
+class ParameterStatement(Statement):
+    """parameter (name = expr [, name = expr]...): named constants declared earlier"""
+
+    def __init__(self, tok: Token, constants: list[tuple[Identifier, Expression]]):
+        self.token = tok
+        self.constants: list[tuple[Identifier, Expression]] = constants
+
+    def statement_node(self) -> None:
+        pass
+
+    def token_literal(self) -> str:
+        return self.token.literal
+
+    def __str__(self) -> str:
+        return "parameter (" + ", ".join(f"{n} = {v}" for n, v in self.constants) + ")"
+
+    def to_dict(self):
+        return {
+            "Node": "ParameterStatement",
+            "constants": [{"name": str(n), "value": v.to_dict()} for n, v in self.constants],
+        }
+
+
 class ModuleConstruct(Statement):
     """
     module name / specification part / [contains / subprograms] / end module.
@@ -1816,6 +1851,8 @@ class SubroutineDefinitionConstruct(Statement):
         internal subprograms]
       end subroutine|function [name]
     """
+
+    args_close: Optional[tuple[int, int, int, int]] = None  # keep_spans: the `)` of the dummies
 
     def __init__(
         self,

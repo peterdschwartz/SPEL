@@ -541,3 +541,15 @@ def test_merge_matches_repeated_statements_by_occurrence(tmp_path):
     for name in ("c_init", "n_init"):
         body = out[out.index(f"subroutine {name}") : out.index(f"end subroutine {name}")]
         assert body.count("this%core%leaf(begp:endp) = spval") == 1
+
+
+def test_file_edits_as_core_edits_give_the_same_text():
+    from spel.transforms.core.edits import EditSet
+    from spel.transforms.nutrient.merge import FileEdits
+    from spel.transforms.nutrient.transforms import core_edits
+
+    lines = [f"l{i}" for i in range(6)]
+    fe = FileEdits(insert={1: ["i1"], 3: ["i3a", "i3b"]})
+    fe.add_replace(1, 2, ["r1"])
+    fe.add_replace(4, 4, [])
+    assert EditSet().extend(core_edits(fe, lines)).apply(lines) == fe.apply(lines)

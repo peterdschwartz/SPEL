@@ -1,0 +1,8 @@
+# Make ELM's OpenACC (-acc) build compile: generated part of the cleanup commit.
+[[step]]
+transform = "acc-stale"
+[[step]]
+transform = "acc-routines"
+[[step]]
+transform = "defer-checks"
+options = { roots = ["drydepvelocity::depvel_compute"] }

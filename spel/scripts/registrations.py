@@ -41,7 +41,7 @@ from spel.scripts.fortran_parser.spel_parser import Parser
 from spel.scripts.types import LineTuple
 
 HIST_CALLS = ("hist_addfld1d", "hist_addfld2d", "hist_addfld_decomp")
-HIST_POINTERS = ("ptr_patch", "ptr_col", "ptr_lunit", "ptr_gcell", "ptr_lnd", "ptr_atm")
+HIST_POINTERS = ("ptr_patch", "ptr_col", "ptr_lunit", "ptr_gcell", "ptr_topo", "ptr_lnd", "ptr_atm")
 RESTART_CALL = "restartvar"
 SET_OPTIONS = ("set_lake", "set_nolake", "set_urb", "set_nourb", "set_spec", "set_noglcmec")
 REGISTRATION_RX = re.compile(r"\b(hist_addfld1d|hist_addfld2d|hist_addfld_decomp|restartvar)\b", re.I)
@@ -239,21 +239,68 @@ def parse_routine(
     keep_directives: bool = False,
     keep_string_case: bool = False,
     skip_io: bool = False,
+    keep_spans: bool = False,
+    cpp: bool = False,
 ):
     """
     The routine's SubroutineDefinitionConstruct, parsed from the original file.
+    keep_spans: expressions carry their (ln0, c0, ln1, c1) in the file (`Parser`).
     skip_io: blank out I/O statements (write/print/read, which may hold implied-do
              lists the parser doesn't support) so the rest of the routine parses.
+    cpp: blank the lines the preprocessor drops with the analysis macros (the `#` lines and
+         inactive branches; an `#ifdef ... #else` would otherwise open blocks twice). The kept
+         lines are the original text, so spans stay valid; macros inside lines are not expanded.
     """
     src = Path(filepath).read_text(errors="replace").split("\n")
-    lines = [LineTuple(line=src[i], ln=i) for i in range(startline, endline + 1)]
+    active = _cpp_active_lines(Path(filepath)) if cpp else None
+    lines = [LineTuple(line=src[i] if active is None or i in active else "", ln=i)
+             for i in range(startline, endline + 1)]
     if skip_io:
         lines = _blank_io_statements(lines)
-    parser = Parser(lines=lines, keep_directives=keep_directives, keep_string_case=keep_string_case)
+    parser = Parser(lines=lines, keep_directives=keep_directives, keep_string_case=keep_string_case,
+                    keep_spans=keep_spans)
     return parser.parse_program().statements[0]
 
 
+def _cpp_active_lines(path: Path) -> set[int]:
+    """0-based original line numbers the preprocessor keeps (analysis macros). cpp turns a `#`
+    line into an empty line at its place: a line counts only if its cpp text is not empty or the
+    original line was empty too."""
+    import logging
+
+    from spel.scripts.edit_files import apply_preprocessor, remove_cpp_directives
+
+    text = path.read_text(errors="replace")
+    key = (str(path), hash(text))
+    if key in _CPP_ACTIVE:
+        return _CPP_ACTIVE[key]
+    src = text.split("\n")
+    out = set()
+    for lt in remove_cpp_directives(apply_preprocessor(path), str(path), logging.getLogger(__name__)):
+        if lt.line.strip() or (lt.ln < len(src) and not src[lt.ln].strip()):
+            out.add(lt.ln)
+    _CPP_ACTIVE[key] = out
+    return out
+
+
+_CPP_ACTIVE: dict[tuple[str, int], set[int]] = {}  # (path, hash of its text) -> active lines
+
+
 _IO_START = re.compile(r"^\s*(?:\d+\s+)?(write|print|read)\b", re.I)
+
+
+def _code_part(text: str) -> str:
+    """`text` up to its comment: the first `!` outside a string literal."""
+    quote = None
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "!":
+            return text[:i]
+    return text
 
 
 def _blank_io_statements(lines: list[LineTuple]) -> list[LineTuple]:
@@ -262,8 +309,11 @@ def _blank_io_statements(lines: list[LineTuple]) -> list[LineTuple]:
     in_io = False
     for lt in lines:
         text = lt.line
-        code = text.split("!", 1)[0]
-        if in_io or _IO_START.match(code):
+        code = _code_part(text)
+        if in_io and not code.strip():
+            # a blank or comment line inside the continuation (a commented-out item): still in it
+            out.append(LineTuple(line="", ln=lt.ln))
+        elif in_io or _IO_START.match(code):
             in_io = code.rstrip().endswith("&")
             out.append(LineTuple(line="", ln=lt.ln))
         else:

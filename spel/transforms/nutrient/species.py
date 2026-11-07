@@ -1,7 +1,7 @@
 """
 Give each nutrient base type its element: ``core%species``.
 
-After `spel nutrient extract`, base-type routines (merge.py) need to know
+After `spel transform nutrient-extract`, base-type routines (merge.py) need to know
 which element (and carbon isotope) the core they get belongs to, e.g. to
 keep carbon's ``if (.not. use_fates)`` behaviour as
 ``.not. (is_carbon(this%species) .and. use_fates)``. This:
@@ -79,7 +79,7 @@ class SpeciesEditor:
             for e, tname in fam.types.items():
                 dtype = td[tname]
                 if CORE not in dtype.components:
-                    raise ExtractError(f"{tname}: run `spel nutrient extract` first")
+                    raise ExtractError(f"{tname}: run `spel transform nutrient-extract` first")
                 init_id = dtype.procedures.get("init")
                 if init_id not in sd:
                     raise ExtractError(f"{tname}: no analyzed Init")

@@ -250,6 +250,7 @@ def driver_callsites(
         return ln - bisect_left(markers, ln)
 
     guards = call_guards(rec)
+    text_of = call_actual_text(drv_path, drv.sub_lines)
 
     sites = DriverSites(
         module=DRIVER_MODULE,
@@ -262,7 +263,7 @@ def driver_callsites(
         calls={
             root.id: [
                 DriverCall(
-                    root.id, unmarked(ln), bounds_actual(root, dmaps.bindings, ln), guards.get(ln, ())
+                    root.id, unmarked(ln), bounds_actual(root, dmaps.bindings, ln, text_of), guards.get(ln, ())
                 )
                 for ln in sorted(call_lines[root.id])
             ]
@@ -334,15 +335,78 @@ def call_statement(sites: DriverSites, call: DriverCall) -> str:
     raise SemanticError(f"no call statement for {call.callee} at line {call.ln + 1} of {sites.path}")
 
 
-def bounds_actual(root: Subroutine, bindings: list[ArgBinding], ln: int) -> Optional[str]:
-    """Actual passed for root's bounds_type dummy at the call on line `ln`."""
+def bounds_actual(
+    root: Subroutine, bindings: list[ArgBinding], ln: int, text_of=None
+) -> Optional[str]:
+    """
+    Actual passed for root's bounds_type dummy at the call on line `ln`, as source text
+    when `text_of(ln, path)` can find it (the binding's designator path drops subscripts:
+    `bounds_by_clump(nc)` is bound as `bounds_by_clump`, which the capture call cannot pass).
+    """
     for b in bindings:
         if b.callee != root.id or b.ln != ln:
             continue
         dummy = root.arguments.get(b.dummy)
         if dummy is not None and dummy.type == "bounds_type":
+            if text_of is not None and (text := text_of(ln, b.actual)) is not None:
+                return text
             return b.actual
     return None
+
+
+def _strip_subscripts(text: str) -> str:
+    depth, out = 0, []
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+def call_actual_text(path: Path, lines: list[LineTuple]):
+    """
+    `text_of(ln, path)`: the source text of the actual argument whose designator path
+    (subscripts dropped) is `path` in the call statement on line `ln` of the routine held
+    in `lines` (a file slice, LineTuple.ln = 0-based file line). The routine is parsed once,
+    with spans; None when the statement or the argument is not found.
+    """
+    from spel.scripts.fortran_parser import spel_ast as A
+    from spel.scripts.registrations import iter_statements, parse_routine
+    from spel.transforms.core.edits import span_text
+
+    cache: dict = {}
+
+    def text_of(ln: int, actual: str) -> Optional[str]:
+        if "tree" not in cache:
+            try:
+                cache["tree"] = parse_routine(
+                    path, lines[0].ln, lines[-1].ln, keep_spans=True, skip_io=True
+                )
+                cache["src"] = Path(path).read_text(errors="replace").split("\n")
+            except Exception:  # the capture call then falls back to the designator path
+                cache["tree"] = None
+        tree = cache["tree"]
+        if tree is None:
+            return None
+        want = actual.replace(" ", "").lower()
+        for stmt, _ in iter_statements(tree.body):
+            if not (isinstance(stmt, A.SubCallStatement) and stmt.lineno == ln):
+                continue
+            for arg in stmt.function.args:
+                e = arg.value if isinstance(arg, A.KeywordArgument) else arg
+                if isinstance(e, A.InfixExpression) and e.operator == "=":
+                    e = e.right_expr  # `keyword = actual` in a call statement
+                if getattr(e, "span", None) is None:
+                    continue
+                text = span_text(cache["src"], e.span)
+                if _strip_subscripts(text.replace(" ", "")).lower() == want:
+                    return text.strip()
+        return None
+
+    return text_of
 
 
 # --------------------------------------------------------------------------

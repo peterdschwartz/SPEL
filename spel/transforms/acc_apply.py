@@ -6,7 +6,7 @@ For the routines of a call tree (`roots`), every outermost loop the planner
 and no warning, becomes a compute loop:
 
 - `!$acc parallel loop gang vector [collapse(n)] default(present) private(...)` on the
-  loop (the planner's clauses, the same rules as `spel acc2omp`), `!$acc loop seq` on
+  loop (the planner's clauses, the same rules as `spel transform acc2omp`), `!$acc loop seq` on
   every loop inside it (column-parallel: all inner loops; elementwise: the loops inside
   the collapsed nest). Each element keeps its order of operations: bit-for-bit.
 - `!$acc routine seq` in every routine called (directly or not) from inside a new
@@ -36,13 +36,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
+from spel.transforms.acc_plan import DEVICE_FLAG
 from spel.transforms.acc_directives import find_directives
 from spel.transforms.acc_plan import LoopProposal, propose
+from spel.transforms.core.query import ABORTS, abort_calls, call_tree, cold_branches, routine_tree  # noqa: F401
+from spel.transforms.core.query import source_path as _path
+from spel.transforms.core.edits import changed_lines, stacked
+from spel.transforms.core.registry import transform
+from spel.transforms.core.source import indent as _indent
+from spel.transforms.core.transform import Change, Plan, Transform
 
 AUTO_KINDS = {"elementwise", "column-parallel"}
-ABORTS = {"endrun", "shr_sys_abort", "abort", "mpi_abort"}
 TAG = "! spel acc-apply"
 
 
@@ -65,102 +71,24 @@ class PortPlan:
     blocked: list[Port] = field(default_factory=list)  # candidates kept on the host, with the reasons
     manual: list[Port] = field(default_factory=list)  # carried / scatter / interchange loops
     routine_seq: set[str] = field(default_factory=set)  # routine ids that get `!$acc routine seq`
+    notes: list[str] = field(default_factory=list)  # what the plan could not determine
     declares: dict[str, set[str]] = field(default_factory=dict)  # module -> module variables to declare
     private_globals: set[str] = field(default_factory=set)  # module variables a generated module cannot update
+    inactive: int = 0  # loops left alone: in branches the configuration does not run
 
-
-def _path(sub) -> Path:
-    from spel.scripts.config import E3SM_SRCROOT
-
-    p = Path(sub.filepath)
-    return p if p.is_absolute() else Path(E3SM_SRCROOT) / p
 
 
 # character intrinsics with an allocated result: no device version in nvfortran
 STRING_INTRINSICS = {"trim", "adjustl", "adjustr", "repeat"}
+# edit_files' comment on an assignment whose right-hand side used an excluded module
+EXCLUDED_MARKER = "the right-hand side used an excluded module"
+# names the edit pass keeps for the unit tests although their module is excluded, and that a device
+# cannot run: shr_infnan's nan/inf are derived-type constants assigned through an overloaded `=`
+# (set_nan_0d_double; UpdateDaylength's `daylength = nan` failed to compile as a device routine)
+HOST_ONLY_NAMES = {"nan", "inf", "shr_infnan_nan", "shr_infnan_posinf", "shr_infnan_neginf"}
 
 
-def call_tree(fut, roots: Iterable[str]) -> dict[str, object]:
-    out: dict[str, object] = {}
-    stack = [r for r in roots]
-    while stack:
-        sid = stack.pop()
-        if sid in out or sid not in fut.subroutine_dict:
-            continue
-        sub = fut.subroutine_dict[sid]
-        out[sid] = sub
-        stack.extend(ch.id for ch in getattr(sub, "child_subroutines", {}).values())
-    return out
-
-
-def abort_calls(stmts) -> list[int]:
-    """Lines of `call endrun(...)` & co. in a statement list (parse tree). The analysis drops
-    these calls from its edited sources, so a routine's record does not list them."""
-    from spel.scripts.fortran_parser import spel_ast as A
-    from spel.scripts.registrations import iter_statements
-
-    out = []
-    for st, _ in iter_statements(stmts):
-        if isinstance(st, A.SubCallStatement):
-            f = st.function.function if isinstance(st.function, A.FuncExpression) else st.function
-            if str(f).split("%")[-1].lower() in ABORTS:
-                out.append(st.lineno)
-    return out
-
-
-def cold_branches(stmts) -> list[tuple[int, int, int]]:
-    """
-    (first line, last line, line of the first statement) of each branch of the outermost
-    if constructs that can abort (error checks): host code there runs only when a check fails.
-    """
-    from spel.scripts.fortran_parser import spel_ast as A
-    from spel.scripts.registrations import iter_statements
-
-    out: list[tuple[int, int, int]] = []
-    done_to = -1
-    for st, _ in iter_statements(stmts):
-        if st.lineno <= done_to or not isinstance(st, A.IfConstruct):
-            continue
-        branches = [st.consequence] + [e.consequence for e in st.else_ifs]
-        headers = [e.lineno for e in st.else_ifs]
-        if st.else_ is not None:
-            branches.append(st.else_.alternative)
-            headers.append(st.else_.lineno)
-        if not abort_calls(_Block(branches)):
-            continue
-        done_to = st.construct_end_ln
-        for b, nxt in zip(branches, headers + [st.construct_end_ln]):
-            if b.statements:
-                out.append((b.statements[0].lineno, nxt - 1, b.statements[0].lineno))
-    return out
-
-
-class _Block:
-    """Several blocks as one statement list (for iter_statements)."""
-
-    def __init__(self, blocks):
-        self.statements = [x for b in blocks for x in b.statements]
-
-
-def routine_tree(sub):
-    """
-    A routine's SubroutineDefinitionConstruct with original line numbers: from the
-    preprocessed module (module_spec.parse_modules, cached), so cpp blocks inside a
-    statement parse, else parsed from the raw lines (raises when that fails too).
-    """
-    from spel.scripts.fortran_parser.module_spec import ModuleSpecError, parse_modules
-    from spel.scripts.registrations import parse_routine
-
-    name = sub.id.split("::")[-1].lower()
-    try:
-        found = [p for m in parse_modules(_path(sub)) for p in m.subprograms
-                 if p.name.lower() == name and p.lineno == sub.startline]
-    except (ModuleSpecError, OSError):
-        found = []
-    return found[0] if found else parse_routine(_path(sub), sub.startline, sub.endline)
-
-
-class _Facts:
+class DeviceFacts:
     """Per-routine facts from the analysis and the parse tree (cached)."""
 
     def __init__(self, fut):
@@ -215,8 +143,35 @@ class _Facts:
         rec = sub.record
         if rec is not None:
             out += [c.ln for c in rec.calls if str(c.name).split("%")[-1].lower() in ABORTS]
+        out += self.excluded_lines(sub)
+        if rec is not None:  # shr_infnan's `x = nan`: an assignment(=) overload with no device version
+            out += [a.ln for a in rec.accesses() if a.path.lower() in HOST_ONLY_NAMES]
         self._unsafe[sub.id] = sorted(set(out))
         return self._unsafe[sub.id]
+
+    def excluded_lines(self, sub) -> list[int]:
+        """
+        Executable lines the analysis replaced because they use a module it excludes (`!#py`
+        statements, `lhs = lhs` stand-ins of edit_files): the source runs code the device has
+        no version of (shr_infnan's `nan` assignment, a stream advance, a time query).
+        UpdateDaylength's `daylength = nan` was ported as a kernel and failed to compile.
+        """
+        from spel.scripts.fortran_parser.scope_walk import AssignEvent
+        from spel.transforms.core.query import first_executable
+
+        lines = getattr(sub, "sub_lines", None) or []
+        try:
+            first = first_executable(self.tree(sub), sub.record)
+        except BaseException:
+            first = sub.startline
+        out = {lt.ln for lt in lines
+               if lt.ln >= first and ("!#py" in lt.line or EXCLUDED_MARKER in lt.line)}
+        # the record knows the stand-ins (`sub_lines` drops the marker comment: pdep_interp's
+        # stream read was ported as a kernel, with its running index as a sum reduction)
+        if sub.record is not None:
+            out |= {ev.ln for ev in sub.record.events
+                    if isinstance(ev, AssignEvent) and getattr(ev, "stand_in", False)}
+        return sorted(out)
 
     def string_intrinsic_lines(self, sub) -> list[int]:
         """
@@ -327,7 +282,10 @@ class _Facts:
         return found, missing
 
 
-def _closure(facts: _Facts, start: set[str]) -> tuple[set[str], list[str]]:
+_Facts = DeviceFacts  # the former private name
+
+
+def _closure(facts: DeviceFacts, start: set[str]) -> tuple[set[str], list[str]]:
     """Every routine reached from `start`, and the unresolved calls on the way."""
     seen: set[str] = set()
     missing: list[str] = []
@@ -346,6 +304,103 @@ def _closure(facts: _Facts, start: set[str]) -> tuple[set[str], list[str]]:
         missing += [f"{m} (in {sid})" for m in miss]
         stack.extend(ids)
     return seen, missing
+
+
+def reach_conditions(fut, root: str = "elm_driver::elm_drv") -> dict[str, object]:
+    """Routine id -> namelist condition under which `root`'s call tree reaches it: the or over
+    its call sites of (the caller's condition and the namelist if enclosing the call), as the
+    device data layer's guards are composed (`nml_guards`). Routines the tree does not reach
+    are absent (callers treat that as "always")."""
+    from spel.scripts.fortran_parser.boolen_expression import AllOf, AnyOf, simplify
+
+    always = AllOf(())
+    if root not in fut.subroutine_dict:
+        return {}
+    callers: dict[str, list[tuple[str, int]]] = {}
+    seen: set[str] = set()
+    stack = [root]
+    while stack:
+        sid = stack.pop()
+        if sid in seen:
+            continue
+        seen.add(sid)
+        sub = fut.subroutine_dict[sid]
+        for ln, desc in getattr(sub, "sub_call_desc", {}).items():
+            child = getattr(sub, "child_subroutines", {}).get(desc.fn)
+            if child is None or child.id not in fut.subroutine_dict:
+                continue
+            callers.setdefault(child.id, []).append((sid, ln))
+            stack.append(child.id)
+    memo: dict[str, object] = {root: always}
+
+    def reach(sid: str, active: frozenset) -> object:
+        if sid in memo:
+            return memo[sid]
+        conds = []
+        for caller, ln in callers.get(sid, ()):
+            if caller in active:
+                continue
+            if_ = fut.subroutine_dict[caller].namelist_if_at(ln)
+            local = if_.condtional_expectation if if_ is not None else always
+            conds.append(AllOf((reach(caller, active | {sid}), local)))
+        out = simplify(AnyOf(tuple(dict.fromkeys(conds)))) if conds else always
+        memo[sid] = out
+        return out
+
+    for sid in seen:
+        reach(sid, frozenset())
+    return memo
+
+
+def implies(premise, conclusion, max_atoms: int = 14) -> bool:
+    """premise -> conclusion for every assignment of their namelist atoms (truth table);
+    False, i.e. "not known to hold", when there are too many atoms."""
+    from itertools import product
+
+    from spel.scripts.fortran_parser.boolen_expression import _atoms, _evaluate
+
+    atoms = list(_atoms(conclusion, _atoms(premise, {})))
+    if len(atoms) > max_atoms:
+        return False
+    for vals in product((True, False), repeat=len(atoms)):
+        v = dict(zip(atoms, vals))
+        if _evaluate(premise, v) and not _evaluate(conclusion, v):
+            return False
+    return True
+
+
+def kernel_condition(sub, ln: int, reach: dict[str, object]):
+    """The namelist condition under which the loop at line `ln` (0-based) of `sub` runs: how
+    elm_drv's tree reaches the routine, and the namelist if enclosing the loop."""
+    from spel.scripts.fortran_parser.boolen_expression import AllOf
+
+    always = AllOf(())
+    if_at = getattr(sub, "namelist_if_at", None)
+    if_ = if_at(ln) if if_at is not None else None
+    local = if_.condtional_expectation if if_ is not None else always
+    return AllOf((reach.get(sub.id, always), local))
+
+
+def guarded_instances(sub, lo: int, hi: int, instance_conds: dict[str, object], kernel_cond) -> list[str]:
+    """Global derived-type instances accessed in lines lo..hi (0-based) whose device copy exists
+    only under a namelist condition (`instance_conds`, the device data layer's guards: c14_grc_cs
+    under use_c14) that `kernel_cond` (see `kernel_condition`) does not imply. A `default(present)`
+    kernel that names such an instance aborts at launch when the copy is absent, even if the
+    access sits in an `if (use_c14)` inside the loop (2026-10-29: CarbonStateUpdateDynPatch).
+    They get `no_create`: the host address when absent, never dereferenced because the same flag
+    guards the statements."""
+    from spel.scripts.fortran_parser.symbols import Origin
+
+    out: list[str] = []
+    for a in sub.record.accesses(origin=Origin.GLOBAL):
+        if not lo <= a.ln <= hi:
+            continue
+        inst = a.base.lower()
+        cond = instance_conds.get(inst)
+        if cond is None or inst in out or implies(kernel_cond, cond):
+            continue
+        out.append(inst)
+    return sorted(out)
 
 
 def _swappable(loop) -> bool:
@@ -380,18 +435,24 @@ def _reorderable(prop) -> bool:
     return all(lp.node.lineno == lp.start_ln for lp in nest)
 
 
-def plan(fut, roots: Iterable[str]) -> PortPlan:
+def plan(fut, roots: Iterable[str], exclude: Optional[Callable[[str], bool]] = None, config=None) -> PortPlan:
+    """Compute-loop ports for the call trees of `roots`. `exclude` keeps routines, and
+    whatever is reachable only through them, off the device (see `call_tree`). `config` (a
+    core.config.Configuration): only the loops that run in it, through the branches that do."""
     from spel.scripts.record_access import AccessMapper
 
-    facts = _Facts(fut)
+    facts = DeviceFacts(fut)
     mapper = AccessMapper(fut.subroutine_dict)
-    tree = call_tree(fut, roots)
+    tree = config.call_tree(fut, roots, exclude) if config is not None else call_tree(fut, roots, exclude)
     out = PortPlan()
     candidates: list[Port] = []
 
     def visit(sub, props: list[LoopProposal]) -> None:
         for p in props:
             if p.kind == "has-directive":
+                continue
+            if config is not None and not config.span_active(sub, p.loop.start_ln, p.loop.end_ln):
+                out.inactive += 1
                 continue
             if p.kind == "carried" and p.children:
                 out.manual.append(Port(sub.id, p, blockers=["carried (inner loops proposed separately)"]))
@@ -450,6 +511,23 @@ def plan(fut, roots: Iterable[str]) -> PortPlan:
     out.blocked = [p for p in candidates if p.blockers]
     out.routine_seq = set().union(*[p.callees for p in out.ports]) if out.ports else set()
 
+    # instances the device data layer copies only under a namelist flag: `no_create` on the kernels
+    # that name them outside that flag's ifs
+    try:
+        from spel.transforms.device.generate import access_guards
+
+        guards = access_guards(fut, fut.type_dict)
+        out.notes += guards.notes
+    except Exception as exc:  # the stub analyses of tests have no elm_drv
+        guards = None
+        out.notes.append(f"no device-layer guards ({exc}): no_create clauses not planned")
+    if guards is not None and guards.instance_conds:
+        reach = reach_conditions(fut)
+        for p in out.ports:
+            sub = fut.subroutine_dict[p.routine]
+            p.proposal.no_create = guarded_instances(sub, *p.lines, guards.instance_conds,
+                                                     kernel_condition(sub, p.lines[0], reach))
+
     # module variables read in the new compute loops and the routine-seq routines
     from spel.scripts.fortran_parser.module_spec import ModuleSpecError, module_spec
 
@@ -500,8 +578,6 @@ class Insertion:
     order: int = 0
 
 
-def _indent(line: str) -> str:
-    return line[: len(line) - len(line.lstrip())]
 
 
 def _descendants(loop):
@@ -537,13 +613,29 @@ def _loop_edits(p: Port, lines: list[str]) -> list[Insertion]:
     return out
 
 
+def _flag_use_edit(sub, lines: list[str]) -> Optional[Insertion]:
+    """`use elm_varctl, only : elm_device_ready` after the routine's last use statement (or its header)."""
+    from spel.scripts.fortran_parser import spel_ast as A
+    from spel.transforms.core.source import statement_end
+
+    try:
+        tree = routine_tree(sub)
+    except BaseException:  # the parser exits on what it cannot read
+        return None
+    uses = [st for st in tree.body.statements if isinstance(st, A.UseStatement)]
+    after = statement_end(lines, uses[-1].lineno if uses else sub.startline)
+    at = after + 1
+    ind = _indent(lines[at]) if at < len(lines) and lines[at].strip() else "    "
+    return Insertion(at, [f"{ind}use elm_varctl, only : {DEVICE_FLAG}  {TAG}"], order=-10)
+
+
 def _routine_seq_edit(sub, lines: list[str]) -> Optional[Insertion]:
     """`!$acc routine seq` before the first executable statement (after the declarations)."""
     from spel.scripts.fortran_parser import spel_ast as A
     ds = find_directives(lines, sub.startline, sub.endline)
     if any(d.construct == "routine" for d in ds):
         return None
-    from spel.transforms.acc_locals import first_executable
+    from spel.transforms.core.query import first_executable
 
     tree = routine_tree(sub)
     first = first_executable(tree, sub.record)
@@ -560,23 +652,30 @@ def _declare_edit(path: Path, names: set[str], lines: list[str]) -> Insertion:
                           f"  !$acc declare create({body})"])
 
 
-def apply(fut, pp: PortPlan, dry_run: bool = False) -> list[str]:
-    """Insert the directives of a PortPlan into the sources (bottom-up per file)."""
+def edit_plan(ctx, pp: PortPlan) -> Plan:
+    """The edits of a PortPlan: directive insertions, plus the swapped headers of interchanged nests."""
+    fut = ctx.fut
     by_file: dict[Path, list[Insertion]] = {}
-    texts: dict[Path, list[str]] = {}
+    work: dict[Path, list[str]] = {}  # the sources with the interchanges done
 
     def lines_of(path: Path) -> list[str]:
-        if path not in texts:
-            texts[path] = path.read_text().split("\n")
-        return texts[path]
+        if path not in work:
+            work[path] = list(ctx.lines(path))
+        return work[path]
 
-    log: list[str] = []
     for p in pp.ports:
-        sub = fut.subroutine_dict[p.routine]
-        path = _path(sub)
+        path = _path(fut.subroutine_dict[p.routine])
         if p.interchange:  # same line count: the insertion lines stay valid
             _swap(p, lines_of(path))
         by_file.setdefault(path, []).extend(_loop_edits(p, lines_of(path)))
+    for rid in sorted({p.routine for p in pp.ports}):
+        # the kernels' if(elm_device_ready) clause needs the flag in scope (a CPU build never
+        # notices: the directives are comments there)
+        sub = fut.subroutine_dict[rid]
+        if sub.record is not None and sub.record.lookup(DEVICE_FLAG) is None:
+            e = _flag_use_edit(sub, lines_of(_path(sub)))
+            if e is not None:
+                by_file.setdefault(_path(sub), []).append(e)
     for cid in sorted(pp.routine_seq):
         sub = fut.subroutine_dict[cid]
         path = _path(sub)
@@ -586,23 +685,61 @@ def apply(fut, pp: PortPlan, dry_run: bool = False) -> list[str]:
     for mod, names in sorted(pp.declares.items()):
         path = _path(fut.module_dict[mod])
         by_file.setdefault(path, []).append(_declare_edit(path, names, lines_of(path)))
+    plan = Plan("acc-apply", notes=list(pp.notes))
     for path, ins in by_file.items():
-        lines = lines_of(path)
-        for x in sorted(ins, key=lambda x: (-x.ln, -x.order)):
-            lines[x.ln:x.ln] = x.lines
-        log.append(f"{path.name}: {len(ins)} insertions")
-        if not dry_run:
-            path.write_text("\n".join(lines))
-    return log
+        eds = stacked((x.ln, x.lines, x.order) for x in ins) + changed_lines(ctx.lines(path), work[path])
+        plan.add(Change(path, eds, where=path.name, why=f"{len(ins)} insertions"))
+    return plan
+
+
+def apply(fut, pp: PortPlan, dry_run: bool = False) -> list[str]:
+    """Insert the directives of a PortPlan into the sources."""
+    from spel.transforms.core.driver import InPlace, apply_plan
+    from spel.transforms.core.transform import Context
+
+    ctx = Context(fut)
+    plan = edit_plan(ctx, pp)
+    apply_plan(plan, ctx, InPlace(), dry_run=dry_run)
+    return [f"{c.where}: {c.why}" for c in plan.changes]
+
+
+@dataclass
+class Options:
+    roots: list[str] = field(default_factory=lambda: ["elm_driver::elm_drv"],
+                             metadata={"help": "the call trees to port"})
+
+
+@transform
+class AccApply(Transform):
+    """
+    Matches: the loops of the call trees of `roots` that the planner (acc_plan) can run on the
+             device, the routines they call, the module data they read.
+    Changes: `!$acc parallel loop` (+ `loop seq` inside) on each ported loop, interchanged
+             nests reordered, `!$acc routine seq` in device-called routines, `!$acc declare
+             create` for module data.
+    Refuses: loops with blockers (they stay on the host; see `plan.notes`/summary).
+    """
+
+    name = "acc-apply"
+    summary = "add OpenACC directives to the portable loops of a call tree"
+    Options = Options
+
+    def build(self, ctx, opts):
+        pp = plan(ctx.fut, opts.roots, config=ctx.config)
+        out = edit_plan(ctx, pp)
+        out.notes += summary(pp)
+        return out
 
 
 def summary(pp: PortPlan) -> list[str]:
     from collections import Counter
 
-    out = [f"ported loops: {len(pp.ports)} ({dict(Counter(p.proposal.kind for p in pp.ports))}, "
+    out = [f"inactive in the configuration (left alone): {pp.inactive} loops"] if pp.inactive else []
+    out += [f"ported loops: {len(pp.ports)} ({dict(Counter(p.proposal.kind for p in pp.ports))}, "
            f"{sum(p.interchange for p in pp.ports)} interchanged) in "
            f"{len({p.routine for p in pp.ports})} routines",
            f"routine seq: {len(pp.routine_seq)} routines",
+           f"no_create (namelist-guarded instances): {sum(1 for p in pp.ports if p.proposal.no_create)} loops",
            f"declares: {sum(len(v) for v in pp.declares.values())} module variables in {len(pp.declares)} modules"
            + (f" ({len(pp.private_globals)} private: {', '.join(sorted(pp.private_globals))})" if pp.private_globals else ""),
            f"blocked (stay on the host): {len(pp.blocked)}",

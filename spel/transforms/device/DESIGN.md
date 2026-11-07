@@ -1,4 +1,4 @@
-# Device data layer for full-model OpenACC runs (`spel device-data`)
+# Device data layer for full-model OpenACC runs (`spel transform device-data`)
 
 Status: first version built 2026-10-25; brute-force synchronization.
 
@@ -8,7 +8,7 @@ The branch's OpenACC kernels were only ever executed inside SPEL unit tests, who
 moves the data. In the full model every type instance carries `!$acc declare create`
 (the object exists on the device) but nothing copies the contents of its components, and
 the `*_vars` instances passed as arguments are never created on the device at all. The
-first kernel of a full run therefore reads unset device memory. `spel device-data`
+first kernel of a full run therefore reads unset device memory. `spel transform device-data`
 generates the missing layer from the analysis.
 
 ## What is generated
@@ -209,10 +209,10 @@ as a patch against the base commit:
 ## Usage
 
 ```
-spel device-data --dry-run            # plan: instances, transitions, edits
-spel device-data --print              # the module texts
-spel device-data [--reanalyze]        # write the modules to data_types/, edit the two driver files in place
-spel device-data -o CASE/SourceMods/src.elm
+spel transform device-data --dry-run            # plan: instances, transitions, edits
+spel transform device-data --dry-run --diff     # also the module texts (as new files)
+spel transform device-data [--reanalyze]        # write the modules to data_types/, edit the two driver files in place
+spel transform device-data -o CASE/SourceMods/src.elm
 ```
 
 Debug and optimized builds use the same generated code (plain data directives, runtime
@@ -236,3 +236,151 @@ A report, made from the record and the parse tree's if guards; the edits are mad
 
 Actual-argument, pointer, allocation and `size` uses disqualify a variable. The walker
 records an initializer as an `init` write.
+
+## 2026-10-29: the remaining host syncs
+
+- `generate.HOST_SEGMENTS` is empty: dynSubgrid_driver is a device call. Its heat/water content
+  (dynConsBiogeophysMod, TotalWaterAndHeatMod) and weight bookkeeping (set_prior/old/new_*_weights)
+  run on the device; the weight-change path (transient land use, dyn_cnbal_*) stays host code under
+  `if (weights_updated)`. `tools/scope.py` lists what stays out.
+- acc-sync `cold` has a fourth rule, `flag_condition`: a block `if` whose condition reads only host
+  flags (scalars no device code writes, or local scalars such as a reduction count) gets its syncs
+  inside its branches. `if (weights_updated)`, `if (create_glacier_mec_landunit)`, `if (nbad > 0)`
+  cost nothing when not taken. A condition on an array element or a derived-type object keeps the
+  whole construct as one segment.
+- `spel/transforms/section_loops.py`: array-section assignments outside kernels become explicit loop
+  nests (`x(begc:endc,1:n) = 0` -> `do spel_i2; do spel_i1; x(spel_i1,spel_i2) = 0`), which acc-apply
+  then ports. Runs before acc-apply in the pipeline (`tools/section_loops_apply.py`).
+- `edit_files` keeps the write of an assignment whose right-hand side used an excluded module as the
+  no-op `lhs = lhs` (the walker records a self-assignment as a write only): pdep_interp's
+  `forc_pdep_grc` write used to vanish with the statement, so nothing pushed it. ndepStreamMod is no
+  longer excluded; the whole-type `update_atm2lnd_type` around ndep_interp goes away.
+- An internal procedure's record links its host (`SubroutineRecord.host`); the planner resolves
+  host-associated arrays through it (store_tsl_moisture's `h2osoi_liq_saved` was a "host scalar race").
+- Write statements no longer block loops: PrecisionControl, ch4_tran and DivideExtraSnowLayers count
+  on the device and report on the host only when the count is non-zero (a cold branch).
+
+## 2026-10-30: collapsed loops must not take their bounds from inquiry functions (`spel/transforms/collapse_bounds.py`)
+
+nvfortran 25.9 (cc80) runs `parallel loop collapse(n)` as an empty kernel on the GPU when a
+collapsed `do` header's bound is `lbound`/`ubound` of a pointer (a derived-type component,
+an associate name of one, or a module pointer): no error, nothing written. A 1-D loop with
+the same bounds runs, a collapsed nest with host-scalar bounds runs, and the device
+descriptor holds the right bounds (`$SCRATCH/spelval/assoc_test/t_assoc2.F90`); a module
+allocatable with `size()` bounds is fine (`t_alloc.F90`), so histComputeMod's hand-written
+`collapse(2)` over `size(snow_fields)` stays. The
+section-loop rewrite (`x(:,:) = y(:,:)` -> `do spel_i2 = lbound(x,2), ubound(x,2)` ...)
+produced 29 such nests; the first casualty was UrbanRadiation's `forc_solad_pp` copies,
+which left `top_af%solad_pp` = spval on the device and surfaced two routines later as
+"t_soisno > 400 K in urban columns" (a day of file-group bisecting; the probe method of
+memory `probe-in-elm-drv-not-bisect` found it in two runs).
+
+`collapse_bounds.apply(fut, routine_ids)` (tool: `spelval/tools/collapse_bounds_apply.py`)
+hoists every inquiry bound of a collapsed nest into `spel_lb<k>`/`spel_ub<k>` integer scalars
+assigned right before the directive, k counting the nest outer-first, and rebuilds the
+headers from the record's loop nodes. It needs the analysis of the sources it edits, so the
+pipeline is: section-loops -> acc-apply -> `spel analyze` -> collapse-bounds (then
+bounds_copyin / device_ready as before). Rule for hand-written kernels: the same.
+
+## 2026-10-30: calls into excluded modules inside device routines; genf90 templates
+
+A call to a routine of a module the analysis excludes (`edit_files.bad_modules`) has no events,
+so `acc_sync` syncs nothing around it. `dynSubgrid_driver`'s `dyncrop_interp` writes the crop
+landunit and column weights and the fertilizer patches on the host; once dynSubgrid_driver ran
+device kernels itself (the 10-29 host-sync removal), those writes never reached the device and
+the GPU restart diverged from the host (GDD accumulators, soil temperature). Two measures:
+
+- `acc_sync.plan` reports every such call (`SyncPlan.notes`, `excluded_calls_in`; printed by
+  `tools/tree_sync.py`). A note means the routine is not safe on the device until the callee is
+  analyzable.
+- `spel.scripts.genf90` generates the modules E3SM builds from genf90 templates (`dynVar*`,
+  `ncdio_pio`, `restUtilMod`, `shr_*`) into the analysis cache (`<cache>/genf90`, line markers
+  stripped) and the module lookup searches it, so `dyncropFileMod` and `dynpftFileMod` are
+  analyzed instead of excluded, and the sync planner sees their effects on the call lines.
+
+Rule learned the same day: a pull of data the device-data layer does not carry (the
+accumulators of accumComputeMod, the history buffers, the budget tables) at a point where the
+host takes over (restart write, a host-mode update) must be unconditional. `elm_device_ready`
+is already false there, so `if(elm_device_ready)` turns the pull into a no-op and the restart
+gets stale host copies (every accumulator was 10 steps short, 2026-10-30). The clause belongs
+only on acc-sync's own updates inside device routines, whose host copies are current whenever
+the flag is off.
+
+Same day, third rule: a local the host initializes in the specification part (an initializer
+or a DATA statement) and never writes again is `enter data copyin`, not `create`
+(`acc_locals.RoutineReport.host_initialized`): `create` hands the device an unfilled copy,
+and a push placed right after the DATA statement is a no-op because the device copy does
+not exist yet (acc_sync now puts pushes of specification-part writes after the enter-data
+block, `after_enter_data`). CombineSnowLayers' dzmin thresholds were zero on the device, so
+the GPU never combined thin snow layers (one extra layer in the worst columns, 2026-10-30).
+
+## 2026-10-30: what the four regressions of the host-sync removal have in common
+
+Residency (which copy of a variable is authoritative, where) is implicit in directive text
+spread over the tree; each pass (section-loops, acc-apply, acc-locals, acc-sync, targeted,
+the host-safe retrofit, hand edits) edits that text once, in sequence, nothing re-derives the
+whole from the analysis afterwards, and OpenACC's `if_present`, `create` and `if(flag)` turn
+every inconsistency into a wrong number instead of an abort. Rules that follow:
+
+1. Syncs are an output of the analysis, never maintained text: fixed pass order, `spel
+   analyze` between passes, `tools/sync_drift.py` (plan vs. present directives, per routine)
+   as a mandatory gate before any build. It found 9 drifted routines in a minute.
+2. Hand-written syncs are invisible to the planner: tag them or let the planner own them all.
+3. Debug build to make the silences loud: no `if_present` on generated updates, NaN-fill of
+   created locals, device-lint = collapse-bounds + host-initialized-locals + sync-drift.
+4. Validate per pass group (10-step host-vs-GPU restart, 15 min), compare the restarts first
+   (per landunit, per layer, pattern of the difference), then probe the driver.
+
+## 2026-10-30: `attach` before the target is on the device is a silent no-op (history buffers wrong on the GPU)
+
+The refactored history (`histComputeMod`) and the subgrid view (`subgridAveViewMod`) reach the
+model arrays through pointer components that are `enter data attach`ed. Both were attached when
+they were built, in `initialize2` before `elm_device_copyin`: the OpenACC runtime takes *no
+action* for an attach whose target is not present (spec 2.7.2), the device descriptor keeps the
+host address, and Perlmutter's unified addressing (HMM) lets the kernel read host memory instead
+of faulting. The GPU's history buffers were the *host's* stale arrays (TSOI exactly 11 x the
+finidat value, fluxes 0, spval-initialized fields spval), at page-fault speed (7.5 s / 10 steps).
+The in-tree test copied the data before attaching, so it passed; the 10-step validation compares
+the model restart, never the history buffers. Reproducer: `spelval/histtest/repro_attach/t_attach.F90`.
+
+Rules:
+
+1. Attach is a separate, explicit step after the data layer's copy (`subgrid_ave_device_attach`,
+   `hist_device_attach`, called by `initialize2` right after `elm_device_copyin`); the builders
+   (`init_subgrid_ave`, `hist_compute_build`) no longer attach, and re-attach themselves only
+   when rebuilding something that was attached.
+2. Every attach checks `acc_is_present` of every target and aborts on a missing one; the device
+   path aborts if it runs before the attach. Nothing is allowed to fall through to host memory.
+3. Tests of device code copy the data in the *model's* order (after the consumer's setup) and run
+   with a host decoy: the host copies are made wrong (negated) while the kernel runs, so a kernel
+   reading host memory fails the comparison even where host and device would otherwise agree.
+4. An e2e validation of a component must compare that component's output (the history restart
+   `elm.rh0` through cprnc, `tools/validate_hist.sh`), not only the model restart.
+
+## 2026-10-30: every history source must be in the device-data layer (`ptr_topo`, private instances)
+
+The first run with the presence checks of rule 2 above aborted: `PCT_LANDUNIT`, `PCT_NAT_PFT` and
+`PCT_CFT` (hpindex 1492-1494, the last fields registered) read `subgrid_weights_diagnostics%pct_*`
+(`subgridWeightsMod`), which the layer did not carry. Two SPEL deficits hid it:
+
+- `registrations.py` knew `ptr_patch/col/lunit/gcell/lnd/atm` but not `ptr_topo`, so the 17
+  topounit-level fields (`TBOT`, `PBOT`, ..., the `PCT_*` fields) were invisible to
+  `_history_components` and to every registration-based check. Fixed (test added).
+- `subgridWeightsMod` is default-private and did not export the type or the instance, so `plan`
+  skipped it ("private module variable"): the layer cannot name it, and acc-sync cannot push it
+  after `set_subgrid_diagnostic_fields` (a host loop under `weights_updated`). Fixed in the tree by
+  making both public; the layer is regenerated and dynSubgridDriverMod resynced.
+
+Rules: a history field's source is read on the device by `histComputeMod` whatever the analyzed
+routines do, so the planner must treat every registration target as device data: the instance must
+be in the layer (public, or its module must manage it), and host writes to it need a push. The
+history attach check (`hist_compute_attach`) reports *every* missing target before it aborts, so one
+GPU run with the production history (`tools/gpuleg_hist_probe.sh`) lists the whole gap; the
+hpindex -> field name map is the `hpindex`/`name` variables of the history restart (`elm.rh0`).
+
+The same night, the lnd2atm presence check found the second gap of this kind: `sedflux_vars` was copied only under
+`(use_cn .and. use_erosion) .or. (ero_ccycle .and. ...)`, because `access_guards` derived the instance guards from
+elm_drv's accesses alone, while `lnd2atm` (called by `lnd_run_mct`, outside elm_drv) averages `sed_yld_col`
+unconditionally through the `l2a_add` table. The guards now come from every device root (`DEVICE_ROOTS` =
+elm_drv, lnd2atm, lnd2atm_minimal; `merge_guards`: a field stays guarded only if every root that accesses it
+guards it). Rule: whenever device code gets a new entry point outside elm_drv's tree, add it to `DEVICE_ROOTS`.

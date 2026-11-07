@@ -65,7 +65,7 @@ def get_filename_from_module(module_name: str, verbose: bool = False):
         dg.map_module_name_to_fpath[module_name] = file_path
         return file_path
 
-    cmd = rf'grep -rin --exclude-dir=external_models/ "^\s*module\s* {module_name}" {ELM_SRC}*'
+    cmd = rf'grep -rin --exclude-dir=external_models/ "^\s*module\s* {module_name}\b" {ELM_SRC}*'
     elm_output = sp.getoutput(cmd)
     if not elm_output:
         if verbose:
@@ -73,17 +73,22 @@ def get_filename_from_module(module_name: str, verbose: bool = False):
         #
         # If file is not an ELM file, may be a shared module in E3SM/share/util/
         #
-        cmd = f'grep -rin --exclude-dir=external_models/ "module {module_name}" {SHR_SRC}*'
+        cmd = rf'grep -rin --exclude-dir=external_models/ "module {module_name}\b" {SHR_SRC}*'
         shr_output = sp.getoutput(cmd)
 
-        if not shr_output:
+        gen_output = ""
+        if not shr_output and dg.genf90_dir:
+            # modules E3SM generates from genf90 templates at build time (spel.scripts.genf90)
+            cmd = rf'grep -rin "^\s*module\s* {module_name}\b" {dg.genf90_dir}/*.F90'
+            gen_output = sp.getoutput(cmd)
+        if not shr_output and not gen_output:
             if verbose:
                 print(
                     f"Couldn't find {module_name} in ELM or shared source -- adding to removal list"
                 )
             file_path = None
         else:
-            file_path = shr_output.split("\n")[0].split(":")[0]
+            file_path = (shr_output or gen_output).split("\n")[0].split(":")[0]
     else:
         file_path = elm_output.split("\n")[0].split(":")[0]
 

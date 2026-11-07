@@ -40,7 +40,7 @@ Options:
   -o, --outdir DIR     reports and summary (default: unit-tests/profiles/compare-<acc>-nsets<N>-<date>)
   --skip "LIST"        configurations to leave out: any of master_c acc_c acc_mc
   --omp-case CASE      also profile CASE built with ACC=OPENMP, 1 clump x N threads
-                       (run \`spel acc2omp --case CASE\` first)
+                       (run \`spel transform acc2omp --case CASE\` first)
   --ranges "A B"       routine NVTX ranges to report besides 'compute' (default: those
                        pushed inside 'compute' in main.F90)
   --env FILE           source FILE first (modules, PKG_CONFIG_PATH/LD_LIBRARY_PATH for the

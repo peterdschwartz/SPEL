@@ -90,3 +90,70 @@ end subroutine s"""
     assert check_routine(sub, {"avg_1d"}, lines).locals_needed == []        # `avg` itself isn't known
     sub.sub_call_desc = {call.ln: SimpleNamespace(fn="m::avg_1d")}           # resolved generic
     assert check_routine(sub, {"avg_1d"}, lines).locals_needed == ["work"]
+
+
+DATA_SRC = """subroutine s(n, x)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(inout) :: x(:)
+  integer :: i
+  real(r8) :: dzmin(5), work(5), scale(5) = 2._r8
+  data dzmin /0.010_r8, 0.015_r8, 0.025_r8, 0.055_r8, 0.115_r8/
+  work(:) = 0._r8
+  !$acc parallel loop gang vector default(present)
+  do i = 1, n
+     x(i) = x(i) * dzmin(1) + work(1) + scale(2)
+  end do
+end subroutine s"""
+
+
+def test_host_initialized_locals_are_copied_in(tmp_path):
+    path = tmp_path / "m.F90"
+    path.write_text(DATA_SRC)
+    rec = walk(DATA_SRC)
+    lns = [ln for ln, line in enumerate(DATA_SRC.split("\n")) if line.strip()]
+    sub = SimpleNamespace(id="m::s", name="s", record=rec, filepath=path, startline=lns[0], endline=lns[-1])
+    lines = DATA_SRC.split("\n")
+    r = check_routine(sub, set(), lines)
+    assert set(r.locals_needed) == {"dzmin", "work", "scale"}
+    assert r.host_initialized == ["dzmin", "scale"]      # a DATA statement, an initializer
+    assert r.host_accessed == ["work"]                   # written by host code: copied around the kernel
+    # plan_fix emits `enter data copyin(dzmin, scale)` for them (it needs a module file: not exercised here)
+
+
+SHARED = """\
+module snippet_mod
+  implicit none
+  integer, parameter :: r8 = 8
+contains
+  subroutine s(n, y)
+    integer, intent(in) :: n
+    real(r8), intent(inout) :: y(:)
+    real(r8) :: w(n)
+    integer :: i
+    do i = 1, n
+       w(i) = real(i, r8)
+    end do
+    !$acc parallel loop gang vector default(present)
+    do i = 1, n
+       y(i) = w(i)
+    end do
+  end subroutine s
+end module snippet_mod
+"""
+
+
+def test_host_shared_locals_are_resident_not_copied(tmp_path):
+    # user rule (2026-11-03): no structured data regions; acc-sync syncs the transitions
+    from spel.transforms.acc_locals import AccLocals
+    from spel.transforms.core import driver
+    from spel.transforms.core.testing import snippet_context
+
+    ctx = snippet_context(SHARED, tmp_path, "snippet_mod.F90")
+    res = driver.run(AccLocals(), ctx, AccLocals.Options(), sink=driver.Memory(), verify=True)
+    out = res.outputs.get(ctx.fut.snippet, SHARED)
+    assert "enter data create(w)" in out and "exit data delete(w)" in out, out
+    assert "data copy" not in out and "end data" not in out, out
+    res = driver.run(AccLocals(), snippet_context(SHARED, tmp_path / "b", "snippet_mod.F90"),
+                     AccLocals.Options(structured=True), sink=driver.Memory(), verify=True)
+    assert "data copy(w)" in "\n".join(res.outputs.values())

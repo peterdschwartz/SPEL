@@ -26,3 +26,17 @@ def test_group_edits_missing_field(monkeypatch):
     monkeypatch.setattr(groups, "GROUPS", {"retrans": {"vegetation_nutrient_state": ["retrans"]}})
     with pytest.raises(ExtractError, match="no N/P-only fields"):
         groups.group_edits([family(["retransn"], [])])
+
+
+def test_load_groups_replaces_builtin(tmp_path):
+    f = tmp_path / "g.toml"
+    f.write_text('[retrans]\nvegetation_nutrient_state = ["retrans"]\n')
+    (fe,) = groups.group_edits([family(["retransn"], ["retransp"])], groups.load_groups(f))
+    assert fe.component == "retrans"
+
+
+def test_load_groups_rejects_bad_shape(tmp_path):
+    f = tmp_path / "g.toml"
+    f.write_text('[retrans]\nvegetation_nutrient_state = "retrans"\n')
+    with pytest.raises(ExtractError, match="lists of base names"):
+        groups.load_groups(f)

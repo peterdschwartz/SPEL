@@ -13,15 +13,18 @@ no-ops without `_OPENACC`:
   placed on the default device at program start, so the run must give each rank one
   visible device, e.g. `srun --gpus-per-task=1`).
 - `elm_device_copyin()`: the one-time deep copy of every type instance of the analysis
-  to the device, called in `elm_drv` on the first time step (after initialization and
-  restart reads), guarded by `elm_device_resident`. Instances with `!$acc declare
+  to the device, called at the end of `initialize2` (after the restart reads; `elm_drv`
+  has a fallback guarded by `elm_device_resident`). Instances with `!$acc declare
   create` get their components copied under the already present object; the others get
   `enter data copyin` of the object first. Pointer components the analysis records as
   aliases (`=>` to another component) are attached instead of copied. After the copy
   every array is checked with `acc_is_present` and the misses are reported.
 - `elm_device_update(to_device)`: `update device`/`update self` of every component of
-  every instance (brute force: the whole state), called at the step boundaries and
-  around the host-side sections of `elm_drv`.
+  every instance (brute force: the whole state). ELM no longer calls it (2026-11-01): after
+  the copy the state stays on the device (`elm_device_fullsync = .false.`, set by the
+  inserted calls), `device-targeted` moves the data the host code of `elm_drv` uses, and a
+  configuration whose host code cannot be synced that way aborts in elm_drv's GPU guard.
+  The unit-test harness still uses it to pull a case's outputs.
 
 Everything is generated from `fut.type_dict` (instances, components, nesting, pointer
 targets) so it follows the sources it is applied to.
@@ -29,16 +32,23 @@ targets) so it follows the sources it is applied to.
 
 from __future__ import annotations
 
-import re
 import subprocess
+from spel.transforms.core.fortran import if_then, wrap_statement
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from spel.transforms.core.edits import EditSet, insert
+from spel.transforms.core.registry import transform
+from spel.transforms.core.transform import Change, Plan as TPlan, Refusal, Transform
 
 MODULE_NAME = "ElmDeviceDataMod"
 TAG = "! spel device-data"
 INTRINSIC = {"real", "integer", "logical", "character", "double", "complex", "double precision"}
 MAX_DEPTH = 5
+# routines whose trees run device code: the namelist guards of the copies are the OR over all of them
+# (elm_drv's step; lnd2atm / lnd2atm_minimal: the subgrid averages lnd_run_mct and initialize2 run)
+DEVICE_ROOTS = ("elm_driver::elm_drv", "lnd2atmmod::lnd2atm", "lnd2atmmod::lnd2atm_minimal")
 
 
 class DeviceDataError(RuntimeError):
@@ -248,8 +258,27 @@ class Guards:
     components: dict[int, str] = field(default_factory=dict)  # id(type component) -> Fortran condition
     cond_flags: dict[str, set[str]] = field(default_factory=dict)  # Fortran condition -> its flag names
     instances: dict[str, str] = field(default_factory=dict)  # instance (lower) -> Fortran condition
+    instance_conds: dict[str, object] = field(default_factory=dict)  # instance (lower) -> ConditionExpectation
     flags: dict[str, str] = field(default_factory=dict)  # flag name -> declaring module
     notes: list[str] = field(default_factory=list)
+
+
+def _history_registrations(fut) -> dict[str, list[tuple]]:
+    """type -> the guards (enclosing ifs, `registrations.Guard`) of each of its history registrations."""
+    out: dict[str, list[tuple]] = {}
+    inst_type = {i.name.lower(): t.type_name.lower() for t in fut.type_dict.values() for i in t.instances.values()}
+    for sub in fut.subroutine_dict.values():
+        for r in getattr(sub, "registrations", []) or []:
+            if r.kind != "hist" or not r.field:
+                continue
+            var = sub.arguments.get(r.base) if hasattr(sub, "arguments") else None
+            if var is not None:
+                tname = str(var.type).lower().replace("class(", "").replace("type(", "").rstrip(")")
+            else:
+                tname = inst_type.get(r.base.lower(), "")
+            if tname:
+                out.setdefault(tname, []).append(tuple(getattr(r, "guards", ()) or ()))
+    return out
 
 
 def _history_components(fut) -> set[tuple[str, str]]:
@@ -270,6 +299,26 @@ def _history_components(fut) -> set[tuple[str, str]]:
             if tname:
                 out.add((tname, first))
     return out
+
+
+def _cond_key(text: str) -> str:
+    return str(text).replace(" ", "").replace("(", "").replace(")", "").lower()
+
+
+def _registration_implies(guards: tuple, cond) -> bool:
+    """Whether a registration's enclosing ifs imply `cond` (the copy guard): some disjunct of `cond`
+    has all its literals among the (non-negated) guards. Conservative: anything else is False."""
+    from spel.scripts.fortran_parser.boolen_expression import AllOf, AnyOf
+
+    keys = {_cond_key(g) for g in guards if not getattr(g, "negated", False)}
+    if not keys:
+        return False
+    disjuncts = cond.items if isinstance(cond, AnyOf) else (cond,)
+    for d in disjuncts:
+        lits = d.items if isinstance(d, AllOf) else (d,)
+        if all(_cond_key(_fortran(lit)) in keys for lit in lits):
+            return True
+    return False
 
 
 def _fortran(cond) -> str:
@@ -308,21 +357,34 @@ def access_guards(fut, type_dict) -> Guards:
     instance that accesses it, is copied/updated only under that condition (shared by the
     instances: the per-type routines serve them all). An instance whose accessed fields are
     all gated is handled only under the or of their conditions (c13_col_cf: use_c13).
-    Kept unguarded: history-registered components (the hbuf kernels read them), and
+    Kept unguarded: history-registered components, and instances owning a history field registered outside the
+    instance's own guard
+    (the hbuf kernels read them; 2026-11-02 subgrid_weights_diagnostics was gated by
+    active_dynamic_subgrid and the PCT_* history fields found it absent), and
     conditions with string comparisons (no spel_streq in ELM).
+
+    The accesses come from every device root (`DEVICE_ROOTS`): elm_drv's tree and the
+    lnd2atm averaging, which lnd_run_mct calls after elm_drv and whose kernels read the
+    table's arrays unconditionally (2026-10-30: sedflux_vars was gated by the erosion flags
+    from elm_drv's accesses alone, and lnd2atm's sed_yld_col average found it absent).
     """
     from spel.scripts.fortran_parser.boolen_expression import AnyOf, minimize, simplify
     from spel.scripts.nml.analyze_namelist import check_subs_for_nml_guarded_vars, nml_guards
+    from spel.scripts.validate_access import merge_guards
 
     g = Guards()
     drv = fut.subroutine_dict.get("elm_driver::elm_drv")
     if drv is None:
         g.notes.append("guards: elm_drv not in the analysis, no namelist guards")
         return g
+    roots = [fut.subroutine_dict[r] for r in DEVICE_ROOTS if r in fut.subroutine_dict]
+    for r in DEVICE_ROOTS:
+        if r not in fut.subroutine_dict:
+            g.notes.append(f"guards: device root {r} not in the analysis")
     instance_dict = {i.name: t for t in fut.type_dict.values() for i in t.instances.values()}
     try:
-        by_cond = check_subs_for_nml_guarded_vars([drv], instance_dict)
-        raw = nml_guards(drv)
+        by_cond = check_subs_for_nml_guarded_vars(roots, instance_dict)
+        raw = merge_guards((r.elmtype_access_by_ln, nml_guards(r)) for r in roots)
     except Exception as exc:
         g.notes.append(f"guards: namelist analysis failed ({exc}), no namelist guards")
         return g
@@ -347,18 +409,29 @@ def access_guards(fut, type_dict) -> Guards:
                 continue
             g.components[id(c)] = text
             names |= cond.variable_names()
-    accessed = getattr(drv, "elmtype_access_by_ln", {})
+    accessed = {v for r in roots for v in getattr(r, "elmtype_access_by_ln", {})}
     fields_of: dict[str, list[str]] = {}
-    for v in accessed:
+    for v in sorted(accessed):
         fields_of.setdefault(v.split("%")[0].lower(), []).append(v)
+    hist_regs = _history_registrations(fut)
+    inst_type = {i.name.lower(): t.type_name.lower() for t in type_dict.values() for i in t.instances.values()}
     for inst, fields in fields_of.items():
         conds = [raw.get(v) for v in fields]
         if any(c is None for c in conds):
             continue
         cond = simplify(AnyOf(tuple(dict.fromkeys(conds))))
+        regs = hist_regs.get(inst_type.get(inst, ""), [])
+        if regs and not all(_registration_implies(r, cond) for r in regs):
+            # the hbuf kernels read its history sources whenever they are registered, whatever the analyzed
+            # routines do (subgrid_weights_diagnostics: PCT_* registered unconditionally, written only under
+            # active_dynamic_subgrid). Kept gated when every registration sits under the copy's own condition
+            # (top_ws: WATER_FROM_UPHILL only if use_im2_hillslope_hydrology).
+            g.notes.append(f"guards: {inst} owns history sources registered outside {_fortran(cond)}, copied unguarded")
+            continue
         text = usable(cond)
         if text is not None:
             g.instances[inst] = text
+            g.instance_conds[inst] = cond
             names |= cond.variable_names()
     for n in sorted(names):
         mods = [m for m, mod in fut.module_dict.items() if n in {k.lower() for k in mod.global_vars}]
@@ -370,24 +443,11 @@ def access_guards(fut, type_dict) -> Guards:
     if missing:
         g.components = {k: v for k, v in g.components.items() if not g.cond_flags.get(v, set()) & missing}
         g.instances = {k: v for k, v in g.instances.items() if not g.cond_flags.get(v, set()) & missing}
+        g.instance_conds = {k: v for k, v in g.instance_conds.items() if k in g.instances}
     return g
 
 
-def _wrap_cond(head: str, cond: str, width: int = 120) -> list[str]:
-    """`<head>if (cond) then`, continued at .and./.or. when long."""
-    line = f"{head}if ({cond}) then"
-    if len(line) <= width:
-        return [line]
-    pieces = re.split(r"(?=\s\.(?:and|or)\.\s)", cond)
-    out, cur = [], f"{head}if ("
-    for p in pieces:
-        if len(cur) + len(p) > width - 2 and cur.strip() != "if (":
-            out.append(cur.rstrip() + " &")
-            cur = head + "     " + p.lstrip()
-        else:
-            cur += p
-    out.append(cur + ") then")
-    return out
+_wrap_cond = if_then
 
 
 def _gated(cond: Optional[str], stmts: list[str]) -> list[str]:
@@ -526,20 +586,7 @@ def assign_groups(p: "Plan", type_dict) -> dict[str, str]:
 # --- per-type routines and modules ------------------------------------------------------
 
 
-def _wrap(line: str, width: int = 120) -> list[str]:
-    """Split a long Fortran statement at `, ` with `&` continuations."""
-    if len(line) <= width:
-        return [line]
-    indent = " " * (len(line) - len(line.lstrip()) + 5)
-    out, cur = [], ""
-    for piece in re.split(r"(?<=, )", line):
-        if cur and len(cur) + len(piece) > width - 2:
-            out.append(cur.rstrip() + " &")
-            cur = indent + piece
-        else:
-            cur += piece
-    out.append(cur)
-    return out
+_wrap = wrap_statement
 
 
 def _guarded(test: Optional[str], path: str, body: list[str]) -> list[str]:
@@ -703,7 +750,7 @@ def _header(name: str, purpose: list[str], srcroot: Path, commit: str) -> list[s
         f"module {name}",
         "  !",
         "  ! GENERATED by `spel device-data` from the elm_drv analysis of the sources",
-        f"  ! ({srcroot}, {commit}). Do not edit; regenerate.",
+        f"  ! ({Path(srcroot).name}, {commit}). Do not edit; regenerate.",
         "  !",
     ] + [f"  ! {s}" for s in purpose] + [
         "  ! Everything is a no-op without _OPENACC.",
@@ -803,24 +850,50 @@ def _group_module(key: str, mod_name: str, desc: str, types: list, instances: li
     return "\n".join(L) + "\n"
 
 
-def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool = True) -> str:
+def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool = True,
+                   filters: Optional[list[Instance]] = None, groups: Optional[dict[str, str]] = None) -> str:
+    """
+    filters: the clumpfilter instances (elm_device_filters_update); groups: type -> group key.
+    """
+    filters = filters or []
     L = _header(MODULE_NAME, [
         "Device data layer for full-model OpenACC runs: device initialization, the",
         "one-time deep copy of every type instance to the device (first time step),",
-        "and whole-state updates around the host-side sections of the driver. The",
-        "per-type routines are in the DeepCopy*Mod group modules.",
+        "and whole-state updates. The per-type routines are in the DeepCopy*Mod group",
+        "modules.",
+        "",
+        "ELM has no host/device transitions: after elm_device_copyin the caller sets",
+        "elm_device_fullsync = .false., the state stays on the device, and the driver's",
+        "targeted updates (device-targeted) move the data its host code uses. elm_device_update",
+        "(a whole-state transition) is for the unit-test harness.",
     ], srcroot, commit)
     L += ["  use elm_varctl, only : iulog, elm_device_ready"]
+    if spmd:
+        L += ["  use perf_mod,   only : t_startf, t_stopf"]
     if spmd:
         L += ["  use spmdMod,    only : masterproc, iam"]
     for k in group_keys:
         L.append(f"  use {GROUP_MODULE[k]}, only : {k}_copyin, {k}_attach, {k}_check, {k}_update")
     L.append(f"  use {GLOBALS_MODULE}, only : globals_copyin, globals_update")
+    for mod in sorted({f.module for f in filters}):
+        L.append(f"  use {mod}, only : {', '.join(f.name for f in filters if f.module == mod)}")
+    if filters:
+        L.append(f"  use {GROUP_MODULE[groups[filters[0].type_name.lower()]]}, only : update_{filters[0].type_name.lower()}")
     L += [
         "  implicit none",
         "  private",
         "  public :: elm_device_init, elm_device_copyin, elm_device_update, elm_device_resident",
+        "  public :: elm_device_fullsync, elm_device_pull_all, elm_device_filters_update",
         "  logical, save :: elm_device_resident = .false.  ! the state lives on the device (public above)",
+        "  ! every transition copies the whole state: until the first host -> device transition of",
+        "  ! the run (the initialization writes host data after elm_device_copyin, and pulls what",
+        "  ! its kernels compute), then as requested (SPEL_DEVICE_FULLSYNC=1, read in elm_device_init)",
+        "  logical, save :: elm_device_fullsync = .true.",
+        "  logical, save :: fullsync_requested = .false.",
+        "  ! debugging targeted transitions: the first full_until transitions copy the whole state",
+        "  ! (SPEL_DEVICE_FULL_UNTIL=K; bisect K for a missing sync), SPEL_DEVICE_TRACE=1 prints them",
+        "  integer, save :: full_until = 0, ntransitions = 0",
+        "  logical, save :: trace = .false.",
     ]
     if not spmd:  # unit tests: one process
         L += ["  logical, parameter :: masterproc = .true.", "  integer, parameter :: iam = 0"]
@@ -836,6 +909,16 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
         "#ifdef _OPENACC",
         "    integer :: ndev, dev, localid, ios",
         "    character(len=32) :: s",
+        "    call get_environment_variable('SPEL_DEVICE_FULLSYNC', s, status=ios)",
+        "    fullsync_requested = ios == 0 .and. (trim(s) == '1' .or. trim(s) == 'true' .or. trim(s) == 'TRUE')",
+        "    call get_environment_variable('SPEL_DEVICE_FULL_UNTIL', s, status=ios)",
+        "    if (ios == 0) read(s, *, iostat=ios) full_until",
+        "    call get_environment_variable('SPEL_DEVICE_TRACE', s, status=ios)",
+        "    trace = ios == 0 .and. trim(s) == '1'",
+        "    if (masterproc .and. full_until > 0) write(iulog,*) 'elm_device_init: whole state for the first', &",
+        "         full_until, 'transitions'",
+        "    if (masterproc) write(iulog,*) 'elm_device_init: host/device transitions ', &",
+        "         merge('whole state', 'targeted   ', fullsync_requested), ' after the first step start'",
         "    ndev = acc_get_num_devices(acc_device_nvidia)",
         "    if (ndev > 1) then",
         "       call get_environment_variable('SLURM_LOCALID', s, status=ios)",
@@ -876,17 +959,37 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
         "#endif",
         "  end subroutine elm_device_copyin",
         "",
-        "  subroutine elm_device_update(to_device)",
-        "    ! update device (host -> device) or update self (device -> host) of the whole state.",
+        "  subroutine elm_device_update(to_device, line)",
+        "    ! A transition of the driver: the next code runs on the device (to_device) or on the",
+        "    ! host. Targeted: switch elm_device_ready only (the driver's acc-sync updates move the",
+        "    ! data). Whole state (elm_device_fullsync): update device / update self of everything.",
         "    logical, intent(in) :: to_device",
+        "    integer, intent(in), optional :: line  ! the caller's __LINE__ (SPEL_DEVICE_TRACE)",
         "#ifdef _OPENACC",
+        "    integer :: ln",
         "    if (.not. elm_device_resident) return",
         "    ! the state already lives there (a transition inside a branch that was not taken, or",
         "    ! two in a row): nothing to copy",
         "    if (elm_device_ready .eqv. to_device) return",
+        "    ntransitions = ntransitions + 1",
+        "    ln = -1",
+        "    if (present(line)) ln = line",
+        "    if (trace .and. masterproc) write(iulog,'(a,i6,a,i6,a,l2,a,l2)') ' elm_device_update: transition', &",
+        "         ntransitions, ' line', ln, ' to_device', to_device, ' whole', &",
+        "         elm_device_fullsync .or. ntransitions <= full_until",
+        "    if (elm_device_fullsync .or. ntransitions <= full_until) then",
     ]
-    L += ["    call globals_update(to_device)"]
-    L += [f"    call {k}_update(to_device)" for k in group_keys]
+    if spmd:
+        L += ["       call t_startf(merge('device_push_whole', 'device_pull_whole', to_device))"]
+    L += ["       call globals_update(to_device)"]
+    L += [f"       call {k}_update(to_device)" for k in group_keys]
+    if spmd:
+        L += ["       call t_stopf(merge('device_push_whole', 'device_pull_whole', to_device))"]
+    L += [
+        "       ! host and device agree after the first whole push: targeted from here on",
+        "       if (to_device) elm_device_fullsync = fullsync_requested",
+        "    end if",
+    ]
     L += [
         "    ! the state now lives where the next code runs: a host segment of elm_drv (to_device",
         "    ! false) runs its compute constructs (if(elm_device_ready)) on the host too, so a routine",
@@ -895,7 +998,39 @@ def _driver_module(group_keys: list[str], srcroot: Path, commit: str, spmd: bool
         "    elm_device_ready = to_device",
         "    !$acc update device(elm_device_ready)",
     ]
-    L += ["#endif", "  end subroutine elm_device_update", "", f"end module {MODULE_NAME}"]
+    L += ["#endif", "  end subroutine elm_device_update", ""]
+    L += [
+        "  subroutine elm_device_pull_all()",
+        "    ! device -> host of the whole state, for host code the analysis does not see into",
+        "    ! (restFile_write reads the state through its registered pointers). Nothing to do",
+        "    ! with whole-state transitions: the preceding elm_device_update already copied it.",
+        "#ifdef _OPENACC",
+        "    if (.not. elm_device_resident .or. elm_device_fullsync) return",
+    ]
+    if spmd:
+        L += ["    call t_startf('device_pull_all')"]
+    L += ["    call globals_update(.false.)"]
+    L += [f"    call {k}_update(.false.)" for k in group_keys]
+    if spmd:
+        L += ["    call t_stopf('device_pull_all')"]
+    L += ["#endif", "  end subroutine elm_device_pull_all", ""]
+    L += [
+        "  subroutine elm_device_filters_update(to_device)",
+        "    ! the filters of every clump (arrays of derived types, which acc-sync cannot",
+        "    ! update member by member): host code that builds or reads them",
+        "    logical, intent(in) :: to_device",
+        "#ifdef _OPENACC",
+        "    integer :: i_",
+        "    if (.not. elm_device_resident .or. elm_device_fullsync) return",
+    ]
+    for f in filters:
+        upd = f"update_{f.type_name.lower()}"
+        if f.dim > 0:
+            L += [f"    do i_ = lbound({f.name}, 1), ubound({f.name}, 1)",
+                  f"       call {upd}({f.name}(i_), to_device)", "    end do"]
+        else:
+            L += [f"    call {upd}({f.name}, to_device)"]
+    L += ["#endif", "  end subroutine elm_device_filters_update", "", f"end module {MODULE_NAME}"]
     return "\n".join(L) + "\n"
 
 
@@ -990,7 +1125,8 @@ def generate(fut, srcroot: Path, only_instances: Optional[set[str]] = None, sour
     p.skipped += gskipped
     p.globals = gvars
     files[f"{GLOBALS_MODULE}.F90"] = _globals_module(gvars, srcroot, commit)
-    files[f"{MODULE_NAME}.F90"] = _driver_module(keys, srcroot, commit, spmd)
+    filters = [i for i in p.instances if i.type_name.lower() == "clumpfilter"]
+    files[f"{MODULE_NAME}.F90"] = _driver_module(keys, srcroot, commit, spmd, filters, groups)
     p.groups = {k: [t for t in sorted(p.types) if groups[t] == k] for k in keys}
     return files, p
 
@@ -1087,7 +1223,8 @@ class Target:
 @dataclass
 class Edit:
     path: Path
-    target: Optional[Target]  # the statement to insert before/after (its first match)
+    target: Optional[Target | tuple[Target, ...]]  # the statement to insert before/after (its first
+    #   match; a tuple: the first of the alternatives the file has)
     lines: list[str]
     after: bool = False
     at_line: Optional[int] = None  # insert before this 0-based line instead (a recorded call site)
@@ -1123,17 +1260,92 @@ def _locate(path: Path, target: Target, after: bool) -> int:
     raise DeviceDataError(f"{path.name}: no {target}")
 
 
-# routines the analysis does not see (their modules are excluded from it) but which run kernels
-DEVICE_EXTRA = {"hist_update_hbuf"}
+def _locate_any(path: Path, target, after: bool) -> tuple[int, Target]:
+    """`_locate` of the first alternative of `target` (a Target or a tuple of them) the file has."""
+    alts = target if isinstance(target, tuple) else (target,)
+    for k, t in enumerate(alts):
+        try:
+            return _locate(path, t, after), t
+        except DeviceDataError:
+            if k == len(alts) - 1:
+                raise
+    raise DeviceDataError(f"{path.name}: no target")
+
+
+# routines that run kernels the analysis does not see: their modules are excluded from it
+# (hist_update_hbuf), or the kernels are in such a module (UpdateAccVars: accumulMod's
+# update/extract, accumComputeMod)
+DEVICE_EXTRA = {"hist_update_hbuf", "updateaccvars"}
 # calls that touch no model state: they never start a host or a device section
 NEUTRAL = {
     "t_startf", "t_stopf", "get_clump_bounds", "get_proc_bounds", "get_proc_clumps", "shr_sys_flush",
     "endrun", "get_curr_date", "get_nstep", "is_end_curr_day", "is_end_curr_month", "get_step_size",
     "elm_device_update", "elm_device_copyin", "mpi_barrier", "shr_sys_abort",
+    "elm_device_pull_all", "elm_device_filters_update",
 }
-# device routines run as host segments anyway: their kernels are not ported through
-# (dynSubgrid is left out of the first GPU port; its ZeroDWT/conservation kernels run on the host)
-HOST_SEGMENTS = {"dynsubgrid_driver"}
+# device routines run as host segments anyway (their kernels not ported through). Empty since
+# 2026-10-29: dynSubgrid_driver runs its heat/water content and weight bookkeeping on the device
+# and acc-sync covers its host code (the weight-change path, inside `if (weights_updated)`).
+# The UpdateAccVars run on the device: accumulMod's update/extract are kernels (accumComputeMod).
+HOST_SEGMENTS: set[str] = set()
+
+
+def call_kind(base: str, device: set[str]) -> str:
+    """'device' or 'host' by name only (device_routines), for calls call_kinds cannot resolve."""
+    return "device" if base in device and base not in HOST_SEGMENTS else "host"
+
+
+def call_kinds(fut) -> list[tuple[int, str, str]]:
+    """
+    (line, callee name, 'device' | 'host') of every elm_drv call, in source order. A call runs
+    on the device when the routine it resolves to (scope, call descriptions, or the binding of
+    a type-bound call: `col_cs%Summary` -> col_cs_summary) has a compute construct in its call
+    tree. By name, type-bound calls never matched their implementations (the summaries, the
+    balance checks ran as host segments). HOST_SEGMENTS and DEVICE_EXTRA override.
+    """
+    from spel.scripts.driver_callsites import type_bound_callee
+    from spel.scripts.record_access import AccessMapper
+    from spel.transforms.acc_apply import DeviceFacts as _Facts
+
+    drv = fut.subroutine_dict["elm_driver::elm_drv"]
+    facts = _Facts(fut)
+    mapper = AccessMapper(fut.subroutine_dict)
+    memo: dict[str, bool] = {}
+
+    def resolve(sub, event):
+        return mapper.callee(sub, sub.record, event) or type_bound_callee(
+            event, fut.module_dict, fut.subroutine_dict, fut.type_dict)
+
+    def kernels(sid: str, stack: tuple = ()) -> bool:
+        if sid in memo:
+            return memo[sid]
+        sub = fut.subroutine_dict.get(sid)
+        if sub is None or sub.record is None or sid in stack:
+            return False
+        found = facts.has_compute(sub) or sid.split("::")[-1] in DEVICE_EXTRA
+        for e in [] if found else sub.record.calls:
+            callee = resolve(sub, e)
+            if callee is not None and kernels(callee.id, stack + (sid,)):
+                found = True
+                break
+        memo[sid] = found
+        return found
+
+    by_name = device_routines(fut)
+    out = []
+    for e in sorted(drv.record.calls, key=lambda e: e.ln):
+        base = e.name.split("%")[-1].lower()
+        callee = resolve(drv, e)
+        if base in HOST_SEGMENTS:
+            kind = "host"
+        elif base in DEVICE_EXTRA:
+            kind = "device"
+        elif callee is not None:
+            kind = "device" if kernels(callee.id) else "host"
+        else:
+            kind = call_kind(base, by_name)
+        out.append((e.ln, base, kind))
+    return out
 
 
 def device_routines(fut) -> set[str]:
@@ -1172,63 +1384,63 @@ def device_routines(fut) -> set[str]:
     return device
 
 
-def _transition_edits(fut, drv: Path) -> tuple[list[Edit], list[str]]:
+def host_calls(fut, drv: Path) -> list[str]:
     """
-    Whole-state syncs before every call of elm_drv: `update self` before each host routine,
-    `update device` before each device routine. elm_device_update does nothing when the state
-    already lives there, so only the actual host/device transitions copy, and a transition
-    inside a branch that is not taken cannot leave the next routine with the wrong copy
-    (calls in if blocks: the budgets, nstep > 0). Brute force; the refinement is per-routine
-    variable lists from the access analysis.
+    elm_drv's calls of host routines, matched to the driver file's statements (report only).
+    There are no host/device transitions any more (2026-11-01): the state stays on the device
+    after the copy, `device-targeted` moves the data each host segment uses, and a configuration
+    whose host code cannot be synced that way aborts in elm_drv's GPU guard. The list says
+    where elm_drv still runs host code.
     """
     if fut.subroutine_dict.get("elm_driver::elm_drv") is None:
         raise DeviceDataError("elm_driver::elm_drv not in the analysis")
-    device = device_routines(fut)
     from spel.scripts.fortran_parser.module_spec import callee_name, parse_modules, statements_with_next
 
-    # the calls and their lines come from the driver file being edited, not from the analysis:
-    # its line numbers go stale as soon as the driver is edited after `spel analyze`, and
-    # transitions placed by them land before the wrong calls
+    # the calls and their lines come from the driver file being edited (the analysis's lines go
+    # stale as soon as the driver is edited after `spel analyze`); the analysis's calls in source
+    # order give the kinds. Calls into modules the analysis excludes (ndep_interp, hist_*,
+    # restFile_write) are not in it: they keep the kind by name (DEVICE_EXTRA for hist_update_hbuf)
     mod = parse_modules(drv)[0]
     body = next(p for p in mod.subprograms if p.name.lower() == "elm_drv")
     calls = sorted({(st.lineno, name) for st, _ in statements_with_next(body.body, body.end_ln)
                     if (name := callee_name(st)) is not None})
-    edits: list[Edit] = []
+    kinds = [(b, k) for _, b, k in call_kinds(fut) if b not in NEUTRAL]
+    by_name = device_routines(fut)
     report: list[str] = []
-    state = "host"
+    i = 0
     for ln, base in calls:
         if base in NEUTRAL:
             continue
-        kind = "device" if base in device and base not in HOST_SEGMENTS else "host"
-        to_device = kind == "device"
-        edits.append(
-            Edit(
-                drv,
-                None,
-                [
-                    "#ifdef _OPENACC",
-                    f"    call elm_device_update(to_device={'.true.' if to_device else '.false.'})  {TAG}: {'host -> device' if to_device else 'device -> host'} before {base}",
-                    "#endif",
-                ],
-                at_line=ln,
-            )
-        )
-        report.append(f"  {ln + 1}: {'update device' if to_device else 'update self  '} before {base}")
-        state = kind
-    return edits, report
+        if i < len(kinds) and kinds[i][0] == base:
+            kind = kinds[i][1]
+            i += 1
+        else:
+            kind = "device" if base in DEVICE_EXTRA else call_kind(base, by_name)
+        if kind != "device":
+            report.append(f"  {ln + 1}: host routine {base} (device-targeted syncs its data, or the GPU guard aborts)")
+    if i != len(kinds):
+        raise DeviceDataError(f"elm_drv's calls in the driver file differ from the analysis at {kinds[i][0]}: "
+                              "run `spel analyze`")
+    return report
+
+
+TARGETED_MODE = [
+    "    ! the run has no host/device transitions (configurations that need host code abort in",
+    "    ! elm_drv): the targeted syncs move the data from here on",
+    "    elm_device_fullsync = .false.",
+]
 
 
 def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
     drv = src / "main" / "elm_driver.F90"
     ini = src / "main" / "elm_initializeMod.F90"
-    use_line = f"  use {MODULE_NAME}, only : elm_device_init, elm_device_copyin, elm_device_update, elm_device_resident  {TAG}"
     edits = [
         Edit(ini, Target("use", "shr_kind_mod"),
-             [f"  use {MODULE_NAME}, only : elm_device_init, elm_device_copyin, elm_device_update  {TAG}"]),
+             [f"  use {MODULE_NAME}, only : elm_device_init, elm_device_copyin, elm_device_fullsync  {TAG}"]),
         Edit(ini, Target("call", "t_startf", "initialize1", "elm_init1"),
              ["#ifdef _OPENACC", f"    call elm_device_init()  {TAG}", "#endif"], after=True),
         # the end of initialize2 runs kernels (lnd2atm_minimal's subgrid averages, lnd2glc):
-        # copy the state there, after every restart read, and hand it back to the host after
+        # copy the state there, after every restart read; it stays there
         Edit(
             ini,
             Target("if_calling", "lnd2atm_minimal", "initialize2"),
@@ -1238,30 +1450,32 @@ def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
                 "    ! kernels that compute the initial export state",
                 "    call t_startf('device_copyin')",
                 "    call elm_device_copyin()",
+                *TARGETED_MODE,
                 "    call t_stopf('device_copyin')",
+                "    ! the subgrid view (init_subgrid_ave) and the history fields (hist_htapes_build) reach the",
+                "    ! model arrays through device pointers: attach them now that the arrays are on the device",
+                "    ! (an attach before the copy is skipped by the runtime and the kernels read host memory)",
+                "    call subgrid_ave_device_attach()",
+                "    call hist_device_attach()",
                 "#endif",
             ],
         ),
-        Edit(
-            ini,
-            Target("if_calling", "update_lnd2glc", "initialize2"),
-            [
-                "#ifdef _OPENACC",
-                f"    call elm_device_update(to_device=.false.)  {TAG}: the step starts on the host",
-                "#endif",
-            ],
-            after=True,
-        ),
-        Edit(drv, Target("use", "shr_kind_mod"), [use_line]),
+        Edit(ini, Target("use", "histfilemod", "initialize2"),
+             [f"    use histFileMod           , only : hist_device_attach  {TAG}",
+              f"    use subgridAveMod         , only : subgrid_ave_device_attach  {TAG}"], after=True),
+        Edit(drv, Target("use", "shr_kind_mod"),
+             [f"  use {MODULE_NAME}, only : elm_device_copyin, elm_device_resident, elm_device_fullsync  {TAG}"]),
         Edit(
             drv,
-            Target("call", "get_proc_bounds", "elm_drv"),
+            # upstream elm_drv gets its bounds first; the ported one reads decompMod's bounds_proc
+            (Target("call", "get_proc_bounds", "elm_drv"), Target("call", "get_curr_time_string", "elm_drv")),
             [
                 "#ifdef _OPENACC",
                 f"    {TAG}: the whole state to the device if initialization did not (fallback)",
                 "    if (.not. elm_device_resident) then",
                 "       call t_startf('device_copyin')",
                 "       call elm_device_copyin()",
+                "       elm_device_fullsync = .false.  ! no host/device transitions: the targeted syncs move the data",
                 "       call t_stopf('device_copyin')",
                 "    end if",
                 "#endif",
@@ -1269,8 +1483,8 @@ def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
             after=True,
         ),
     ]
-    # subgrid weights changed (first step, transient runs): the filters and the subgrid data
-    # were rebuilt on the host inside a device section of elm_drv; refresh the device copies
+    # subgrid weights changed (first step, transient runs): reweight_wrapup rebuilt one clump's
+    # filters on the host; refresh that clump's device copies (not the whole subgrid group)
     rew = src / "main" / "reweightMod.F90"
     edits += [
         Edit(
@@ -1279,8 +1493,8 @@ def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
             [
                 "#ifdef _OPENACC",
                 f"    use openacc           , only : acc_is_present  {TAG}",
-                "    use filterMod         , only : filter",
-                "    use DeepCopySubgridMod, only : subgrid_update",
+                "    use filterMod         , only : filter, filter_inactive_and_active",
+                "    use DeepCopySubgridMod, only : update_clumpfilter",
                 "#endif",
             ],
             after=True,
@@ -1290,16 +1504,75 @@ def _driver_edits(fut, src: Path) -> tuple[list[Edit], list[str]]:
             Target("call", "setfilters", "reweight_wrapup"),
             [
                 "#ifdef _OPENACC",
-                f"    {TAG}: the filters are built on the host; once the state is on the device",
-                "    ! (after elm_device_copyin) send the rebuilt filters and subgrid data there",
-                "    if (acc_is_present(filter)) call subgrid_update(to_device=.true.)",
+                f"    {TAG}: setFilters rebuilt this clump's filters on the host; once the state is on the",
+                "    ! device (after elm_device_copyin) send them there. Nothing else changed here: check_weights",
+                "    ! only reads, and set_active's `active` flags are pushed above.",
+                "    if (acc_is_present(filter)) then",
+                "       call update_clumpfilter(filter(bounds%clump_index), to_device=.true.)",
+                "       call update_clumpfilter(filter_inactive_and_active(bounds%clump_index), to_device=.true.)",
+                "    end if",
                 "#endif",
             ],
             after=True,
         ),
     ]
-    trans, report = _transition_edits(fut, drv)
-    return edits + trans, report
+    return edits, ["elm_drv runs host code at:"] + host_calls(fut, drv)
+
+
+GENERATED = "GENERATED by `spel device-data`"
+
+
+def already_applied(text: str) -> bool:
+    return TAG in text or f"use {MODULE_NAME}" in text
+
+
+def driver_edit_sets(fut, src: Path, read=None) -> tuple[dict[Path, EditSet], list[str]]:
+    """
+    The insertions into elm_initializeMod, elm_driver and reweightMod, one EditSet per file.
+    `read(path)` gives a file's current lines (default: from disk); insertion points are
+    resolved on the files on disk (the parser preprocesses them there).
+    """
+    edits, report = _driver_edits(fut, src)
+    sets: dict[Path, EditSet] = {}
+    read = read or (lambda path: path.read_text().split("\n"))
+    for e in edits:
+        if e.path not in sets:
+            if not e.path.exists():
+                raise DeviceDataError(f"{e.path}: not found")
+            if already_applied("\n".join(read(e.path))):
+                # a wired tree: the modules are regenerated, the driver calls stay as they are
+                report.append(f"{e.path.name}: already carries the device data calls, left alone")
+                sets[e.path] = None
+                continue
+            sets[e.path] = EditSet(e.path)
+    wired = {path for path, s in sets.items() if s is None}
+    sets = {path: s for path, s in sets.items() if s is not None}
+    edits = [e for e in edits if e.path not in wired]
+    placed: list[tuple[Path, int, list[str], str, int]] = []
+    for k, e in enumerate(edits):
+        if e.at_line is not None:
+            i = e.at_line
+            where = f"line {i + 1}"
+        else:
+            i, found = _locate_any(e.path, e.target, e.after)
+            where = f"{'after' if e.after else 'before'} {found} (line {i + 1})"
+        placed.append((e.path, i, e.lines, where, k))
+    # insertions at one line: a later one ends up above (the order of the bottom-up splicing)
+    for path, i, new, where, k in sorted(placed, key=lambda t: -t[1]):
+        sets[path].add(insert(i, new, order=-k * 1e-6, why=where))
+        report.append(f"{path.name}: {where}")
+    return sets, report
+
+
+def _summary(p: Plan, texts: dict[str, str], dest_dir: Path) -> list[str]:
+    head = [f"{len(p.instances)} instances of {len(p.types)} types; {len(p.skipped)} instances skipped"]
+    for name, text in texts.items():
+        key = next((k for k, m, _ in GROUPS if f"{m}.F90" == name), None)
+        ntypes = f", {len(p.groups.get(key, []))} types" if key else ""
+        head.append(f"{dest_dir / name}: {text.count(chr(10))} lines{ntypes}")
+    head.append(f"namelist guards: {len(p.notes_guards)} instances, {p.ncomp_guards} type components")
+    head += [f"guard {n}: if ({c})" for n, c in sorted(p.notes_guards.items())]
+    return head
 
 
 def apply(fut, srcroot: Path, out_dir: Optional[Path] = None, dry_run: bool = False) -> tuple[Plan, list[str]]:
@@ -1312,36 +1585,14 @@ def apply(fut, srcroot: Path, out_dir: Optional[Path] = None, dry_run: bool = Fa
     """
     src = srcroot / "components" / "elm" / "src"
     texts, p = generate(fut, srcroot)
-    edits, report = _driver_edits(fut, src)
-    files: dict[Path, list[str]] = {}
-    for e in edits:
-        if e.path not in files:
-            if not e.path.exists():
-                raise DeviceDataError(f"{e.path}: not found")
-            content = e.path.read_text()
-            if TAG in content or f"use {MODULE_NAME}" in content:
-                raise DeviceDataError(f"{e.path}: already carries the device data calls")
-            files[e.path] = content.split("\n")
-    # resolve every insertion point on the original text, then insert bottom-up
-    placed: list[tuple[Path, int, list[str], str]] = []
-    for e in edits:
-        if e.at_line is not None:
-            i = e.at_line
-            where = f"line {i + 1}"
-        else:
-            i = _locate(e.path, e.target, e.after)
-            where = f"{'after' if e.after else 'before'} {e.target} (line {i + 1})"
-        placed.append((e.path, i, e.lines, where))
-    for path, i, new, where in sorted(placed, key=lambda t: -t[1]):
-        files[path][i:i] = new
-        report.append(f"{path.name}: {where}")
+    sets, report = driver_edit_sets(fut, src)
     dest_dir = out_dir or src / "data_types"
     for name, text in texts.items():
         dest = dest_dir / name
-        if dest.exists() and out_dir is None and "GENERATED by `spel device-data`" not in dest.read_text():
+        if dest.exists() and out_dir is None and GENERATED not in dest.read_text():
             raise DeviceDataError(f"{dest} exists and was not generated here")
     stale = src / "main" / f"{MODULE_NAME}.F90"  # first version's location
-    if out_dir is None and stale.exists() and "GENERATED by `spel device-data`" in stale.read_text():
+    if out_dir is None and stale.exists() and GENERATED in stale.read_text():
         report.append(f"removed {stale} (the modules now live in data_types/)")
         if not dry_run:
             stale.unlink()
@@ -1349,15 +1600,57 @@ def apply(fut, srcroot: Path, out_dir: Optional[Path] = None, dry_run: bool = Fa
         dest_dir.mkdir(parents=True, exist_ok=True)
         for name, text in texts.items():
             (dest_dir / name).write_text(text)
-        for path, lines in files.items():
+        for path, es in sets.items():
             dest = (out_dir / path.name) if out_dir else path
-            dest.write_text("\n".join(lines))
-    head = [f"{len(p.instances)} instances of {len(p.types)} types; {len(p.skipped)} instances skipped"]
-    for name, text in texts.items():
-        key = next((k for k, m, _ in GROUPS if f"{m}.F90" == name), None)
-        ntypes = f", {len(p.groups.get(key, []))} types" if key else ""
-        head.append(f"{dest_dir / name}: {text.count(chr(10))} lines{ntypes}")
-    head.append(f"namelist guards: {len(p.notes_guards)} instances, {p.ncomp_guards} type components")
-    head += [f"guard {n}: if ({c})" for n, c in sorted(p.notes_guards.items())]
-    report[:0] = head
+            dest.write_text(es.apply_text(path.read_text()))
+    report[:0] = _summary(p, texts, dest_dir)
     return p, report
+
+
+@dataclass
+class Options:
+    pass
+
+
+@transform
+class DeviceData(Transform):
+    """
+    Matches: every type instance of the analysis (`fut.type_dict`), elm_drv's calls.
+    Changes: generates ElmDeviceDataMod and the DeepCopy*Mod group modules in data_types/
+             (device init, the deep copy, whole-state updates for the unit tests) and inserts
+             their calls into elm_initializeMod (init; the copy at the end of initialize2, after
+             which the state stays on the device), elm_driver (the fallback copy) and
+             reweightMod. No host/device transitions: device-targeted syncs elm_drv's host code;
+             the report lists where it runs.
+    Refuses: modules in data_types/ of the same name that this pass did not generate. Driver
+             files that already carry the calls are left alone (the modules are regenerated).
+    Design: device/DESIGN.md.
+    """
+
+    name = "device-data"
+    summary = "generate the device-data modules for a full OpenACC run"
+    Options = Options
+
+    def build(self, ctx, opts) -> TPlan:
+        out = TPlan(self.name)
+        src = ctx.srcroot / "components" / "elm" / "src"
+        try:
+            texts, p = generate(ctx.fut, ctx.srcroot)
+            sets, report = driver_edit_sets(ctx.fut, src, read=ctx.lines)
+        except DeviceDataError as err:
+            return out.add(Refusal("device-data", str(err)))
+        dest_dir = src / "data_types"
+        foreign = [dest_dir / n for n in texts
+                   if (dest_dir / n).exists() and GENERATED not in "\n".join(ctx.lines(dest_dir / n))]
+        if foreign:
+            for dest in foreign:
+                out.add(Refusal(dest.name, f"{dest} exists and was not generated here"))
+            return out
+        out.new_files.update({dest_dir / n: text for n, text in texts.items()})
+        stale = src / "main" / f"{MODULE_NAME}.F90"
+        if stale.exists():
+            out.notes.append(f"{stale}: an earlier version's module, remove it by hand")
+        out.notes += _summary(p, texts, dest_dir) + report + [f"skipped: {s}" for s in p.skipped]
+        for path, es in sets.items():
+            out.add(Change(path, es.edits, where=path.name))
+        return out

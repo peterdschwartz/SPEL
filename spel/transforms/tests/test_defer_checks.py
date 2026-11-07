@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from spel.scripts.fortran_parser.tests.test_scope_walk import parse_statements, walk
 from spel.transforms import defer_checks as dc
+from spel.transforms.core.edits import EditSet
 
 SEARCH = """subroutine check(n, filter, err, found, idx)
   implicit none
@@ -64,8 +65,7 @@ def _plan(src):
 def _apply(src):
     p, lines = _plan(src)
     first = next(i for i, l in enumerate(lines) if l.strip().startswith(("found = .false.", "do i")))
-    for ln, _, n, new in sorted(dc.edits_for(lines, p.deferrals, {"m::s": first}), key=lambda e: (-e[0], -e[1])):
-        lines[ln:ln + n] = new
+    lines = EditSet().extend(dc.edits_for(lines, p.deferrals, {"m::s": first})).apply(lines)
     return p, "\n".join(lines)
 
 

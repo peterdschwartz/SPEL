@@ -27,7 +27,7 @@ accesses decide the shape (`spel accplan MODULE`):
 
 The private/firstprivate clauses come from the OpenACC-to-OpenMP planner
 (`plan_compute_loop`) applied to a synthetic `!$acc parallel loop`, so they follow
-the same rules as `spel acc2omp`. Statements a device cannot run (`write`,
+the same rules as `spel transform acc2omp`. Statements a device cannot run (`write`,
 `print`, `call endrun`) are listed per loop: replace them by a flag set in the
 loop and tested on the host after it.
 """
@@ -59,6 +59,11 @@ class Alias:
     also: tuple = ()    # further loop indices it covers injectively, jointly with `index`
 
 
+# the device data layer's flag: a kernel runs on the host while it is false (initialization, host
+# segments of elm_drv in targeted mode); every compute construct of the port carries it
+DEVICE_FLAG = "elm_device_ready"
+
+
 @dataclass
 class LoopProposal:
     routine: str
@@ -74,9 +79,15 @@ class LoopProposal:
     notes: list[Note] = field(default_factory=list)
     unsafe: list[tuple[int, str]] = field(default_factory=list)   # (1-based line, statement)
     private_arrays: list[str] = field(default_factory=list)       # local arrays written and read per iteration
+    copyin: list[str] = field(default_factory=list)               # data clauses the plan adds (none by default)
+    no_create: list[str] = field(default_factory=list)            # global instances the device data layer copies only under a
+    #   namelist flag the loop's enclosing ifs do not test (c14_grc_cs under `if (use_c14)` inside the loop): the
+    #   kernel takes the host address when the copy is absent, and the flag keeps it from dereferencing it
     children: list["LoopProposal"] = field(default_factory=list)  # proposals for the inner loops of a host loop
     order: list[str] = field(default_factory=list)  # interchange: the nest's indices in their new order
     npar: int = 1  # interchange: how many of `order` are parallel (collapsed)
+    covered: bool = False       # a compute directive already covers the loop (`--lint`: judged anyway)
+    lint: list[str] = field(default_factory=list)   # findings about the existing directive's shape
 
     @property
     def lines(self) -> tuple[int, int]:
@@ -88,7 +99,7 @@ class LoopProposal:
 
     def directive_lines(self) -> list[str]:
         """The proposed directive(s), as source lines (indent of the loop)."""
-        if self.plan is None or self.kind in ("has-directive", "scatter", "carried"):
+        if self.plan is None or self.covered or self.kind in ("has-directive", "scatter", "carried"):
             return []
         indent = self.plan.directive.indent
         clauses = ["gang", "vector"]
@@ -100,17 +111,31 @@ class LoopProposal:
         clauses.extend(c for c in self.plan.clauses() if not c.startswith("collapse"))
         if self.private_arrays:
             clauses.append(f"private({', '.join(self.private_arrays)})")
+        if self.copyin:
+            clauses.append(f"copyin({', '.join(self.copyin)})")
+        if self.no_create:
+            clauses.append(f"no_create({', '.join(self.no_create)})")
+        clauses.append(f"if({DEVICE_FLAG})")  # runs on the host until the device data layer is up (initialization)
         out = [l.replace("!$omp", "!$acc") for l in format_directive(indent, "parallel loop", clauses)]
         if self.kind in ("column-parallel", "interchange"):
             out.append(f"{indent}!$acc loop seq   ! on each inner loop")
         return out
 
+    def lint_report(self) -> str:
+        """The `--lint` form: location, the existing directive's verdict, the findings."""
+        a, b = self.lines
+        return "\n".join([f"{self.file}:{a}-{b} {self.routine} do {self.indices}:"] + [f"    {f}" for f in self.lint])
+
     def __str__(self) -> str:
         a, b = self.lines
         head = f"{self.file}:{a}-{b} do {self.indices}: {self.kind.upper()}"
+        if self.covered:
+            head = f"{self.file}:{a}-{b} do {self.indices}: HAS-DIRECTIVE (analysis: {self.kind.upper()})"
         if self.reason:
             head += f" {self.reason}"
         parts = [head]
+        for finding in self.lint:
+            parts.append(f"    lint: {finding}")
         for text in self.directive_lines():
             parts.append("    " + text.strip())
         for idx, arrs in self.carried.items():
@@ -244,19 +269,32 @@ def _aliases(rec: SubroutineRecord, lo: int, hi: int, indices: set[str]) -> dict
             elif reads:
                 r = reads[0]
                 subs_names = _names(r.subscripts)
-                src = [n for n in subs_names if n in indices] + [n for n in subs_names if n in out]
+                src = sorted(n for n in subs_names if n in indices) + sorted(n for n in subs_names if n in out)
                 if not src:
                     continue
                 base_idx, inj = (src[0], True) if src[0] in indices else (out[src[0]].index, out[src[0]].injective)
                 injective = inj and ("filter" in r.path.lower() or r.path.lower() in ("ipft", "icol", "ilun", "igrc"))
                 if "%" in r.path and r.path.lower().split("%")[-1] in COARSER:
                     injective = False
-                out[lhs.path] = Alias(base_idx, injective, r.path)
+                # a lookup on several indices (`l = landunit_indices(ltype, t)`) depends on all of them
+                also = []
+                for n in src:
+                    for x in (n,) if n in indices else (out[n].index, *out[n].also):
+                        if x != base_idx and x not in also:
+                            also.append(x)
+                out[lhs.path] = Alias(base_idx, injective, r.path, also=tuple(also))
                 changed = True
             elif direct or via_alias:
-                src = direct[0] if direct else via_alias[0]
+                srcs = sorted(direct) + sorted(via_alias)
+                src = srcs[0]
                 base_idx, inj = (src, True) if src in indices else (out[src].index, out[src].injective)
-                out[lhs.path] = Alias(base_idx, inj, rhs_text)
+                also = []
+                for n in srcs:
+                    for x in (n,) if n in indices else (out[n].index, *out[n].also):
+                        if x != base_idx and x not in also:
+                            also.append(x)
+                # c = fc + j over two indices: not one element per value of the pair
+                out[lhs.path] = Alias(base_idx, inj and not also, rhs_text, also=tuple(also))
                 changed = True
     return out
 
@@ -376,19 +414,24 @@ def _is_array_path(rec: SubroutineRecord, path: str, accesses) -> bool:
 
 
 def _covered_by_directive(loop: LoopInfo, directives, lines: list[str]) -> bool:
+    return _covering_directive(loop, directives, lines) is not None
+
+
+def _covering_directive(loop: LoopInfo, directives, lines: list[str]):
+    """The compute directive on `loop` (a `parallel loop` right above it, or the region it is in)."""
     for d in directives:
         if d.is_compute_loop and d.end_ln < loop.start_ln:
             between = lines[d.end_ln + 1 : loop.start_ln]
             if all(not l.strip() or l.strip().startswith("!") for l in between):
-                return True
+                return d
         if d.is_compute_region and d.start_ln < loop.start_ln:
             # region ends at the matching `end` directive
             for e in directives:
                 if e.construct.startswith("end ") and e.start_ln > d.start_ln and e.start_ln > loop.end_ln:
-                    return True
+                    return d
                 if e.construct.startswith("end ") and e.start_ln > d.start_ln:
                     break
-    return False
+    return None
 
 
 def _is_local_array(rec: SubroutineRecord, path: str) -> bool:
@@ -398,17 +441,22 @@ def _is_local_array(rec: SubroutineRecord, path: str) -> bool:
     return bool(decl and decl.dim and decl.intent is None and all(d.name != path for d in rec.dummy_args))
 
 
-_UNSAFE_CACHE: dict[str, list[tuple[int, str]]] = {}
+_UNSAFE_CACHE: dict[str, tuple[object, list[tuple[int, str]]]] = {}
 
 
 def _unsafe(sub, source: Optional[list[str]] = None) -> list[tuple[int, str]]:
+    # keyed on the routine object too: a pipeline step replaces the routines it re-analyzes
     key = getattr(sub, "id", None) or sub.name
-    if key not in _UNSAFE_CACHE:
-        _UNSAFE_CACHE[key] = unsafe_lines(sub, source)
-    return _UNSAFE_CACHE[key]
+    if key not in _UNSAFE_CACHE or _UNSAFE_CACHE[key][0] is not sub:
+        _UNSAFE_CACHE[key] = (sub, unsafe_lines(sub, source))
+    return _UNSAFE_CACHE[key][1]
 
 
-def propose(sub, mapper, source: Optional[list[str]] = None, min_lines: int = 2) -> list[LoopProposal]:
+def propose(sub, mapper, source: Optional[list[str]] = None, min_lines: int = 2,
+            lint: bool = False) -> list[LoopProposal]:
+    """Proposals for the outermost loops of `sub`. With `lint`, loops a compute directive already
+    covers are analyzed too (`covered`), and `lint` lists what the analysis says about the shape
+    the directive gave them (see `lint_findings`)."""
     rec: SubroutineRecord = sub.record
     nest_roots = getattr(rec, "loop_nest", None)
     if not nest_roots:
@@ -417,29 +465,88 @@ def propose(sub, mapper, source: Optional[list[str]] = None, min_lines: int = 2)
         source = Path(sub.filepath).read_text().splitlines()
     directives = find_directives(source)
     fname = Path(sub.filepath).name if getattr(sub, "filepath", None) else "<src>"
-    return [p for loop in nest_roots for p in _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines)]
+    return [p for loop in nest_roots
+            for p in _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines, lint)]
 
 
-def _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines) -> list[LoopProposal]:
+def _filter_loops(nest, aliases: dict[str, Alias]) -> set[str]:
+    """Indices of `nest` that walk a filter (`p = filter(fp)`: an injective alias through a filter)."""
+    return {a.index for a in aliases.values() if a.injective and "filter" in a.via.lower()} & {lp.index for lp in nest}
+
+
+def lint_findings(rec: SubroutineRecord, loop: LoopInfo, nest, aliases: dict[str, Alias],
+                  scatter: dict[str, list[str]], by_path: dict[str, list], directive=None) -> list[str]:
+    """
+    What is wrong with the shape of a kernel, from the analysis (`spel accplan --lint`):
+
+    - the gang loop runs over an index that walks no filter (a level loop, `do j = 1, nlevgrnd`:
+      as many gangs as levels) while a loop inside walks a filter that the directive's `collapse`
+      does not reach: parallelize over the filter and run the level loop `seq` inside (the same
+      per-element order);
+    - arrays written through a non-injective alias of a filter index (`c = veg_pp%column(p)`
+      under `do fp`: column arrays from a patch filter). When nothing in the loop is read through
+      the filter's own alias (`p`), every patch of a column writes the same value: duplicated
+      work, use a filter of that level. Otherwise the patches of one column race (a lake or urban
+      filter, one patch per column, is a false positive: the analysis has no landunit facts here).
+    """
+    out: list[str] = []
+    filt = _filter_loops(nest, aliases)
+    outer = nest[0].index
+    collapse = directive.collapse() if directive is not None else 1
+    inner_filters = [lp.index for k, lp in enumerate(nest[1:], 2) if lp.index in filt and k > collapse]
+    if outer not in filt and inner_filters:
+        levels = sorted(b.split("%")[-1].lower() for b in nest[0].bound_paths if b.split("%")[-1].lower().startswith("nlev"))
+        extent = f" ({', '.join(levels)} gangs)" if levels else ""
+        out.append(f"gang loop over `{outer}`{extent} with the filter loop `{inner_filters[0]}` inside: "
+                   f"parallelize over `{inner_filters[0]}`, `do {outer}` seq")
+    for idx, arrays in scatter.items():
+        if idx not in filt:
+            continue
+        own = {n for n, a in aliases.items() if a.injective and a.index == idx and "filter" in a.via.lower()}
+        coarse = {n for n, a in aliases.items() if not a.injective and a.index == idx}
+        maps = {a.via.lower() for a in aliases.values()}   # the lookups that define the aliases (`colof(p)`)
+        reads_own = sorted({a.path for accs in by_path.values() for a in accs if "r" in a.status
+                            and a.path.lower() not in maps and any(_names(sub_) & own for sub_ in a.subscripts)})
+        via = ", ".join(sorted({aliases[n].via for n in coarse})) or idx
+        if reads_own:
+            out.append(f"{', '.join(arrays)} written through {via} from the filter loop `{idx}`, which also reads "
+                       f"{', '.join(reads_own[:4])} per element: the elements of one target race")
+        else:
+            out.append(f"{', '.join(arrays)} written through {via} from the filter loop `{idx}` and nothing is read "
+                       f"through {', '.join(sorted(own))}: the same value from every member, redundant work: "
+                       f"use a filter of the written level")
+    return out
+
+
+def _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines, lint=False) -> list[LoopProposal]:
     atomics = []
     out: list[LoopProposal] = []
     for loop in [loop]:
         if loop.end_ln - loop.start_ln < min_lines:
             continue
-        if _covered_by_directive(loop, directives, source):
+        if loop.end_ln >= len(source):   # the analysis is older than the file (re-run `spel analyze`)
+            continue
+        covering = _covering_directive(loop, directives, source)
+        covered = covering is not None
+        if covered and not lint:
             out.append(LoopProposal(sub.name, fname, loop, [loop], "has-directive"))
             continue
         # deepest perfect nest
         nest = [loop]
         while nest[-1].tight_child is not None and nest[-1].tight_child.index:
             nest.append(nest[-1].tight_child)
+        if not covered and any(_covered_by_directive(l, directives, source) for l in nest[1:]):
+            # an inner loop of the nest already carries a directive (an earlier pass ported it
+            # while the outer loop was carried): collapsing over it would nest two compute loops
+            out.append(LoopProposal(sub.name, fname, loop, [loop], "has-directive"))
+            continue
         lo, hi = loop.start_ln, loop.end_ln
         indices = {l.index for l in loop.walk() if l.index}
         nest_idx = [l.index for l in nest]
         aliases = _aliases(rec, lo, hi, indices)
         by_path: dict[str, list] = {}
         for a in rec.accesses():
-            if lo <= a.ln <= hi and a.context not in ("do", "size"):
+            if lo <= a.ln <= hi and a.context not in ("do", "size", "inquiry"):
                 by_path.setdefault(a.path, []).append(a)
         carried: dict[str, list[str]] = {}
         scatter: dict[str, list[str]] = {}
@@ -512,13 +619,18 @@ def _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines) 
         else:
             kind, reason = "elementwise", ""
         prop = LoopProposal(sub.name, fname, loop, nest if kind == "elementwise" else [loop], kind, reason,
-                            carried, scatter, same_value, private_arrays=private_arrays)
+                            carried, scatter, same_value, private_arrays=private_arrays, covered=covered)
+        if covered:
+            prop.lint = lint_findings(rec, loop, nest, aliases, scatter, by_path, covering)
+        # no copyin(bounds) on the kernels (removed 2026-10-31, user decision): a data clause on every
+        # loop costs a present lookup per launch; the bounds a kernel reads must reach the device
+        # another way (the plan: per-clump bounds kept on the device as module data)
         if kind == "interchange":  # the two-loop swap, or the reorder
             prop.order, prop.npar = reorder if reorder is not None else ([nest_idx[1], nest_idx[0]], 1)
         if kind == "carried" and loop.children:
             prop.reason = "(host loop stays sequential; proposals for its inner loops follow)"
             for child in loop.children:
-                prop.children.extend(_propose_loop(sub, rec, mapper, child, source, directives, fname, min_lines))
+                prop.children.extend(_propose_loop(sub, rec, mapper, child, source, directives, fname, min_lines, lint))
         # clauses from the OpenMP planner on a synthetic directive
         indent = re.match(r"\s*", source[loop.start_ln]).group(0)
         text = "parallel loop" + (f" collapse({len(prop.nest)})" if len(prop.nest) > 1 else "")
@@ -533,8 +645,10 @@ def _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines) 
     return out
 
 
-def report(subs: Iterable, mapper, min_lines: int = 2) -> list[LoopProposal]:
+def report(subs: Iterable, mapper, min_lines: int = 2, lint: bool = False) -> list[LoopProposal]:
+    """With `lint`, only the directive-covered loops the analysis has findings about."""
     found: list[LoopProposal] = []
     for sub in subs:
-        found.extend(propose(sub, mapper, min_lines=min_lines))
+        props = propose(sub, mapper, min_lines=min_lines, lint=lint)
+        found.extend(p for p in props if not lint or p.lint)
     return sorted(found, key=lambda p: (p.file, p.lines))

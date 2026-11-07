@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from spel.transforms.compact.rewrite import FileEdits, Rewriter
@@ -188,3 +189,51 @@ def test_bind_module_compiles_with_stubs(tmp_path):
     for f in order:
         r = subprocess.run(["gfortran", "-c", "-ffree-line-length-none", f], cwd=tmp_path, capture_output=True, text=True)
         assert r.returncode == 0, f"{f}: {r.stderr}"
+
+
+def test_file_edits_as_core_edits_give_the_same_text():
+    from spel.transforms.compact.rewrite import core_edits
+    from spel.transforms.core.edits import EditSet
+
+    fe = FileEdits(Path("x.F90"), ["a = 1", "b = 2", "c = 3", "d = 4", ""])
+    fe.subs[0].append((re.compile(r"\ba\b"), "aa"))
+    fe.subs[1].append((re.compile("nomatch"), "x"))
+    fe.after[0] += ["after0", "after0b"]
+    fe.before[1] += ["before1"]
+    fe.deletes.add(1)
+    fe.after[1].append("after1")
+    fe.before[2].append("before2")
+    fe.deletes.add(3)
+    fe.before[3].append("before3")
+    fe.after[3].append("after3")
+    fe.lines.append("call f(x( c ), y)")
+    fe.replace_cols(5, 8, 12, "(k0p+fc")  # column edits only: TextEdits
+    fe.replace_cols(5, 16, 16, ", off")
+    fe.replace_cols(2, 0, 1, "cc")  # with a substitution on the same line
+    fe.subs[2].append((re.compile("3"), "4"))
+    assert fe.result()[-1] == "call f(x(k0p+fc), y, off)"
+    es = EditSet()
+    for e in core_edits(fe):
+        es.add(e)
+    assert es.apply(fe.lines) == fe.result()
+
+
+def test_tree_of_a_routine_with_internal_procedures(tmp_path):
+    from types import SimpleNamespace
+
+    src = tmp_path / "m.F90"
+    src.write_text("""\
+subroutine s(n)
+  integer :: n
+  n = f(n)
+contains
+  integer function f(k)
+    integer :: k
+    f = k + 1
+  end function f
+end subroutine s
+""")
+    # the analysis' `endline` is the routine's own `contains`, `end_stmt_ln` its END
+    sub = SimpleNamespace(id="m::s", filepath=src, startline=0, endline=3, end_stmt_ln=8)
+    tree = Rewriter.__new__(Rewriter).tree(sub)
+    assert tree.end_ln == 8

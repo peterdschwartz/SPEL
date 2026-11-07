@@ -19,11 +19,20 @@ from the source text by pattern.
 
 from __future__ import annotations
 
+from spel.transforms.core.source import statement_end
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 
 from spel.transforms.acc_directives import AccDirective, find_directives
+from spel.transforms.core.edits import Edit, stacked
+from spel.transforms.core.fortran import directive_list
+from spel.transforms.core.registry import transform
+from spel.transforms.core.source import indent
+from spel.transforms.core.transform import Change, Plan, Transform
+from spel.transforms.core.query import above_directives as _above_directives  # noqa: F401
+from spel.transforms.core.query import compute_ranges as _compute_ranges, first_executable
 
 # clauses that give a variable device storage for the construct
 DATA_CLAUSES = {
@@ -33,8 +42,6 @@ DATA_CLAUSES = {
 }
 # clauses that make a variable private to the construct (no device storage needed)
 PRIVATE_CLAUSES = {"private", "firstprivate", "reduction"}
-END_OF = {"parallel": "end parallel", "kernels": "end kernels", "serial": "end serial", "data": "end data"}
-
 
 @dataclass
 class Finding:
@@ -62,6 +69,10 @@ class RoutineReport:
     # of those, the ones the host also reads or writes (outside compute constructs and
     # device calls): their values must move, `create` alone would hand the device garbage
     host_accessed: list[str] = field(default_factory=list)
+    # of the device-only ones, those the host initializes in the specification part (an
+    # initializer or a DATA statement) and never touches again: `enter data copyin`, since
+    # `create` would hand the device an unfilled copy (SnowHydrology's dzmin, 2026-10-30)
+    host_initialized: list[str] = field(default_factory=list)
     # device-only locals that error checks print on the host: first line of each such branch
     # (an if that can abort), where an `update self` brings the values over first
     cold_reads: dict[str, list[int]] = field(default_factory=dict)
@@ -82,38 +93,6 @@ def _clause_vars(d: AccDirective, names: set[str]) -> set[str]:
                 out.update(v.lower() for v in c.variables())
     return out
 
-
-def _loop_at(loops, ln: int):
-    for lp in loops:
-        if lp.start_ln == ln:
-            return lp
-        hit = _loop_at(lp.children, ln)
-        if hit is not None:
-            return hit
-    return None
-
-
-def _compute_ranges(directives: list[AccDirective], rec) -> Iterator[tuple[AccDirective, int, int]]:
-    """(construct, first line, last line) of every compute construct."""
-    stack: list[AccDirective] = []
-    for i, d in enumerate(directives):
-        if d.is_compute_loop:
-            # the loop follows the directive: the first analyzed loop starting after it
-            nxt = min((lp.start_ln for lp in _all_loops(rec.loop_nest) if lp.start_ln > d.end_ln), default=None)
-            lp = _loop_at(rec.loop_nest, nxt) if nxt is not None else None
-            if lp is not None:
-                yield d, d.start_ln, lp.end_ln
-        elif d.is_compute_region:
-            stack.append(d)
-        elif stack and d.construct == END_OF.get(stack[-1].construct):
-            start = stack.pop()
-            yield start, start.start_ln, d.end_ln
-
-
-def _all_loops(loops):
-    for lp in loops:
-        yield lp
-        yield from _all_loops(lp.children)
 
 
 def _data_regions(directives: list[AccDirective]) -> list[tuple[int, int, set[str]]]:
@@ -199,17 +178,21 @@ def check_routine(sub, device_routines: set[str], lines: list[str],
     report.locals_needed = sorted(needed, key=order.index)
     # host accesses; reads in an error check (a branch that can abort) only need an
     # `update self` there, not a copy around every kernel
-    from spel.transforms.acc_apply import cold_branches, routine_tree
+    from spel.transforms.core.query import cold_branches, routine_tree
 
     try:
         cold = cold_branches(routine_tree(sub).body)
     except BaseException:  # the parser exits on what it cannot read: no exemption
         cold = []
     host: set[str] = set()
+    initialized: set[str] = set()
     cold_reads: dict[str, set[int]] = {}
     for a in accesses:
         name = a.base.lower()
         if name not in needed or any(lo <= a.ln <= hi for lo, hi in device_lines):
+            continue
+        if a.context in ("init", "data"):
+            initialized.add(name)  # the specification part: the value the device copy must start with
             continue
         branch = next((b for b in cold if b[0] <= a.ln <= b[1]), None)
         if branch is not None and "w" not in a.status:
@@ -223,6 +206,7 @@ def check_routine(sub, device_routines: set[str], lines: list[str],
         if uses and not any(lo <= call.ln <= hi for lo, hi in device_lines):
             host |= uses & set(needed)
     report.host_accessed = [n for n in report.locals_needed if n in host]
+    report.host_initialized = [n for n in report.locals_needed if n in initialized and n not in host]
     report.cold_reads = {n: sorted(v) for n, v in cold_reads.items() if n not in host}
     return report
 
@@ -277,62 +261,12 @@ class Insertion:
     order: int = 0  # among insertions at one line: lower first
 
 
-def _indent(line: str) -> str:
-    return line[: len(line) - len(line.lstrip())]
+_indent = indent
+_wrap_directive = directive_list  # `!$acc head(a, b, ...)` with `!$acc&` continuations
 
 
-def _wrap_directive(indent: str, head: str, names: list[str], width: int = 100) -> list[str]:
-    """`!$acc head(a, b, ...)` with `!$acc&` continuations (text the fix writes)."""
-    out, cur = [], f"{indent}!$acc {head}("
-    for i, n in enumerate(names):
-        piece = n + (", " if i + 1 < len(names) else ")")
-        if len(cur) + len(piece) > width and not cur.endswith("("):
-            out.append(cur.rstrip() + " &")
-            cur = f"{indent}!$acc&   "
-        cur += piece
-    return out + [cur]
-
-
-def first_executable(tree, rec) -> int:
-    """
-    Line of the routine's first executable statement (its own body, not nested ones).
-    Statement-function definitions (`f(x) = ...` with `f` declared scalar) belong to the
-    specification part although the parser reads them as assignments.
-    """
-    from spel.scripts.fortran_parser import spel_ast as A
-
-    spec_kinds = (A.UseStatement, A.ImplicitNoneStatement, A.VariableDecl, A.TypeDef, A.AccessStatement,
-                  A.ProcedureStatement)
-
-    def statement_function(st) -> bool:
-        e = getattr(st, "expression", None)
-        if not (isinstance(st, A.ExpressionStatement) and isinstance(e, A.InfixExpression) and e.operator.strip() == "="):
-            return False
-        lhs = e.left_expr
-        if not isinstance(lhs, A.FuncExpression) or not isinstance(lhs.function, A.Identifier):
-            return False
-        decl = rec.declaration(lhs.function.value.lower()) if rec is not None else None
-        return decl is not None and decl.dim == 0
-
-    for st in tree.body.statements:
-        if not isinstance(st, spec_kinds) and not statement_function(st):
-            return st.lineno
-    return tree.end_ln
-
-
-def _above_directives(ln: int, directives: list[AccDirective]) -> int:
-    """
-    The first line of the directives that end right above line `ln` (a `!$acc parallel
-    loop` and its continuations belong to the statement after them): inserting there
-    keeps them attached to it.
-    """
-    ends = {d.end_ln: d.start_ln for d in directives}
-    while ln - 1 in ends:
-        ln = ends[ln - 1]
-    return ln
-
-
-def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
+def plan_fix(sub, report: RoutineReport, lines: list[str], structured: bool = False,
+             notes: Optional[list[str]] = None) -> list[Insertion]:
     """
     Device storage for the routine's uncovered local arrays:
     - device-only locals: `enter data create` after the declarations and `exit data
@@ -358,16 +292,40 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
     first_exec = _above_directives(first_executable(tree, rec), find_directives(lines, sub.startline, sub.endline))
     ind = _indent(lines[first_exec])
     out: list[Insertion] = []
-    device_only = [n for n in report.locals_needed if n not in report.host_accessed]
+    def allocatable(n: str) -> bool:
+        d = rec.declaration(n)
+        return d is not None and "allocatable" in {a.lower() for a in d.attrs}
+
+    if structured:
+        resident_shared: list[str] = []
+    else:
+        # no structured data regions (user rule 2026-11-03): locals the host also uses are resident
+        # too; acc-sync adds the update device/self at the host<->device transitions. Allocatables
+        # cannot be created before their allocate: they keep a copy region (reported)
+        resident_shared = [n for n in report.host_accessed if n in report.locals_needed and not allocatable(n)]
+        kept = [n for n in report.host_accessed if n in report.locals_needed and allocatable(n)]
+        if kept and notes is not None:
+            notes.append(f"{sub.id}: allocatable host-shared locals keep a data copy region: {', '.join(kept)}")
+    device_only = [n for n in report.locals_needed if n not in report.host_accessed] + resident_shared
+    created = [n for n in device_only if n not in report.host_initialized]
+    initialized = [n for n in device_only if n in report.host_initialized]
     if device_only:
-        out.append(Insertion(first_exec, [f"{ind}{TAG}: device storage of the local work arrays"]
-                             + _wrap_directive(ind, "enter data create", device_only)))
+        block = [f"{ind}{TAG}: device storage of the local work arrays"]
+        if created:
+            block += _wrap_directive(ind, "enter data create", created)
+        if initialized:
+            block += [f"{ind}{TAG}: initialized in the specification part: the device copy starts from the host values"]
+            block += _wrap_directive(ind, "enter data copyin", initialized)
+        out.append(Insertion(first_exec, block))
     at: dict[int, list[str]] = {}
-    for name in device_only:
+    for name in [n for n in device_only if n not in resident_shared]:
         for ln in report.cold_reads.get(name, []):
             at.setdefault(ln, []).append(name)
+    sub_directives = find_directives(lines, sub.startline, sub.endline)
     for ln, names in sorted(at.items()):
-        out.append(Insertion(ln, _wrap_directive(_indent(lines[ln]), "update self", names), order=1))
+        # above the directives attached to the statement (a `parallel loop` and its loop stay together)
+        at_ln = _above_directives(ln, sub_directives)
+        out.append(Insertion(at_ln, _wrap_directive(_indent(lines[ln]), "update self", names), order=1))
     to_delete = device_only + [n for n in report.leaked if n not in device_only]
     if to_delete:
         # the end of the executable part: the routine's `contains` when it has internal subprograms
@@ -376,7 +334,7 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
         for ln in ends:
             out.append(Insertion(ln, _wrap_directive(_indent(lines[ln]) if ln != last else ind,
                                                      "exit data delete", to_delete), order=-1))
-    host = set(report.host_accessed)
+    host = set(report.host_accessed) - set(resident_shared)
     if host:
         # the constructs and calls of the findings that use host-accessed locals
         spans: dict[tuple[int, int], set[str]] = {}
@@ -387,7 +345,9 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
             if f.variable not in host:
                 continue
             if f.kind == "call":
-                span = (f.ln, next_of.get(f.ln, f.ln + 1))
+                # right after the call statement (its continuation lines included): the next
+                # statement may be in another block (the next `case`)
+                span = (f.ln, statement_end(lines, f.ln) + 1)
             else:
                 lo, hi = ranges[f.ln]
                 span = (lo, hi + 1)
@@ -399,26 +359,227 @@ def plan_fix(sub, report: RoutineReport, lines: list[str]) -> list[Insertion]:
     return out
 
 
-def apply_fix(fut, reports: list[RoutineReport], dry_run: bool = False) -> list[str]:
-    """Insert the data directives into the sources (bottom-up per file). Returns a report."""
-    from spel.scripts.config import E3SM_SRCROOT
+def fix_edits(ins: list[Insertion]) -> list[Edit]:
+    """The insertions as edits. Of insertions at one line with the same order, a later one ends
+    up above an earlier one (as the fix has always placed them)."""
+    return stacked((x.ln, x.lines, x.order) for x in ins)
 
-    by_file: dict[Path, list[tuple[object, RoutineReport]]] = {}
+
+@dataclass
+class Options:
+    routines: list[str] = field(default_factory=list,
+                                metadata={"help": "routine names or ids (default: every routine with device code)"})
+    structured: bool = field(default=False, metadata={
+        "help": "locals the host also uses get `data copy` regions around device uses (default: resident, "
+                "enter/exit data, the transitions synced by acc-sync)"})
+
+
+@transform
+class AccLocals(Transform):
+    """
+    Matches: routines whose compute constructs or device calls use local arrays without device
+             storage (found by `check`).
+    Changes: device-only locals get `enter data create/copyin` after the declarations and
+             `exit data delete` before every return; locals the host also uses get a `data copy`
+             region around each device use; host reads of device-only locals get `update self`.
+             Device-only locals that `data copy` regions move at every kernel (no host use in the
+             parsed source but allocate/deallocate and DEVICE_CONSUMERS calls) get `enter data
+             create` after their allocate and `exit data delete` before their deallocate, and lose
+             the copy regions and updates that name only them.
+    """
+
+    name = "acc-locals"
+    summary = "give routine-local arrays used by device code device storage"
+    Options = Options
+
+    def build(self, ctx, opts):
+        routines = set(opts.routines) or None
+        if routines is None and ctx.config is not None:
+            # only the routines the time step runs in the configuration (not PHS under use_hydrstress = .false.)
+            routines = {s.id for s in ctx.routines()}
+        plan = fix_plan(ctx, check(ctx.fut, routines), structured=opts.structured)
+        # device-only work arrays that copy regions move every launch: create once instead
+        for sid, sub in sorted(ctx.fut.subroutine_dict.items()):
+            if routines and sid not in routines and sid.split("::")[-1].lower() not in routines:
+                continue
+            if getattr(sub, "record", None) is None or getattr(sub, "library", False):
+                continue
+            lines = ctx.lines(sub)
+            co = copy_only_locals(sub, lines)
+            if co is None:
+                continue
+            plan.add(Change(ctx.path(sub), copy_only_edits(sub, co, lines), where=sid,
+                            why=f"device-only {', '.join(co.names)}: enter data create once, no copy regions"))
+        return plan
+
+
+def fix_plan(ctx, reports: list[RoutineReport], structured: bool = False) -> Plan:
+    """The insertions fixing `reports` (from `check`), per file."""
+    plan = Plan(AccLocals.name)
+    by_file: dict[Path, list] = {}
     for r in reports:
-        sub = fut.subroutine_dict[r.routine]
-        p = Path(r.filepath)
-        p = p if p.is_absolute() else Path(E3SM_SRCROOT) / p
-        by_file.setdefault(p, []).append((sub, r))
-    log: list[str] = []
+        sub = ctx.fut.subroutine_dict[r.routine]
+        by_file.setdefault(ctx.path(sub), []).append((sub, r))
     for path, items in by_file.items():
-        lines = path.read_text().split("\n")
+        lines = ctx.lines(path)
         ins: list[Insertion] = []
         for sub, r in items:
-            ins += plan_fix(sub, r, lines)
-            log.append(f"{path.name}: {r.routine}: create {[n for n in r.locals_needed if n not in r.host_accessed]}"
-                       f", copy around device use {r.host_accessed}")
-        for x in sorted(ins, key=lambda x: (-x.ln, -x.order)):
-            lines[x.ln:x.ln] = x.lines
-        if not dry_run:
-            path.write_text("\n".join(lines))
-    return log
+            ins += plan_fix(sub, r, lines, structured=structured, notes=plan.notes)
+            plan.notes.append(f"{path.name}: {r.routine}: create "
+                              f"{[n for n in r.locals_needed if n not in r.host_accessed and n not in r.host_initialized]}"
+                              f", copyin {r.host_initialized}, copy around device use {r.host_accessed}")
+        plan.add(Change(path, fix_edits(ins), where=path.name))
+    return plan
+
+
+def apply_fix(fut, reports: list[RoutineReport], dry_run: bool = False) -> list[str]:
+    """Insert the data directives of `reports` into the sources. Returns a report."""
+    from spel.transforms.core.driver import InPlace, apply_plan
+    from spel.transforms.core.transform import Context
+
+    ctx = Context(fut)
+    plan = fix_plan(ctx, reports)
+    apply_plan(plan, ctx, InPlace(), dry_run=dry_run)
+    return plan.notes
+
+
+# --- device-only work arrays held in copy regions ---------------------------------------------
+#
+# A local work array that only device code reads and writes, but that `data copy` regions put on
+# the device around each kernel, moves host -> device -> host at every region (the accumulator
+# updates' rbufslp: 200 MB per step, 2026-11-01). It needs one `enter data create` (after its
+# allocate) and one `exit data delete` (before its deallocate) instead. The analysis cannot
+# decide "device-only" alone: statements using excluded modules (accumulMod) are not in the
+# record. So the routine's real source is parsed and every host statement checked.
+
+# Routines that read/write an array argument only on the device when the device is ready (their
+# data clauses are present_or_*; the SPEL_ACCUM_CHECK debug check compares with the host copy):
+DEVICE_CONSUMERS = {"update_accum_field", "extract_accum_field"}
+
+
+@dataclass
+class CopyOnly:
+    routine: str
+    names: list[str]
+    allocs: dict[str, list[int]]      # name -> lines after which it is allocated (statement ends)
+    deallocs: dict[str, list[int]]    # name -> lines of its deallocate statements
+    regions: list[tuple[int, int, int]]  # (start, start directive end, end data line) to remove
+    updates: list[tuple[int, int]]    # (start, end) of update directives to remove
+
+
+def copy_only_locals(sub, lines: list[str]) -> Optional[CopyOnly]:
+    from spel.scripts.fortran_parser import spel_ast as A
+    from spel.scripts.registrations import iter_statements
+    from spel.transforms.compact.rewrite import iter_expressions
+    from spel.transforms.core.query import routine_tree
+    from spel.transforms.core.source import statement_end
+
+    rec = sub.record
+    if rec is None:
+        return None
+    arrays = {n.lower() for n, d in rec.local_variables.items()
+              if d.dim > 0 and "parameter" not in {a.lower() for a in d.attrs}}
+    directives = find_directives(lines, sub.startline, sub.endline)
+    stack, regions = [], []
+    for d in directives:
+        if d.construct == "data":
+            stack.append(d)
+        elif d.construct == "end data" and stack:
+            regions.append((stack.pop(), d))
+    copy_vars: set[str] = set()
+    for start, _ in regions:
+        copy_vars |= _clause_vars(start, {"copy", "copyin", "copyout", "present_or_copy", "pcopy"})
+    other = set()
+    for d in directives:
+        if d.construct in ("enter data", "declare"):
+            other |= _clause_vars(d, DATA_CLAUSES)
+    cands = (copy_vars & arrays) - other
+    if not cands:
+        return None
+    device = [(lo, hi) for _, lo, hi in _compute_ranges(directives, rec)]
+    try:
+        tree = routine_tree(sub)
+    except BaseException:  # the parser exits on what it cannot read
+        return None
+
+    def refs(node) -> set[str]:
+        return {e.value.lower() for e in iter_expressions(node) if isinstance(e, A.Identifier)}
+
+    allocs: dict[str, list[int]] = {}
+    deallocs: dict[str, list[int]] = {}
+    host_use: set[str] = set()
+    containers = (A.DoLoop, A.DoWhile, A.AssociateConstruct, A.BlockStatement, A.MacroIf,
+                  A.WhereConstruct, A.SelectCaseConstruct)
+    for st, _ in iter_statements(tree.body):
+        ln = st.lineno
+        if any(lo <= ln <= hi for lo, hi in device):
+            continue
+        if isinstance(st, A.IfConstruct):
+            host_use |= refs(st.condition) & cands
+            continue
+        if isinstance(st, containers):
+            continue
+        if isinstance(st, A.AllocateStatement):
+            objs = set()
+            for o in st.objects:
+                base = o.function if isinstance(o, A.FuncExpression) else o
+                if isinstance(base, A.Identifier):
+                    objs.add(base.value.lower())
+            for nm in objs & cands:
+                (deallocs if st.is_deallocate else allocs).setdefault(nm, []).append(
+                    ln if st.is_deallocate else statement_end(lines, ln))
+            host_use |= (refs(st) - objs) & cands  # in a source=/bounds expression
+            continue
+        if isinstance(st, A.SubCallStatement) and str(st.function.function).lower() in DEVICE_CONSUMERS:
+            plain = {a.value.lower() for a in st.function.args if isinstance(a, A.Identifier)}
+            host_use |= (refs(st) - plain) & cands
+            continue
+        host_use |= refs(st) & cands
+    names = sorted(cands - host_use)
+    if not names:
+        return None
+    keep = set(names)
+    drop_regions = [(s.start_ln, s.end_ln, e.start_ln) for s, e in regions
+                    if _clause_vars(s, DATA_CLAUSES) and _clause_vars(s, DATA_CLAUSES) <= keep
+                    and all(c.name in ("copy", "copyin", "copyout", "present_or_copy", "pcopy", "if")
+                            for c in s.clauses)]
+    drop_updates = [(d.start_ln, d.end_ln) for d in directives if d.construct == "update"
+                    and _clause_vars(d, {"self", "host", "device"}) and _clause_vars(d, {"self", "host", "device"}) <= keep]
+    return CopyOnly(sub.id, names, {n: allocs.get(n, []) for n in names},
+                    {n: deallocs.get(n, []) for n in names}, drop_regions, drop_updates)
+
+
+def copy_only_edits(sub, co: CopyOnly, lines: list[str]) -> list[Edit]:
+    from spel.scripts.fortran_parser import spel_ast as A
+    from spel.transforms.core.edits import replace
+    from spel.transforms.core.query import routine_tree
+
+    ins: list[Insertion] = []
+    tree = None
+    for n in co.names:
+        if co.allocs[n]:
+            for ln in co.allocs[n]:
+                ins.append(Insertion(ln + 1, _wrap_directive(_indent(lines[ln]), "enter data create", [n]), order=2))
+        else:
+            tree = tree or routine_tree(sub)
+            first = _above_directives(first_executable(tree, sub.record), find_directives(lines, sub.startline, sub.endline))
+            ins.append(Insertion(first, _wrap_directive(_indent(lines[first]), "enter data create", [n]), order=2))
+        if co.deallocs[n]:
+            for ln in co.deallocs[n]:
+                ins.append(Insertion(ln, _wrap_directive(_indent(lines[ln]), "exit data delete", [n]), order=-1))
+        else:
+            from spel.transforms.core.query import routine_tree as rt
+            from spel.scripts.registrations import iter_statements
+
+            tree = tree or rt(sub)
+            last = tree.contains_ln if getattr(tree, "contains_ln", -1) >= 0 else tree.end_ln
+            ends = [st.lineno for st, _ in iter_statements(tree.body) if isinstance(st, A.ReturnStatement)] + [last]
+            for ln in ends:
+                ins.append(Insertion(ln, _wrap_directive(_indent(lines[ln]), "exit data delete", [n]), order=-1))
+    edits = fix_edits(ins)
+    for s0, s1, e in co.regions:
+        edits.append(replace(s0, [], n=s1 - s0 + 1, expect=lines[s0:s1 + 1], why="copy region of a device-only local"))
+        edits.append(replace(e, [], expect=[lines[e]], why="copy region of a device-only local"))
+    for s0, s1 in co.updates:
+        edits.append(replace(s0, [], n=s1 - s0 + 1, expect=lines[s0:s1 + 1], why="update of a device-only local"))
+    return edits

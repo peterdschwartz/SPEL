@@ -486,6 +486,8 @@ class LineTuple:
     line: str
     ln: int
     commented: bool = False
+    # keep_spans: (file line, column) of each character of `line`, None where unknown
+    cols: Optional[list] = field(default=None, compare=False, repr=False)
 
 
 class ReadWrite(object):
@@ -644,6 +646,62 @@ def lower_code(text: str) -> str:
     return "".join(out)
 
 
+def _code_chars(lines: list[LineTuple]) -> list[tuple[int, int, str]]:
+    """(file line, column, lowercase char) of the code characters of physical lines: no
+    whitespace, nothing after an unquoted `!` (but a directive's own sentinel on its first line)."""
+    out = []
+    for k, lt in enumerate(lines):
+        text = lt.line
+        quote = None
+        start = 0
+        if (sentinel := directive_sentinel(text)):
+            start = len(text) - len(text.lstrip())
+            if k == 0:
+                out.extend((lt.ln, start + j, ch.lower()) for j, ch in enumerate(text[start:start + len(sentinel)]))
+            start += len(sentinel)
+        for col in range(start, len(text)):
+            ch = text[col]
+            if quote:
+                if ch == quote:
+                    quote = None
+            elif ch in "'\"":
+                quote = ch
+            elif ch == "!":
+                break
+            if not ch.isspace():
+                out.append((lt.ln, col, ch.lower()))
+    return out
+
+
+def align_columns(text: str, lines: list[LineTuple], at: int = 0) -> tuple[Optional[list], int]:
+    """
+    The physical (file line, column) of every character of the logical line `text`, which was
+    joined from `lines` (continuations, comments and `&` removed, lowercased): its non-blank
+    characters are matched in order against the code characters, starting at the `at`-th (a
+    semicolon-separated part continues where the previous one ended). A blank maps to the
+    position after the previous character. Returns (cols or None if `text` does not align, the
+    index to continue from).
+    """
+    chars = _code_chars(lines)
+    cols: list = []
+    prev = (chars[at][0], chars[at][1]) if at < len(chars) else None
+    k = at
+    for ch in text:
+        if ch.isspace():
+            cols.append(prev)
+            continue
+        want = ch.lower()
+        while k < len(chars) and chars[k][2] != want:
+            k += 1
+        if k >= len(chars):
+            return None, at
+        ln, col, _ = chars[k]
+        cols.append((ln, col))
+        prev = (ln, col + 1)
+        k += 1
+    return cols, k
+
+
 class LogicalLineIterator:
     def __init__(
         self,
@@ -651,13 +709,17 @@ class LogicalLineIterator:
         log_name: str = "",
         keep_directives: bool = False,
         keep_string_case: bool = False,
+        keep_spans: bool = False,
     ):
         """
         keep_directives: return OpenACC/OpenMP directive lines (`!$acc ...`, `!$omp ...`,
         continuations joined) as logical lines instead of dropping them as comments.
         keep_string_case: lowercase only outside string literals ('LEAFN' stays 'LEAFN').
+        keep_spans: give each logical line `cols`, the physical (line, column) of its characters
+        (`align_columns`), so the lexer can give tokens their source spans.
         """
         self.keep_directives = keep_directives
+        self.keep_spans = keep_spans
         self._lower = lower_code if keep_string_case else str.lower
         self.lines = lines
         self.i: int = 0
@@ -751,7 +813,10 @@ class LogicalLineIterator:
 
         cur_ln = self.lines[self.i].ln
         if self.keep_directives and (sentinel := directive_sentinel(self.lines[self.i].line)):
+            first = self.i
             self.curr_line = LineTuple(line=self._directive(sentinel), ln=cur_ln)
+            if self.keep_spans:
+                self.curr_line.cols, _ = align_columns(self.curr_line.line, self.lines[first:self.i])
             return self.curr_line
         full_line = self.strip_comment()
         full_line = full_line.rstrip("\n").strip()
@@ -773,6 +838,7 @@ class LogicalLineIterator:
 
         # result = (full_line.lower(), self.i)
         self.i += 1
+        physical = self.lines[self.start_index:self.i] if self.keep_spans else []
 
         # semicolon splitting, preserving original ln
         parts = self._scan_with_comment_and_split(full_line, split_char=";")
@@ -785,9 +851,13 @@ class LogicalLineIterator:
             return self.curr_line
 
         # first part is returned now; remaining queued for subsequent __next__ calls
-        first_part = self._lower(parts[0])
-        self._pending_parts = [LineTuple(line=self._lower(p), ln=cur_ln) for p in parts[1:]]
-        self.curr_line = LineTuple(line=first_part, ln=cur_ln)
+        out = [LineTuple(line=self._lower(p), ln=cur_ln) for p in parts]
+        if self.keep_spans:
+            at = 0
+            for lt in out:
+                lt.cols, at = align_columns(lt.line, physical, at)
+        self._pending_parts = out[1:]
+        self.curr_line = out[0]
         return self.curr_line
 
     def _directive(self, sentinel: str) -> str:
@@ -982,12 +1052,16 @@ class Dependence:
     `trigger_types` gives the Fortran type of each trigger (default logical).
     """
 
-    def __init__(self, cascade_var, trigger, val_pairs: list[Pairs], trigger_types=None):
+    def __init__(self, cascade_var, trigger, val_pairs: list[Pairs], trigger_types=None, trigger_defaults=None):
         self.var: str = cascade_var
         self.triggers: tuple[str, ...] = (trigger,) if isinstance(trigger, str) else tuple(trigger)
         self.trigger: str = self.triggers[0]
         self.trigger_types: tuple[str, ...] = tuple(trigger_types or ("logical",) * len(self.triggers))
         self.pairs = val_pairs
+        # the triggers' values when the namelist does not set them (Fortran literals), for
+        # triggers the analysis records no declared default for (the dynamic_subgrid namelist
+        # variables are locals of its read routine, set by assignments); None: unknown
+        self.trigger_defaults: Optional[tuple[str, ...]] = tuple(trigger_defaults) if trigger_defaults else None
 
     def all_triggers(self) -> tuple[str, ...]:
         # analyses pickled before multi-trigger cascades only have `trigger`
@@ -1131,18 +1205,19 @@ class Precedence(Enum):
     # Fortran operator precedence, lowest to highest
     LOWEST = 1
     ASSIGN = 2
-    OR = 3
-    AND = 4
-    NOT = 5
-    EQUALS = 6
-    LESSGREATER = 7
-    CONCAT = 8
-    SUM = 9
-    PRODUCT = 10
-    EXP = 11
-    PREFIX = 12
-    BOUNDS = 13
-    CALL = 14
+    SECTION = 3  # the `:` of a subscript triplet binds loosest: `n+1:m` is (n+1):m
+    OR = 4
+    AND = 5
+    NOT = 6
+    EQUALS = 7
+    LESSGREATER = 8
+    CONCAT = 9
+    SUM = 10
+    PRODUCT = 11
+    EXP = 12
+    PREFIX = 13
+    BOUNDS = 14
+    CALL = 15
 
 
 @dataclass

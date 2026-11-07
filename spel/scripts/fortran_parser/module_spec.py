@@ -72,7 +72,14 @@ class ModuleSpec:
         return "associated" if "pointer" in v.attrs else ("allocated" if "allocatable" in v.attrs else None)
 
 
-def _key(path: Path) -> tuple[str, float]:
+def _key(path: Path) -> tuple[str, object]:
+    import os
+
+    from spel.scripts.edit_files import SOURCE_OVERRIDES
+
+    text = SOURCE_OVERRIDES.get(os.path.abspath(path))
+    if text is not None:  # edited text a transform pipeline plans on
+        return (str(path.resolve()), ("text", hash(text)))
     return (str(path.resolve()), path.stat().st_mtime)
 
 

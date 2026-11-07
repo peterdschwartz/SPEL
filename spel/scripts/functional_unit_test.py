@@ -861,7 +861,7 @@ class FunctionalUnitTest:
             self.type_dict
         )
 
-        # sources rewritten by `spel compact rewrite`: pack/unpack the compact fields
+        # sources rewritten by `spel transform compact-rewrite`: pack/unpack the compact fields
         # around compute (SpelCompactMod, written by UnitTestforELM with the file list)
         from spel.transforms.compact.unit_test import hook_lines
 
@@ -895,10 +895,10 @@ class FunctionalUnitTest:
         )
 
         if cfg.options.device_data:
-            # the generated device data layer (spel device-data) instead of SpelAccDataMod's
+            # the generated device data layer (spel transform device-data) instead of SpelAccDataMod's
             # deep copy; the harness still builds the filters (spel_acc_update_filters)
             lines = insert_at_token(
-                lines, "!#USE_START", ["use ElmDeviceDataMod, only: elm_device_copyin, elm_device_update\n",
+                lines, "!#USE_START", ["use ElmDeviceDataMod, only: elm_device_copyin, elm_device_update, elm_device_filters_update\n",
                                        "use elm_varctl, only: elm_device_ready\n"]
             )
             lines = insert_at_token(lines, "!#ACC_COPYIN", ["   call elm_device_copyin()\n"])
@@ -994,6 +994,17 @@ class FunctionalUnitTest:
             "!#SPEL_IO",
             [f"{tabs}call read_elmtypes({arg_str})\n"],
         )
+
+        # decompMod globals bounds_proc / bounds_by_clump(:) (E3SM branches since 2026-11-01):
+        # filled from the test's clumps once init_clumps has set procinfo and clumps
+        decomp = self.module_dict.get("decompmod")
+        if decomp is not None and "init_global_bounds" in {s.lower().split("::")[-1] for s in decomp.subroutines}:
+            lines = insert_at_token(
+                lines, "!#INIT_CLUMPS_USE", ["      use decompMod, only: init_global_bounds\n"]
+            )
+            lines = insert_at_token(
+                lines, "!#INIT_CLUMPS_END", ["      call init_global_bounds()\n"]
+            )
 
         with open(self.case_dir / "elm_initializeMod.F90", "w") as ofile:
             ofile.writelines(lines)
@@ -1206,7 +1217,7 @@ def generate_cmake(files: list[str], case_dir: Path):
 
     option(DBG "Enable Debug mode" OFF)
     option(NVTX "NVTX ranges for Nsight profiling (nvfortran only)" ON)
-    set(ACC "OFF" CACHE STRING "OpenACC target: OFF, MULTICORE (host threads), GPU, or OPENMP (sources translated by spel acc2omp)")
+    set(ACC "OFF" CACHE STRING "OpenACC target: OFF, MULTICORE (host threads), GPU, or OPENMP (sources translated by spel transform acc2omp)")
     set_property(CACHE ACC PROPERTY STRINGS OFF MULTICORE GPU OPENMP)
     option(GPU "Same as -DACC=GPU (kept for old check_config.sh scripts)" OFF)
     string(TOUPPER "${{ACC}}" ACC_MODE)
@@ -1589,7 +1600,7 @@ def adjust_call_sig(args, calls, num_filter_members):
             adj_args.remove(decl)
 
     for i, el in enumerate(calls):
-        if re.search("\b(bounds)\b", adj_calls[i]):
+        if re.search(r"\b(bounds)\b", adj_calls[i]):
             adj_calls[i] = adj_calls[i].replace("bounds", "bounds_clump")
         if regex_filter.search(adj_calls[i]):
             # not keyword names (`filter_on=filter(nc)%snowc`)

@@ -37,6 +37,11 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from spel.scripts.fortran_parser import spel_ast as A
+from spel.transforms.core.edits import Edit, insert, replace
+from spel.transforms.core.registry import transform
+from spel.transforms.core.source import indent
+from spel.transforms.core.transform import Change, Refusal, Transform
+from spel.transforms.core.transform import Plan as TPlan
 
 PREFIX = "spel_dc_"
 TAG = "! spel defer-checks"
@@ -138,7 +143,7 @@ def _outer_loops(stmts):
 
 def _host_work(st) -> bool:
     """write/print or an abort call anywhere in the statement."""
-    from spel.transforms.acc_apply import abort_calls
+    from spel.transforms.core.query import abort_calls
 
     blk = A.BlockStatement(None)
     blk.statements = [st]
@@ -169,7 +174,7 @@ def _preceding(body, target) -> list:
 
 def _aborts_unconditionally(st) -> bool:
     """A top-level statement of the if's branch is an abort call."""
-    from spel.transforms.acc_apply import ABORTS
+    from spel.transforms.core.query import ABORTS
 
     for s in st.consequence.statements:
         if isinstance(s, A.SubCallStatement):
@@ -244,7 +249,7 @@ def plan_routine(sub, lines: list[str], tree, rec, start_k: int = 1) -> Plan:
                         break
                     scal_writes.append(lhs.value.lower())
                 elif isinstance(s, A.SubCallStatement):
-                    from spel.transforms.acc_apply import ABORTS
+                    from spel.transforms.core.query import ABORTS
                     f = s.function.function if isinstance(s.function, A.FuncExpression) else s.function
                     if str(f).split("%")[-1].lower() not in ABORTS:
                         ok, why = False, f"calls {f}"
@@ -353,12 +358,15 @@ def plan_routine(sub, lines: list[str], tree, rec, start_k: int = 1) -> Plan:
     return out
 
 
-def plan(fut, roots: Iterable[str]) -> Plan:
-    from spel.transforms.acc_apply import _Facts, call_tree
+def plan(fut, roots: Iterable[str], config=None) -> Plan:
+    """The deferrals in the call trees of `roots` (`config`: only through the branches that run)."""
+    from spel.transforms.acc_apply import DeviceFacts as _Facts
+    from spel.transforms.core.query import call_tree
 
     facts = _Facts(fut)
     out = Plan()
-    for sid, sub in sorted(call_tree(fut, roots).items()):
+    tree = config.call_tree(fut, roots) if config is not None else call_tree(fut, roots)
+    for sid, sub in sorted(tree.items()):
         if sub.record is None:
             continue
         try:
@@ -371,52 +379,83 @@ def plan(fut, roots: Iterable[str]) -> Plan:
     return out
 
 
-def edits_for(lines: list[str], defs: list[Deferral], first_exec: dict[str, int]) -> list[tuple[int, int, int, list[str]]]:
-    """(line, rank, lines to delete, lines to insert) for the deferrals of one file; of the
-    insertions at one line, a lower rank ends up above a higher one."""
-    ind = lambda s: s[:len(s) - len(s.lstrip())]
+def edits_for(lines: list[str], defs: list[Deferral], first_exec: dict[str, int]) -> list[Edit]:
+    """The edits of the deferrals of one file. Of the edits at one line, a lower order ends up
+    above (the declarations, then the counters' resets, then the replayed checks of the loops
+    ending there; the replaced check last)."""
     out = []
     for d in defs:
-        pad = ind(lines[d.if_ln])
-        out.append((d.if_ln, 9, d.if_end - d.if_ln + 1,
-                    [f"{pad}if ({d.cond}) {d.var} = max({d.var}, {d.index} - ({d.start}) + 1)  {TAG}"]))
-        lp = ind(lines[d.loop_ln])
-        out.append((d.loop_end + 1, 2 + d.if_ln * 1e-9, 0,
-                    [f"{lp}if ({d.var} > 0) then  {TAG}: the last element where the check held",
-                     f"{lp}   {d.index} = {d.start} + {d.var} - 1"]
-                    + [f"{lp}   {l.strip()}" for l in d.replay] + d.body + [f"{lp}end if"]))
-        out.append((d.loop_ln, 3 + d.if_ln * 1e-9, 0, [f"{lp}{d.var} = 0  {TAG}"]))
+        pad = indent(lines[d.if_ln])
+        out.append(replace(d.if_ln, f"{pad}if ({d.cond}) {d.var} = max({d.var}, {d.index} - ({d.start}) + 1)  {TAG}",
+                           n=d.if_end - d.if_ln + 1, order=9, why=f"{d.routine}: check at line {d.if_ln + 1}"))
+        lp = indent(lines[d.loop_ln])
+        out.append(insert(d.loop_end + 1,
+                          [f"{lp}if ({d.var} > 0) then  {TAG}: the last element where the check held",
+                           f"{lp}   {d.index} = {d.start} + {d.var} - 1"]
+                          + [f"{lp}   {l.strip()}" for l in d.replay] + d.body + [f"{lp}end if"],
+                          order=2 + d.if_ln * 1e-9))
+        out.append(insert(d.loop_ln, f"{lp}{d.var} = 0  {TAG}", order=3 + d.if_ln * 1e-9))
     by_routine: dict[str, list[str]] = {}
     for d in defs:
         by_routine.setdefault(d.routine, []).append(d.var)
     for r, vs in by_routine.items():
-        ln = first_exec[r]
-        out.append((ln, 1, 0, [f"    integer :: {', '.join(vs)}  {TAG}: elements recorded by deferred checks"]))
+        out.append(insert(first_exec[r], f"    integer :: {', '.join(vs)}  {TAG}: elements recorded by deferred checks",
+                          order=1))
+    return out
+
+
+@dataclass
+class Options:
+    roots: list[str] = field(default_factory=lambda: ["elm_driver::elm_drv"],
+                             metadata={"help": "the call trees to search"})
+
+
+@transform
+class DeferChecks(Transform):
+    """
+    Matches: plain `if` blocks in loops doing host-only work (write/endrun) or a search whose
+             result is read after the loop.
+    Changes: the block records its last iteration (`spel_dc_k = max(...)`, a max reduction) and
+             runs once after the loop for that iteration, with the index mappings it needs.
+    Refuses: blocks that write non-local data, call anything but the abort routines, hold
+             loops/exits, read loop-local scalars that are no index mappings, or scalars read
+             elsewhere in the loop.
+    """
+
+    name = "defer-checks"
+    summary = "move host-only checks (error reports, last-match searches) out of device loops"
+    Options = Options
+
+    def build(self, ctx, opts):
+        return edit_plan(ctx, plan(ctx.fut, opts.roots, ctx.config))
+
+
+def edit_plan(ctx, found: Plan) -> TPlan:
+    """The edits of the deferrals found by `plan`."""
+    from spel.transforms.acc_directives import find_directives
+    from spel.transforms.core.query import above_directives, first_executable
+
+    out = TPlan(DeferChecks.name)
+    out.refusals += [Refusal(f"{r}:{ln + 1}", why) for r, ln, why in found.refused]
+    by_file: dict[Path, list[Deferral]] = {}
+    for d in found.deferrals:
+        by_file.setdefault(ctx.path(ctx.fut.subroutine_dict[d.routine]), []).append(d)
+    for path, defs in by_file.items():
+        lines = ctx.lines(path)
+        fe = {}
+        for d in defs:
+            sub = ctx.fut.subroutine_dict[d.routine]
+            fe[d.routine] = above_directives(first_executable(ctx.facts.tree(sub), sub.record),
+                                             find_directives(lines, sub.startline, sub.endline))
+        out.add(Change(path, edits_for(lines, defs, fe), where=path.name, why=f"{len(defs)} checks deferred"))
     return out
 
 
 def apply(fut, p: Plan, dry_run: bool = False) -> list[str]:
-    from spel.transforms.acc_apply import _Facts
-    from spel.transforms.acc_directives import find_directives
-    from spel.transforms.acc_locals import _above_directives, first_executable
+    """Write the deferrals of `p` (from `plan`). Returns a log."""
+    from spel.transforms.core.driver import InPlace, apply_plan
+    from spel.transforms.core.transform import Context
 
-    facts = _Facts(fut)
-    log = []
-    by_file: dict[Path, list[Deferral]] = {}
-    for d in p.deferrals:
-        by_file.setdefault(d.path, []).append(d)
-    for path, defs in by_file.items():
-        lines = path.read_text().split("\n")
-        fe = {}
-        for d in defs:
-            sub = fut.subroutine_dict[d.routine]
-            fe[d.routine] = _above_directives(first_executable(facts.tree(sub), sub.record),
-                                              find_directives(lines, sub.startline, sub.endline))
-        eds = edits_for(lines, defs, fe)
-        # bottom-up; at one line: replacements before insertions
-        for ln, _, n, new in sorted(eds, key=lambda e: (-e[0], -e[1])):
-            lines[ln:ln + n] = new
-        log.append(f"{path.name}: {len(defs)} checks deferred")
-        if not dry_run:
-            path.write_text("\n".join(lines))
-    return log
+    ctx = Context(fut)
+    res = apply_plan(edit_plan(ctx, p), ctx, InPlace(), dry_run=dry_run)
+    return [f"{c.where}: {c.why}" for c in res.plan.changes]

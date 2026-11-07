@@ -12,6 +12,9 @@ map_module_lines: dict[str, list[str]] = {}
 
 map_module_head: dict[str, int] = {}
 
+# genf90 output of the analysis cache (spel.scripts.genf90), searched after the checkout
+genf90_dir: Optional[str] = None
+
 
 def populate_interface_list():
     """

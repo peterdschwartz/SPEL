@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 from enum import Enum
 
 
@@ -176,6 +177,8 @@ KEYWORDS_THAT_CAN_BE_IDENTIFIERS = {
 class Token:
     token: TokenTypes
     literal: str
+    # (ln0, c0, ln1, c1): file line indices and columns ([c0, c1) on ln1), only with keep_spans
+    span: Optional[tuple[int, int, int, int]] = field(default=None, compare=False, repr=False)
 
     def __str__(self):
         return f"{self.literal}[{self.token}]"

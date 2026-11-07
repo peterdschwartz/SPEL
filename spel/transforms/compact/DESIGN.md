@@ -17,8 +17,8 @@ build time (`e3sm_casegen.sh --compact`), it may be disruptive.
 
 ```bash
 spel compact inventory [--verdict blocked] [--field veg_cf%gpp] [-o inv.json]
-spel compact rewrite [--type vegetation_carbon_flux ...] [--roles] --dry-run [--diff] [--excluded]
-spel compact rewrite [--roles] [-o CASE/SourceMods/src.elm [--replace]]
+spel transform compact-rewrite [--type vegetation_carbon_flux ...] [--roles] --dry-run [--diff] [--excluded]
+spel transform compact-rewrite [--roles] [-o CASE/SourceMods/src.elm]   # -o: a fresh directory
 ```
 
 `inventory` (inventory.py) traces one time step from `elm_drv` and reports,
@@ -137,8 +137,9 @@ On the branch (2026-10-24, `--roles`, all six flux types): 84 fields;
 `hrv_*` field counted as written by an unanalyzed routine; it is analyzed now
 (`CNHarvest` runs after CNZero, its sites are filter-indexed), and the unit
 test drops the `extends(file_desc_t)` of `dynFileMod`'s type, whose parent
-comes from PIO. Bisecting on the stride-8 case: `spel compact rewrite
---fields a,b -o CASE/SourceMods/src.elm --replace`, `--no-map-sites`.
+comes from PIO. Bisecting on the stride-8 case: `spel transform
+compact-rewrite --fields a,b -o CASE/SourceMods/src.elm` (on a fresh case or an emptied
+`src.elm`), `--no-map-sites`.
 
 ### Map-indexed sites (phase 2a, built)
 
@@ -223,7 +224,7 @@ The rewrite is generated: located by content, checked against the analysis
 already have `CompactBindMod.F90` or `.spel-compact.json`. The manifest
 records the SPEL and E3SM commits, the groups (guard, fields in slot order),
 the history fields and the files. After a rebase: drop the generated
-changes, `spel analyze`, run `spel compact rewrite` again.
+changes, `spel analyze`, run `spel transform compact-rewrite` again.
 
 ## Unit tests and captures
 
@@ -263,7 +264,7 @@ process (the components are shared).
   the committed sources too (seeds 3, 4; `HIST_TEST_SEED`): a latent race in
   the test or the multicore history path, independent of the compact additions.
 
-## Nutrient sources (after `spel nutrient ...` and `spel split`)
+## Nutrient sources (after `spel transform nutrient-*` and `spel transform split`)
 
 The shared C/N/P fields then live on a base type (`vegetation_nutrient_flux`) that has no
 instances: each concrete type holds one as its component `core` (`veg_cf%core%agnpp`), N/P-only
@@ -288,7 +289,7 @@ its *embeddings* (instance, component path, element: `veg_cf`/`core`/`c12`, `veg
   would stop SPEL's analysis of the rewritten sources.
 - **Bind where the fields were allocated**: `<base>_init` for the base holder, the concrete Init
   for a role holder (after its last dropped `allocate`). The concrete module gets `use <holder
-  module>, only : <base>_compact_bind` when the holder lives in another module (after `spel split`).
+  module>, only : <base>_compact_bind` when the holder lives in another module (after `spel transform split`).
 - **Zeroing**: a base holder's fields are dropped from `<base>_setvalues` and zeroed by group there
   (`this%x(k0p+1:k0p+num)` under `compact_bound`); a role holder's from each concrete SetValues under
   `this%<path>%` (`this%retrans%pool`, `this%retrans%cgrp_id(k)`). The zeroing class text of
@@ -303,7 +304,7 @@ its *embeddings* (instance, component path, element: `veg_cf`/`core`/`c12`, `veg
   records `embedded_in` per type and the nutrient manifest's provenance.
 - **Unit tests / captures**: driven by the manifest (`compact_fields`), see above.
 - **Order on a checkout**: `spel analyze` → the nutrient steps (`nutrient_refactor.sh`, each
-  re-analyzes) → `spel analyze` → `spel compact rewrite` → `spel analyze` for unit tests.
+  re-analyzes) → `spel analyze` → `spel transform compact-rewrite` → `spel analyze` for unit tests.
 
 ## What is read from parses and records, what is edited by text
 

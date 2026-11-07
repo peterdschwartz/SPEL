@@ -54,7 +54,7 @@ def test_segments_and_edits():
     by_file = acc_sync.edits(acc_sync.SyncPlan(routines=[rs]), {None: lines})
     got = {(ln, tuple(new)) for ln, _, new in by_file[None]}
     assert (9, ("  " + acc_sync.TAG + ": device data this host code uses",
-                "  !$acc update self(x) if_present")) in got
+                "  !$acc update self(x) if_present if(elm_device_ready)")) in got
     assert (12, ("  !$acc update device(y) if_present",)) in got
     assert (18, ("     !$acc update device(y) if_present",)) in got
 
@@ -95,7 +95,7 @@ def test_return_update_follows_the_update_self():
     assert seg.first == 10 and seg.returns == [10] and seg.stale == {"x"} and seg.writes == {"x"}
     ins = sorted(acc_sync.edits(acc_sync.SyncPlan(routines=[rs]), {None: lines})[None], key=lambda e: e[:2])
     at_return = [new[-1].strip() for ln, _, new in ins if ln == 10]
-    assert at_return == ["!$acc update self(x) if_present", "!$acc update device(x) if_present"]
+    assert at_return == ["!$acc update self(x) if_present if(elm_device_ready)", "!$acc update device(x) if_present"]
 
 
 FATES_BRANCH = """subroutine branchy(n, use_fates, x, y)
@@ -130,6 +130,24 @@ def test_off_by_default_branch_syncs_inside():
     acc_sync._segments(rs, sub, node, spans, entries, lines, acc_sync._Types(fut), out)
     (seg,) = rs.segments
     assert seg.first == 11 and seg.stale == {"x"} and seg.writes == {"y"}   # the do loop inside the branch
+
+    # a replaced switch list (the `off_by_default` option) no longer treats use_fates as cold;
+    # the condition reads device data, so it is not a host flag either
+    src = FATES_BRANCH.replace("if (use_fates) then", "if (use_fates .and. x(1) > 0.0_r8) then")
+    lines = src.split("\n")
+    sub = StubSub(src)
+    sub.active_global_vars = {}
+    spans = acc_sync._spans(find_directives(lines), sub.record)
+    entries = acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub))
+    node = parse_statements(src).statements[0]
+    first = {}
+    for switches in (acc_sync.OFF_BY_DEFAULT, frozenset({"use_fan"})):
+        rs = acc_sync.RoutineSync(sub.id, None)
+        acc_sync._segments(rs, sub, node, spans, entries, lines, acc_sync._Types(fut), out,
+                           cold_switches=switches)
+        first[switches] = [(g.first, g.header_only) for g in rs.segments]
+    # cold: the header, then the loop inside the branch; not cold: the whole if construct
+    assert first == {acc_sync.OFF_BY_DEFAULT: [(10, True), (11, False)], frozenset({"use_fan"}): [(10, False)]}
 
 
 COLD = """subroutine check(n, x, nbad)
@@ -220,3 +238,295 @@ def test_dedupe_sync_blocks():
     assert acc_sync.dedupe_sync_blocks(lines) == [
         "  x = 1", tag, *upd, "  !$acc update device(c) if_present",
         "  !$acc update self(d)", "  !$acc update self(d)", "  y = 2"]   # hand-written updates are left alone
+
+
+def test_boundary_segments_and_cond():
+    """Accesses outside the routine (elm_drv's coupler): push what is written before at the first
+    statement, pull what is read after (and device-written) before `end subroutine`."""
+    lines = SRC.split("\n")
+    sub = StubSub(SRC)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    types = acc_sync._Types(fut)
+    spans = acc_sync._spans(find_directives(lines), sub.record)
+    entries = acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub))
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "x")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    node = parse_statements(SRC).statements[0]
+    acc_sync._segments(rs, sub, node, spans, entries, lines, types, out,
+                       boundary=([("y", "w"), ("x", "r")], [("x", "r"), ("y", "r")]))
+    start, end = rs.segments[0], rs.segments[-1]
+    # the first statement is the kernel loop (line 6): the push goes above its directive
+    assert (start.first, start.after, start.writes, start.stale) == (6, 6, {"y"}, set())
+    # y is not device-written: only x is pulled at the end
+    assert (end.first, end.header_only, end.stale) == (len(lines) - 1, True, {"x"})
+
+    by_file = acc_sync.edits(acc_sync.SyncPlan(routines=[rs]), {None: lines}, cond=".not. full")
+    got = {(ln, tuple(new)) for ln, _, new in by_file[None]}
+    assert (5, ("  !$acc update device(y) if_present if(.not. full)",)) in got
+    assert (len(lines) - 1, (acc_sync.TAG + ": device data this host code uses",
+                             "!$acc update self(x) if_present if(.not. full)")) in got
+    # the conditional updates are recognised as acc-sync blocks
+    block = ["  !$acc update self(x) if_present if(.not. full)"] * 2
+    assert acc_sync.dedupe_sync_blocks(block) == block[:1]
+
+
+def test_targeted_strip_removes_an_application():
+    from spel.transforms.device import targeted
+
+    # an application before 2026-11-01: updates guarded by the whole-state fallback flag
+    src = ["  call a()", f"  !$acc update self(p, &", f"  !$acc&   q) if_present if({targeted.LEGACY_COND})",
+           f"  call elm_device_pull_all()  {targeted.TAG}", "  !$acc update self(r) if_present", "  call b()"]
+    assert targeted.strip(src) == ["  call a()", "  !$acc update self(r) if_present", "  call b()"]
+
+
+def test_targeted_strip_removes_tagged_blocks_only():
+    from spel.transforms.device import targeted
+
+    # the current form: a TAG comment line above each inserted update; the hand-written update
+    # after a tagged call (not a comment) and the second, untagged update stay
+    src = ["  call a()", f"  {targeted.TAG}: device data this host code uses",
+           "  !$acc update self(p, &", "  !$acc&   q) if_present if(elm_device_ready)",
+           "  !$acc update device(h) if_present",
+           f"  {targeted.TAG}", "  !$acc update device(w) if_present",
+           f"  call elm_device_pull_all()  {targeted.TAG}", "  !$acc update self(r) if_present", "  call b()"]
+    assert targeted.strip(src) == ["  call a()", "  !$acc update device(h) if_present",
+                                   "  !$acc update self(r) if_present", "  call b()"]
+
+
+def test_targeted_transform_refuses_an_applied_driver(tmp_path):
+    from spel.transforms.core.source import Sources
+    from spel.transforms.core.transform import Context
+    from spel.transforms.device import targeted
+
+    drv = targeted.driver_path(tmp_path)
+    drv.parent.mkdir(parents=True)
+    drv.write_text(f"  call a()\n  call elm_device_pull_all()  {targeted.TAG}\n")
+    plan = targeted.DeviceTargeted().build(Context(None, tmp_path, Sources()), targeted.Options())
+    assert not plan and "earlier application" in plan.refusals[0].reason
+
+
+FLAG_BRANCH = """subroutine weights(n, x, y, updated)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(inout) :: x(:), y(:)
+  logical, intent(in) :: updated
+  integer :: i
+  !$acc parallel loop default(present)
+  do i = 1, n
+     x(i) = 1.0_r8
+  end do
+  if (updated) then
+     do i = 1, n
+        y(i) = x(i)
+     end do
+  end if
+  if (x(1) > 0.0_r8) then
+     y(1) = x(2)
+  end if
+end subroutine weights"""
+
+
+def test_flag_guarded_branch_syncs_inside():
+    """dynSubgrid_driver's `if (weights_updated)`: the condition reads a host flag, so the
+    host loop inside syncs inside the branch (nothing moves when the weights did not change).
+    A condition that reads device-written data keeps the whole construct as one segment."""
+    lines = FLAG_BRANCH.split("\n")
+    sub = StubSub(FLAG_BRANCH)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "x")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    acc_sync._segments(rs, sub, parse_statements(FLAG_BRANCH).statements[0],
+                       acc_sync._spans(find_directives(lines), sub.record),
+                       acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub)), lines, acc_sync._Types(fut), out)
+    firsts = sorted((s.first, s.after, s.header_only) for s in rs.segments)
+    assert (11, 14, False) in firsts          # the loop inside `if (updated)`, not the if at line 10
+    assert all(f != 10 for f, _, _ in firsts)
+    assert (15, 18, False) in firsts          # `if (x(1) > 0)`: x is device-written, one segment
+
+
+LOCAL_FILL = """subroutine divide(n, x, y)
+  implicit none
+  integer, intent(in) :: n
+  real(r8), intent(in) :: x(:)
+  real(r8), intent(inout) :: y(:)
+  real(r8) :: work(n)
+  integer :: i
+  !$acc enter data create(work)
+  do i = 1, n
+     work(i) = x(i) * 2.0_r8
+  end do
+  !$acc parallel loop default(present)
+  do i = 1, n
+     y(i) = work(i)
+  end do
+  !$acc exit data delete(work)
+end subroutine divide"""
+
+
+def test_local_array_filled_on_the_host_is_pushed():
+    """DivideSnowLayers: dzsno, swice, ... filled by a host loop, read by the next kernel
+    (created-but-unfilled device copies). The host segment pushes the local arrays it writes."""
+    lines = LOCAL_FILL.split("\n")
+    sub = StubSub(LOCAL_FILL)
+    sub.active_global_vars = {}
+    fut = SimpleNamespace(type_dict={}, module_dict={}, subroutine_dict={sub.id: sub})
+    out = acc_sync.SyncPlan(device_written={("#dummy", sub.id, "y")})
+    rs = acc_sync.RoutineSync(sub.id, None)
+    acc_sync._segments(rs, sub, parse_statements(LOCAL_FILL).statements[0],
+                       acc_sync._spans(find_directives(lines), sub.record),
+                       acc_sync._entries(AccessMapper({sub.id: sub}).maps(sub)), lines, acc_sync._Types(fut), out)
+    (seg,) = rs.segments
+    assert seg.first == 8 and seg.writes == {"work"} and "i" not in seg.writes  # the scalar index is not synced
+
+
+def test_excluded_calls_in_reports_calls_into_excluded_modules(tmp_path):
+    """A call into a module the analysis excludes has no events: the planner reports it."""
+    from spel.scripts.fortran_parser.module_spec import parse_modules
+    from spel.transforms.acc_sync import excluded_calls_in
+
+    src = tmp_path / "m.F90"
+    src.write_text(
+        "module m\n"
+        "  use dynFATESLandUseChangeMod, only : dynFatesLandUseInterp\n"
+        "  use perf_mod, only : t_startf\n"
+        "contains\n"
+        "  subroutine drv(bounds)\n"
+        "    type(bounds_type), intent(in) :: bounds\n"
+        "    call t_startf('x')\n"
+        "    if (use_fates_luh) then\n"
+        "       call dynFatesLandUseInterp(bounds)\n"
+        "    end if\n"
+        "    call other(bounds)\n"
+        "  end subroutine drv\n"
+        "end module m\n"
+    )
+    node = parse_modules(src)[0].subprograms[0]
+    notes = excluded_calls_in("m::drv", src, node)
+    assert len(notes) == 1 and "line 9" in notes[0] and "dynfateslanduseinterp" in notes[0].lower()
+
+
+def test_push_of_a_specification_part_write_goes_after_the_enter_data_block():
+    from spel.transforms.acc_directives import find_directives
+    from spel.transforms.acc_sync import after_enter_data
+
+    lines = [
+        "subroutine s(n)",
+        "  integer :: tab(4)",
+        "  data tab /1, 2, 3, 4/",
+        "  associate(y => x)",
+        "  ! spel acc-locals: device storage of the local work arrays",
+        "  !$acc enter data create(&",
+        "  !$acc tab(:))",
+        "  ! spel acc-locals: initialized in the specification part",
+        "  !$acc enter data copyin(x(:))",
+        "  !$acc parallel loop",
+        "  do i = 1, n",
+        "  end do",
+        "end subroutine s",
+    ]
+    ds = find_directives(lines, 0, len(lines) - 1)
+    assert after_enter_data(lines, ds, 3) == 9          # after the block that follows the associate header
+    assert after_enter_data(lines, ds, 9) == 9          # no block before the kernel: unchanged
+
+
+def test_stale_updates_flags_a_push_after_a_kernel_write(tmp_path):
+    from types import SimpleNamespace
+
+    from spel.scripts.fortran_parser.tests.test_scope_walk import walk
+    from spel.transforms.acc_sync import stale_updates
+
+    src = (
+        "subroutine s(n, x, y, z)\n"
+        "  integer, intent(in) :: n\n"
+        "  real(r8), intent(inout) :: x(:), y(:), z(:)\n"
+        "  integer :: i\n"
+        "  !$acc parallel loop\n"
+        "  do i = 1, n\n"
+        "     x(i) = 1._r8\n"
+        "  end do\n"
+        "  y(:) = 2._r8\n"
+        "  !$acc update device(x, y)\n"
+        "  z(:) = 3._r8\n"
+        "  !$acc update self(z)\n"
+        "  !$acc update self(x)\n"
+        "end subroutine s\n"
+    )
+    rec = walk(src)
+    lines = src.split("\n")
+    lns = [i for i, l in enumerate(lines) if l.strip()]
+    sub = SimpleNamespace(id="m::s", record=rec, startline=lns[0], endline=lns[-1])
+    notes = [str(n) for n in stale_updates(sub, lines)]
+    assert any("update device(x)" in n and "stale push" in n for n in notes)
+    assert not any("update device(y)" in n for n in notes)          # y: host write, push is right
+    assert any("update self(z)" in n and "stale pull" in n for n in notes)
+    assert not any("update self(x)" in n for n in notes)            # x: written on the device, pull is right
+    # the fix drops x from the push and keeps y
+    from spel.transforms.acc_sync import fix_stale_pushes
+    assert fix_stale_pushes(sub, lines, stale_updates(sub, lines)) == 1
+    assert lines[9] == "  !$acc update device(y)"
+    # a round trip in between is consistent: pull after the kernel, then push
+    src2 = src.replace("  y(:) = 2._r8\n", "  !$acc update self(x)\n  y(:) = 2._r8\n")
+    rec2 = walk(src2); lines2 = src2.split("\n")
+    sub2 = SimpleNamespace(id="m::s", record=rec2, startline=lns[0], endline=lns[-1] + 1)
+    assert not any(n.kind == "push" for n in stale_updates(sub2, lines2))
+
+
+def test_pointer_association_is_not_a_write():
+    from types import SimpleNamespace
+
+    from spel.scripts.fortran_parser.tests.test_scope_walk import walk
+    from spel.transforms.acc_sync import stale_updates
+
+    src = (
+        "subroutine s(n, t)\n"
+        "  integer, intent(in) :: n\n"
+        "  type(tt), intent(inout) :: t\n"
+        "  real(r8), pointer :: p(:)\n"
+        "  integer :: i\n"
+        "  !$acc parallel loop\n"
+        "  do i = 1, n\n"
+        "     t%x(i) = 1._r8\n"
+        "  end do\n"
+        "  p => t%x\n"
+        "  !$acc update device(p)\n"
+        "end subroutine s\n"
+    )
+    rec = walk(src)
+    lines = src.split("\n")
+    lns = [i for i, l in enumerate(lines) if l.strip()]
+    sub = SimpleNamespace(id="m::s", record=rec, startline=lns[0], endline=lns[-1])
+    # the association is not a write: nothing to say about the push through p
+    assert stale_updates(sub, lines) == []
+
+
+def test_only_declared_module_scalars_have_a_device_copy(tmp_path):
+    # a module scalar without `!$acc declare` has no device copy: kernels take its host value, so
+    # acc-sync pushes nothing for it (DaylengthMod's host flag first_step, 2026-11-01)
+    from types import SimpleNamespace as NS
+
+    from spel.transforms.acc_sync import _Types
+
+    src = tmp_path / "flagsmod.F90"
+    src.write_text("module flagsmod\n  logical :: host_flag = .true.\n  logical :: dev_flag = .true.\n"
+                   "  !$acc declare create(dev_flag)\nend module flagsmod\n")
+    mod = NS(name="flagsmod", filepath=str(src), global_vars={
+        "host_flag": NS(type="logical", dim=0, declaration="flagsmod"),
+        "dev_flag": NS(type="logical", dim=0, declaration="flagsmod")})
+    types = _Types(NS(type_dict={}, module_dict={"flagsmod": mod}))
+    assert types.declared("dev_flag") and not types.declared("host_flag")
+    assert types.declared("unknown_name")  # not a known module variable: conservative
+
+
+def test_dedupe_drops_an_update_another_one_covers():
+    # an earlier run pushed do_eval_suppstat too (a module scalar with no device copy): the new
+    # plan's narrower push adds nothing next to it (EcosystemDynMod, 2026-11-01)
+    old = ["    !$acc update device(carbon_only, crop_supln, &",
+           "    !$acc&   do_eval_suppstat, nu_com_nfix) if_present"]
+    new = ["    !$acc update device(carbon_only, crop_supln, &",
+           "    !$acc&   nu_com_nfix) if_present"]
+    self_ = ["    !$acc update self(carbon_only) if_present if(elm_device_ready)"]
+    assert acc_sync.dedupe_sync_blocks(new + old + ["    call x()"]) == old + ["    call x()"]
+    # a different form (update self) or other clauses are not covered
+    assert acc_sync.dedupe_sync_blocks(self_ + old) == self_ + old

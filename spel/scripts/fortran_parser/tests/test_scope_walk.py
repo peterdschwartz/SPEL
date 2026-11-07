@@ -118,6 +118,30 @@ def test_data_statement():
     assert not rec.accesses(path="j", origin=Origin.LOCAL)
 
 
+def test_parameter_statement():
+    # F77-style PARAMETER statement after the declarations (lnd_import's vapor-pressure
+    # constants); `parameter(i) = 1` stays an assignment to an array named parameter
+    txt = """
+subroutine s(x)
+  implicit none
+  real(r8), intent(out) :: x
+  real(r8) :: a0, a1
+  integer :: parameter(2)
+  parameter (a0=6.1_r8    , a1=4.4e-01_r8 &
+       )
+  parameter(1) = 2
+  x = a0 + a1
+end subroutine s
+"""
+    rec = walk(txt)
+    assert rec.last_decl_ln == 6
+    assert "parameter" in rec.declarations["a0"].attrs and "parameter" in rec.declarations["a1"].attrs
+    assert "parameter" not in rec.declarations["parameter"].attrs
+    assert not rec.accesses(path="a0", status="w")
+    assert ("w", "parameter", 8) in acc(rec)
+    assert ("r", "a0", 9) in acc(rec)
+
+
 def test_format_statement_is_skipped():
     txt = """
 subroutine s(x)
@@ -736,3 +760,87 @@ end subroutine s
     assert {("r", "a", 8), ("r", "n", 8), ("w", "i", 8), ("w", "j", 8)} <= set(acc(rec, 8))
     assert ("w", "b", 9) in acc(rec, 9) and ("r", "b", 9) not in acc(rec, 9)
     assert ("w", "i", 9) in acc(rec, 9) and ("r", "n", 9) in acc(rec, 9)
+
+
+def test_inquiry_intrinsics_f2018():
+    # is_contiguous / rank (Fortran 2018) are intrinsics, not undeclared names (lnd2atmAvgMod)
+    txt = """
+subroutine s(a, ok, n)
+  implicit none
+  real(r8), intent(in) :: a(:)
+  logical, intent(out) :: ok
+  integer, intent(out) :: n
+  ok = is_contiguous(a)
+  n = rank(a)
+end subroutine s
+"""
+    rec = walk(txt)
+    assert ("w", "ok", 6) in acc(rec) and ("w", "n", 7) in acc(rec)
+    assert not rec.accesses(path="is_contiguous")
+
+
+SELF_ASSIGN = """
+subroutine s(x, i)
+  implicit none
+  real(r8), intent(inout) :: x(:)
+  integer, intent(in) :: i
+  x(i) = x(i)
+  x(i) = x(i) + 1.0_r8
+end subroutine s
+"""
+
+
+def test_self_assignment_is_a_write_only():
+    """edit_files leaves `lhs = lhs` where the right-hand side used an excluded module: the
+    walker records the write and no read, so the access status is `w`, not `rw`."""
+    rec = walk(SELF_ASSIGN)
+    assert [(s, p) for s, p, ln in acc(rec, 5) if p == "x"] == [("w", "x")]
+    assert sorted((s, p) for s, p, ln in acc(rec, 6) if p == "x") == [("r", "x"), ("w", "x")]
+
+
+INQUIRY = """
+subroutine s(x, y)
+  implicit none
+  real(r8), intent(inout) :: x(:,:), y(:)
+  integer :: i
+  do i = lbound(x, 1), ubound(x, 1)
+     x(i, 1) = size(y) + 1.0_r8
+  end do
+  if (allocated(y)) y(1) = 0._r8
+end subroutine s
+"""
+
+
+def test_inquiry_intrinsic_arguments_are_not_value_reads():
+    """lbound(x,1), size(y), allocated(y) read the descriptor: context "inquiry", which the access
+    maps leave out (the planner saw `x` read beside its write and called the loop carried)."""
+    from spel.scripts.record_access import AccessMapper
+    from spel.scripts.tests.test_record_access import StubSub
+
+    rec = walk(INQUIRY)
+    inq = [(a.path, a.ln, a.context) for a in rec.accesses() if a.context == "inquiry"]
+    assert sorted(inq) == [("x", 5, "inquiry"), ("x", 5, "inquiry"), ("y", 6, "inquiry"), ("y", 8, "inquiry")]
+    sub = StubSub(INQUIRY)
+    maps = AccessMapper({sub.id: sub}).maps(sub)
+    assert [rw.status for rw in maps.args["x"]] == ["w"]        # only the element write on line 6
+    assert [rw.status for rw in maps.args["y"]] == ["w"]        # only y(1) = 0
+
+
+def test_stand_in_assignment_is_recorded():
+    """`x = x` (edit_files' stand-in for a statement that used an excluded module) is a write
+    only, and the event says so."""
+    from spel.scripts.fortran_parser.scope_walk import AssignEvent
+
+    rec = walk(
+        """subroutine s(y)
+  implicit none
+  real, intent(inout) :: y(:)
+  integer :: n
+  n = n
+  y(1) = y(1)
+  y(2) = y(1) + 1.0
+end subroutine s"""
+    )
+    evs = [e for e in rec.events if isinstance(e, AssignEvent)]
+    assert [e.stand_in for e in evs] == [True, True, False]
+    assert [a.status for a in rec.accesses(path="n")] == ["w"]

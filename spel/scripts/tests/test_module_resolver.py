@@ -347,3 +347,51 @@ def test_fixture_module_resolution():
         except SemanticError as e:
             failures[sub.name] = str(e)
     assert failures == {}
+
+
+CPP_BLOCK_MOD = """module cppblk_mod
+  implicit none
+contains
+  subroutine a(x)
+    integer, intent(inout) :: x
+#ifdef _OPENACC
+    ! a block cpp removes: longer runs of removed lines become one line marker
+    x = 1
+    x = 2
+    x = 3
+    x = 4
+    x = 5
+    x = 6
+    x = 7
+    x = 8
+    x = 9
+#endif
+    x = x + 1
+    call b(x)
+  end subroutine a
+
+  subroutine b(y)
+    integer, intent(inout) :: y
+    y = y * 2
+  end subroutine b
+end module cppblk_mod
+"""
+
+
+def test_lines_after_removed_cpp_block_are_file_lines(tmp_path):
+    """Records, module lines and routine bounds use the file's 0-based lines after an #ifdef block."""
+    from spel.scripts.edit_files import process_for_unit_test
+    from spel.scripts.tests.test_ParseSubroutine import elm_src_pointing_to
+
+    (tmp_path / "cppblk_mod.F90").write_text(CPP_BLOCK_MOD)
+    text = CPP_BLOCK_MOD.split("\n")
+    with elm_src_pointing_to(tmp_path):  # no interfaces: the patched interface list stays empty
+        mod_dict, sub_dict = {}, {}
+        process_for_unit_test(case_dir=tmp_path, mod_dict=mod_dict, mods=[], required_mods=[],
+                              sub_dict=sub_dict, sub_name_list=["cppblk_mod::a"], overwrite=False)
+        rec = sub_dict["cppblk_mod::a"].walk_syntax_tree(ModuleScopes(mod_dict, sub_dict))
+    (call,) = [c for c in rec.calls if c.name == "b"]
+    assert text[call.ln].strip() == "call b(x)"
+    assert {text[a.ln].strip() for a in rec.accesses(path="x", status="w")} == {"x = x + 1"}
+    b = sub_dict["cppblk_mod::b"]
+    assert text[b.get_file_info(all=True).startln].strip().startswith("subroutine b")
