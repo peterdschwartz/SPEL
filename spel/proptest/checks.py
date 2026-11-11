@@ -163,8 +163,8 @@ class Relation(Check):
 
     Without `namelist`, both run in one call: the follow-up half of the sets gets a copy of the
     base half, changed by `follow` (input -> an expression of the base inputs). Without `follow`
-    the two halves are copies. `permute`: the follow-up sites get the base sites of the same
-    kind (pft, urban density, lake) in another order, each with its columns and patches;
+    the two halves are copies. `permute`: the follow-up gridcells get the base gridcells of the
+    same declaration in another order, each with everything under it;
     `follow%x(p)` is still the follow-up of base element p.
 
     With `namelist = { option = value }` the follow-up is the same example (changed by `follow`,

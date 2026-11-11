@@ -2,7 +2,7 @@
 
 A design aid for scenarios: it never feeds values into a test run. For every input of the
 inventory it pools the captured values over the steps and the active elements (optionally only
-the patches on landunits of some site kinds, `--sites urban`, and those selected by a patch-level
+the patches on landunits of some kinds, `--landunits urban`, and those selected by a patch-level
 Fortran expression, `--where "frac_veg_nosno(p) > 0"`; a coarser element counts when one of its
 patches is selected, through the reference's index fields), and writes
 
@@ -23,7 +23,8 @@ from typing import Any, Optional
 
 import numpy as np
 
-from spel.proptest.domain import INPUTS_FILE, SiteKind, landunit_types
+from spel.proptest.domain import INPUTS_FILE, landunit_types
+from spel.proptest.hierarchy import LandunitKind
 from spel.proptest.fexpr import Evaluator, ExprError, FArray, parse_expr
 from spel.proptest.inventory import LEVEL_NAMES, LEVELS, NC_DIM, Inventory, VarInfo
 from spel.proptest.paths import data_dir
@@ -103,12 +104,12 @@ class Reference:
         return self._cache[key]
 
 
-def site_mask(ref: Reference, steps: np.ndarray, sites: set[SiteKind]) -> np.ndarray:
-    """(step, patch): whether the patch's landunit is of one of these site kinds (its lun_pp%itype)."""
+def landunit_mask(ref: Reference, steps: np.ndarray, kinds: set[LandunitKind]) -> np.ndarray:
+    """(step, patch): whether the patch's landunit is of one of these kinds (its lun_pp%itype)."""
     for nc in ("veg_pp__landunit", "lun_pp__itype"):
         if not ref.has(nc):
-            raise ExprError(f"--sites: the reference has no {nc.replace('__', '%')}")
-    types = np.asarray(sorted({t for k in sites for t in landunit_types(k)}))
+            raise ExprError(f"--landunits: the reference has no {nc.replace('__', '%')}")
+    types = np.asarray(sorted({t for k in kinds for t in landunit_types(k)}))
     lun = ref.series("veg_pp__landunit", steps)
     ltype = ref.series("lun_pp__itype", steps)
     out = np.zeros(lun.shape, dtype=bool)
@@ -124,9 +125,9 @@ def element_masks(
     inv: Inventory,
     steps: np.ndarray,
     where: Optional[str],
-    sites: Optional[set[SiteKind]] = None,
+    landunits: Optional[set[LandunitKind]] = None,
 ) -> dict[str, np.ndarray]:
-    """Per level: (step, element) mask of active elements, on landunits of `sites` and selected by
+    """Per level: (step, element) mask of active elements, on landunits of these kinds and selected by
     `where` when given."""
 
     masks: dict[str, np.ndarray] = {}
@@ -147,10 +148,10 @@ def element_masks(
             masks[lev] = ref.series(name, steps) != 0
         else:
             masks[lev] = np.ones((len(steps), n), dtype=bool)
-    if sites:
-        masks["p"] &= site_mask(ref, steps, sites)
+    if landunits:
+        masks["p"] &= landunit_mask(ref, steps, landunits)
     if where is None:
-        return _coarse(ref, steps, masks) if sites else masks
+        return _coarse(ref, steps, masks) if landunits else masks
     node = parse_expr(where)
     sel = np.zeros_like(masks["p"])
     n_p = sel.shape[1]
@@ -320,15 +321,15 @@ class StatsResult:
     reference: Path
     # pft -> selected patches (over the steps)
     pfts: dict[int, int] = field(default_factory=dict)
-    sites: Optional[set[SiteKind]] = None
+    kinds: Optional[set[LandunitKind]] = None  # the landunit kinds the statistics cover (None: all)
     # lun_pp%itype -> selected landunits (over the steps)
     landunits: dict[int, int] = field(default_factory=dict)
 
     def selection(self) -> str:
         """What the statistics cover, for headers."""
         parts = []
-        if self.sites:
-            parts.append("sites " + ", ".join(sorted(k.value for k in self.sites)))
+        if self.kinds:
+            parts.append("landunits " + ", ".join(sorted(k.value for k in self.kinds)))
         if self.where:
             parts.append(f"where {self.where}")
         return "; ".join(parts)
@@ -340,7 +341,7 @@ def compute(
     where: Optional[str] = None,
     stride: int = 1,
     constants: Optional[dict[str, Any]] = None,
-    sites: Optional[set[SiteKind]] = None,
+    landunits: Optional[set[LandunitKind]] = None,
 ) -> StatsResult:
     """
     Computes statistics on the input and output space of the function of interest.
@@ -349,7 +350,7 @@ def compute(
     ref = Reference(reference / INPUTS_FILE)
     try:
         steps = np.arange(0, ref.nsteps, max(1, stride))
-        masks = element_masks(ref, inv, steps, where, sites)
+        masks = element_masks(ref, inv, steps, where, landunits)
         pft = ref.series("veg_pp__itype", steps) if ref.has("veg_pp__itype") else None
         consts = constants or {}
         ins = [
@@ -363,12 +364,12 @@ def compute(
         if pft is not None and pft.shape == masks["p"].shape:
             kinds, counts = np.unique(pft[masks["p"]], return_counts=True)
             pfts = {int(k): int(c) for k, c in zip(kinds, counts)}
-        landunits: dict[int, int] = {}
+        lun_counts: dict[int, int] = {}
         if ref.has("lun_pp__itype"):
             ltype = ref.series("lun_pp__itype", steps)
             if ltype.shape == masks["l"].shape:
                 kinds, counts = np.unique(ltype[masks["l"]], return_counts=True)
-                landunits = {int(k): int(c) for k, c in zip(kinds, counts)}
+                lun_counts = {int(k): int(c) for k, c in zip(kinds, counts)}
     finally:
         ref.close()
     outputs = []
@@ -393,8 +394,8 @@ def compute(
         where,
         reference,
         pfts,
-        set(sites or ()) or None,
-        landunits,
+        set(landunits or ()) or None,
+        lun_counts,
     )
 
 

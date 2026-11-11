@@ -17,7 +17,7 @@ so a minimal failing example has as many constant inputs as possible.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 import numpy as np
 
@@ -82,20 +82,53 @@ def drawn(rule: Rule) -> bool:
     return any(not KINDS[r.kind].constant for r in [rule, *rule.by_pft.values(), *(s for _, s in rule.by_level)])
 
 
-def draw_u(draw: Callable, name: str, rule: Rule, shape: tuple[int, ...], rng: np.random.Generator,
-           axis: Optional[int] = None) -> tuple[np.ndarray, int]:
-    """u for one input and its mode, the mode drawn by Hypothesis (`draw` = data.draw). axis: the
-    variable's subgrid axis (None: no subgrid dimension)."""
-    from hypothesis import strategies as st
+class Chooser(Protocol):
+    """Where the structured choices of an example come from: Hypothesis (a test run, so that it
+    can shrink them) or a seeded numpy generator (`Session.sample`)."""
 
+    def integer(self, lo: int, hi: int, label: str) -> int: ...
+
+    def real(self, label: str) -> float: ...  # u in [0, 1]
+
+
+class HypothesisChooser:
+    def __init__(self, draw: Callable):
+        self.draw = draw  # data.draw
+
+    def integer(self, lo: int, hi: int, label: str) -> int:
+        from hypothesis import strategies as st
+
+        return self.draw(st.integers(lo, hi), label=label)
+
+    def real(self, label: str) -> float:
+        from hypothesis import strategies as st
+
+        return self.draw(st.floats(0.0, 1.0), label=label)
+
+
+class RngChooser:
+    def __init__(self, rng: np.random.Generator):
+        self.rng = rng
+
+    def integer(self, lo: int, hi: int, label: str) -> int:
+        return int(self.rng.integers(lo, hi + 1))
+
+    def real(self, label: str) -> float:
+        return float(self.rng.random())
+
+
+def draw_u(choose: Chooser, name: str, rule: Rule, shape: tuple[int, ...], rng: np.random.Generator,
+           axis: Optional[int] = None) -> tuple[np.ndarray, int]:
+    """u for one input and its mode, the mode from `choose`. axis: the variable's subgrid axis
+    (None: no subgrid dimension)."""
     if not drawn(rule):
         return np.zeros(shape), 0
     if KINDS[rule.kind].relative or not shape:
-        return np.full(shape, draw(st.floats(0.0, 1.0), label=f"u[{name}]")), 0
+        return np.full(shape, choose.real(f"u[{name}]")), 0
     columns = axis is not None and len(shape) > 1
-    mode = draw(st.integers(0, 3 if columns else 2), label=f"mode[{name}]")
+    mode = choose.integer(0, 3 if columns else 2, f"mode[{name}]")
     if mode == 0:
-        return np.full(shape, draw(st.floats(0.0, 1.0), label=f"u[{name}]")), 0
+        return np.full(shape, choose.real(f"u[{name}]")), 0
     if mode == 1:
         return rng.random(shape), 1
     if mode == 3:
@@ -106,10 +139,8 @@ def draw_u(draw: Callable, name: str, rule: Rule, shape: tuple[int, ...], rng: n
     return np.where(rng.random(shape) < 0.5, edge, 1.0 - edge), 2
 
 
-def draw_seed(draw: Callable) -> np.random.Generator:
-    from hypothesis import strategies as st
-
-    return np.random.default_rng(draw(st.integers(0, 2**32 - 1), label="seed"))
+def draw_seed(choose: Chooser) -> int:
+    return choose.integer(0, 2**32 - 1, "seed")
 
 
 def describe_modes(modes: dict[str, int]) -> str:

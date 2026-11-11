@@ -5,13 +5,14 @@ rules from the `stats` rule file, and two checks every spec should start with (f
 identical copies). What needs a decision is left as `# TODO` lines: inputs the reference gives no
 rule for, and constants it lacks.
 
-The domain's sites follow the filters elm_drv passes the routines (`routine_sites`): urban
-filters (`urbanl`, ...) give urban sites, lake filters lake sites, any other filter (or none)
-vegetated sites; the complement of a filter the routine also takes (`nourbanl` next to
-`urbanl`) adds nothing. Vegetated sites take the pfts the reference has most of, urban sites the
-densities its active urban landunits have, and the statistics cover the same kinds of sites.
-Without vegetated sites the scenario runs over the kind's patch filter (`p in urbanp`), and an
-urban domain derives the canyon geometry the way ELM does (`URBAN_DERIVE`).
+The domain's landunit kinds follow the filters elm_drv passes the routines (`routine_landunits`):
+urban filters (`urbanl`, ...) give urban landunits, lake filters a lake, any other filter (or
+none) vegetation; the complement of a filter the routine also takes (`nourbanl` next to `urbanl`)
+adds nothing. Each kind gets a gridcell (`[[domain.gridcell]]`, two copies): vegetation one soil
+column with the pfts the reference has most of, a town the urban densities of the reference's
+active urban landunits, a lake. The statistics cover the same landunit kinds. Without vegetation
+the scenario runs over the kind's patch filter (`p in urbanp`), and an urban domain derives the
+canyon geometry the way ELM does (`URBAN_DERIVE`).
 """
 
 from __future__ import annotations
@@ -22,31 +23,33 @@ from typing import Any, Optional
 
 from spel.proptest import spec as specmod
 from spel.proptest import stats
+from spel.proptest import tomlw
 from spel.proptest.domain import (
     CONSTANTS_FILE,
     FILTER_COMPLEMENTS,
-    FILTER_SITES,
+    FILTER_KINDS,
     INPUTS_FILE,
-    SITE_PATCH_FILTER,
-    SiteKind,
-    UrbanDensity,
+    KIND_PATCH_FILTER,
+    DomainSpec,
     density_of,
     read_constants,
 )
+from spel.proptest.hierarchy import Gridcell, Lake, LandunitKind, Soil, Urban, UrbanDensity
 from spel.proptest.errors import SpecError
 from spel.proptest.fexpr import ExprError, designator, parse_expr
 from spel.proptest.inventory import Inventory
 
 MAX_PFTS = 3
 SCENARIO = "default"
-VEGETATED = {SiteKind.SOIL, SiteKind.CROP}
+VEGETATED = {LandunitKind.SOIL, LandunitKind.CROP}
+COPIES = 2
 DEFAULT_DENSITIES = [UrbanDensity.HD, UrbanDensity.MD]
 
 # The urban canyon geometry is not independent: UrbanParamsType::Init derives the displacement
 # height and roughness of the town from canyon_hwr and ht_roof (Macdonald 1998, Grimmond and Oke
 # 1999: alpha = 4.43, beta = 1, C_d = 1.2, vkc = 0.4, plan area index hwr/(hwr+1)), the wind height
 # in the canyon is half the roof height, and CanopyTemperatureMod puts the forcing heights of urban
-# patches above them. Drawn independently, about 30% of the drawn sites have ht_roof - z_d <= z_0
+# patches above them. Drawn independently, about 30% of the drawn landunits have ht_roof - z_d <= z_0
 # and UrbanFluxes takes logs of negative numbers. Written for the variables the routines read.
 _PLAN = "(lun_pp%canyon_hwr(l) / (lun_pp%canyon_hwr(l) + 1.0))"
 _ZD_H = "(1.0 - lun_pp%z_d_town(l) / lun_pp%ht_roof(l))"
@@ -77,8 +80,8 @@ URBAN_DERIVE = [
 ]
 
 
-def routine_sites(inv: Inventory) -> set[SiteKind]:
-    """The site kinds the routines work on, from the filters elm_drv passes them (module doc)."""
+def routine_landunits(inv: Inventory) -> set[LandunitKind]:
+    """The landunit kinds the routines work on, from the filters elm_drv passes them (module doc)."""
     members = set()
     for b in getattr(inv.unit_test, "driver_bindings", []) or []:
         if not any(b.callee == r for r in inv.routines):
@@ -89,11 +92,11 @@ def routine_sites(inv: Inventory) -> set[SiteKind]:
             continue
         if path and len(path) == 2 and path[0] == "filter":
             members.add(path[1].removeprefix("num_"))
-    kinds = {FILTER_SITES[m] for m in members if m in FILTER_SITES}
+    kinds = {FILTER_KINDS[m] for m in members if m in FILTER_KINDS}
     others = {
         m
         for m in members
-        if m not in FILTER_SITES and FILTER_COMPLEMENTS.get(m) not in members
+        if m not in FILTER_KINDS and FILTER_COMPLEMENTS.get(m) not in members
     }
     if others or not kinds:
         kinds |= VEGETATED
@@ -141,11 +144,11 @@ def write(
     stride: int = 1,
     constants: Optional[dict[str, Any]] = None,
     force: bool = False,
-    sites: Optional[set[SiteKind]] = None,
+    landunits: Optional[set[LandunitKind]] = None,
 ) -> tuple[Path, list[str]]:
     """Write the starter spec to `out`; returns it and what is left to do (one line each).
     constants: options and constants given on the command line (`--namelist NAME=VALUE`).
-    sites: the site kinds of the domain (default: `routine_sites`)."""
+    landunits: the landunit kinds of the domain (default: `routine_landunits`)."""
     out = Path(out).resolve()
     if out.exists() and not force:
         raise SpecError(f"{out} exists (use --force to replace it)")
@@ -178,22 +181,22 @@ def write(
         consts
     )  # the variables that matter under these namelist options
 
-    kinds = set(sites) if sites else routine_sites(inv)
+    kinds = set(landunits) if landunits else routine_landunits(inv)
     vegetated = bool(kinds & VEGETATED)
     rule_file = None
     pfts: list[int] = []
     densities: list[UrbanDensity] = []
     why: dict[str, str] = {}
     if reference is not None:
-        # the statistics of the kinds of sites the domain has
-        restrict = None if kinds == set(SiteKind) else kinds
+        # the statistics of the landunit kinds the domain has
+        restrict = None if kinds == set(LandunitKind) else kinds
         res = stats.compute(
             live,
             reference,
             where=where,
             stride=stride,
             constants=consts,
-            sites=restrict,
+            landunits=restrict,
         )
         rule_file, _ = stats.write(live, res, case_dir)
         pfts = [
@@ -222,46 +225,31 @@ def write(
         "[settings]",
         "max_examples = 50",
         "",
-        "[domain]",
     ]
     takes = ", ".join(sorted(k.value for k in kinds))
-    lines.append(
-        f"# sites: {takes} ({'--sites' if sites else 'from the filters the routines take'})"
-    )
-    if vegetated and pfts:
-        lines.append(
-            f"pfts = {sorted(pfts)}          # the reference's most common (of {len(res.pfts)}); one site per pft and copy"
-        )
-    elif vegetated:
-        lines.append("pfts = [1]          # TODO: the pfts to test")
-        todo.append("[domain] pfts: choose the pfts")
-    if SiteKind.URBAN in kinds:
-        if densities:
-            lines.append(
-                f"urban = {_toml([d.value for d in densities])}   # the densities of the reference's active urban "
-                "landunits; one site (five columns) per density and copy"
-            )
+    gridcells: list[Gridcell] = []
+    notes: list[str] = []
+    if vegetated:
+        if pfts:
+            notes.append(f"vegetation: one soil column with the reference's {len(pfts)} most common pfts")
         else:
-            lines.append(
-                f"urban = {_toml([d.value for d in DEFAULT_DENSITIES])}   # TODO: the densities to test "
-                "(the reference has no active urban landunit)"
-            )
-            todo.append("[domain] urban: choose the densities")
-    if SiteKind.LAKE in kinds:
-        lines.append("lake = true")
-    lines += [
-        "per_pft = 2                # copies of every site per set",
-        "nsets = 2                  # relations use the two halves of the sets",
-    ]
-    if reference is not None:
-        ref_text = (
-            reference.name
-            if reference.parent == Path(case_dir).parent / "input-data"
-            else str(reference)
-        )
-        lines.append(
-            f'reference = "{ref_text}"   # constants, parameters and level extents'
-        )
+            pfts = [1]
+            notes.append("vegetation: TODO choose the pfts")
+            todo.append("[domain] the vegetated gridcell's pfts: choose them")
+        gridcells.append(Gridcell.of(Soil(*sorted(pfts)), copies=COPIES, name="vegetation"))
+    if LandunitKind.URBAN in kinds:
+        if not densities:
+            densities = DEFAULT_DENSITIES
+            todo.append("[domain] the town's urban densities: choose them (the reference has no active urban landunit)")
+        gridcells.append(Gridcell.of(*(Urban(d) for d in densities), copies=COPIES, name="town"))
+        notes.append("town: the densities of the reference's active urban landunits, five columns each")
+    if LandunitKind.LAKE in kinds:
+        gridcells.append(Gridcell.of(Lake(), copies=COPIES, name="lake"))
+    dom = DomainSpec(gridcells, nsets=2, reference=reference)
+    head = [f"landunit kinds: {takes} ({'--landunits' if landunits else 'from the filters the routines take'})",
+            "nsets = 2: relations use the two halves of the sets", *notes]
+    lines.append(tomlw.dumps({"domain": dom.to_table(Path(case_dir).parent / "input-data")},
+                             {("domain",): "\n".join(head)}).rstrip("\n"))
 
     # the namelist options: what the spec sets, and what the routines test with the reference's values
     options = live.options()
@@ -305,9 +293,9 @@ def write(
     if (
         not vegetated
         and len(kinds) == 1
-        and inv.filters.get(SITE_PATCH_FILTER[next(iter(kinds))]) == 1
+        and inv.filters.get(KIND_PATCH_FILTER[next(iter(kinds))]) == 1
     ):
-        over = f"p in {SITE_PATCH_FILTER[next(iter(kinds))]}"
+        over = f"p in {KIND_PATCH_FILTER[next(iter(kinds))]}"
     lines += ["", f"[scenario.{SCENARIO}]", f'over = "{over}"']
     if rule_file is not None:
         rel = os.path.relpath(rule_file, out.parent)
@@ -328,7 +316,7 @@ def write(
         "# Inputs that must be consistent with others, as Fortran expressions:",
         '# "top_as%thbot" = "top_as%tbot(t)"',
     ]
-    if SiteKind.URBAN in kinds:
+    if LandunitKind.URBAN in kinds:
         derived = [
             (n, e)
             for n, e in URBAN_DERIVE

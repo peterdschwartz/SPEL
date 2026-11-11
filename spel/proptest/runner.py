@@ -15,13 +15,12 @@ One Hypothesis example = one call of the routine on the whole synthetic domain:
    shrinks. The shrunk example is saved (`Session.save_failure`) and can be run again without
    Hypothesis (`replay`).
 
-The domain (domain.Layout) is made of sites: gridcell, topounit and landunit element k is site k,
-and the column and patch levels have one element per column (several per urban site). The element
-variable of the level a check runs over is the element; those of coarser levels are its
-ancestors (the layout's, which the subgrid index fields `veg_pp%column`, ... hold too). A finer
-level's variable is bound only when it is the same element (a patch's column; a landunit's
-column only when every site has one column). The halves of a relation are the first and second
-half of the sets at every level.
+The domain (hierarchy.Layout) is ELM's hierarchy of declared gridcells: every level has its own
+element count. The element variable of the level a check runs over is the element; those of
+coarser levels are its ancestors (the layout's, which the subgrid index fields `veg_pp%column`,
+... hold too). A finer level's variable is bound only when it is the same element (counts are
+equal: one child each). The halves of a relation are the first and second half of the sets at
+every level; `permute` exchanges whole gridcells of the same declaration.
 
 `Session` talks to the routine through a backend: `get(names)`, `run(inputs, outputs, trap)`,
 `stop()`. The default is a `worker.Worker` on the case's library; tests pass their own.
@@ -37,7 +36,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import numpy as np
 
@@ -54,6 +53,9 @@ from spel.proptest.rules import Rule
 from spel.proptest.spec import (ELEMENT_VARS, INPUT_KINDS, Property, Relation, Scenario, Spec,  # noqa: F401
                                 dormant_rules, missing_rules)
 from spel.proptest.worker import FortranAbort, Worker
+
+if TYPE_CHECKING:
+    from spel.proptest.results import BuiltDomain, Result, Verdict
 
 STATE_KINDS = ("input", "inout", "output")
 FAILURES_DIR = "failures"
@@ -173,6 +175,7 @@ class Session:
         self._siblings: dict[tuple, "Session"] = {}
         self.exprs: dict[tuple, Expr] = {}  # expressions a check builds for this configuration
         self._static: dict[str, Optional[FArray]] = {}
+        self._built = None  # results.BuiltDomain, on first use
         self._canon: dict[tuple[str, ...], Optional[str]] = {}
         self._levels: dict[tuple[str, str], tuple] = {}
         self._subspaces: dict[tuple[str, str], dict] = {}
@@ -184,10 +187,7 @@ class Session:
         return self.backend
 
     def _domain_key(self) -> str:
-        d = self.domain_spec
-        text = json.dumps({"pfts": d.pfts, "per_pft": d.per_pft, "nsets": d.nsets, "landunit": d.landunit.value,
-                           "urban": [u.value for u in d.urban], "lake": d.lake, "snow_layers": d.snow_layers, "reference": str(d.reference), "constants": d.constants,
-                           "time": d.time, "dims": d.dims, "init": d.init}, sort_keys=True, default=str)
+        text = json.dumps(self.domain_spec.to_table(), sort_keys=True, default=str)
         return hashlib.sha1(text.encode()).hexdigest()[:10]
 
     @property
@@ -413,10 +413,9 @@ class Session:
         """Elements of a level in one half of the sets (the base half of a relation)."""
         return self.layout.count(level) // 2
 
-    def draw_example(self, scenario: Scenario, draw: Callable) -> Example:
-        from hypothesis import strategies as st
-
-        seed = draw(st.integers(0, 2**32 - 1), label="seed")
+    def draw_example(self, scenario: Scenario, choose: "strat.Chooser") -> Example:
+        """An example drawn as a test run draws it: a seed, then per input a mode (and a constant u)."""
+        seed = strat.draw_seed(choose)
         rng = np.random.default_rng(seed)
         u, modes = {}, {}
         for name in sorted(scenario.inputs):
@@ -424,10 +423,15 @@ class Session:
             if name not in self.domain.extents:
                 continue
             shape, _ = self.rule_shape(name, rule)
-            u[name], modes[name] = strat.draw_u(draw, name, rule, shape, rng, self.inv.vars[name].subgrid_axis)
+            u[name], modes[name] = strat.draw_u(choose, name, rule, shape, rng, self.inv.vars[name].subgrid_axis)
         ex = self.inputs_at(scenario, u)
         ex.modes, ex.seed = modes, seed
         return ex
+
+    def sample(self, scenario: Scenario | str, seed: int = 0) -> Example:
+        """An example drawn like a test run's (the same modes), from `seed` instead of Hypothesis."""
+        scen = self.spec.scenarios[scenario] if isinstance(scenario, str) else scenario
+        return self.draw_example(scen, strat.RngChooser(np.random.default_rng(seed)))
 
     def _farrays(self, inputs: dict[str, np.ndarray]) -> dict[str, FArray]:
         return {n: FArray(a, self.lbounds(n) if n in self.domain.extents else (1,) * a.ndim, n)
@@ -531,11 +535,11 @@ class Session:
         return out
 
     def permute_follow(self, ex: Example) -> None:
-        """Reorder the follow-up sites among those of the same kind (pft, urban density, lake;
-        from the example's seed), each with its columns and patches: follow-up site k then holds
-        what site `permutation[k]` held. Recorded in `ex.extra`."""
+        """Reorder the follow-up gridcells among those of the same declaration (from the
+        example's seed), each with everything under it: follow-up gridcell k then holds what
+        gridcell `permutation[k]` held. Recorded in `ex.extra`."""
         half = self.half_count("g")
-        labels = [s.label for s in self.layout.sites[:half]]
+        labels = [g.label for g in self.layout.levels["g"].decl[:half]]
         rng = np.random.default_rng(ex.seed + 1)
         perm = np.arange(half)
         for label in sorted(set(labels)):
@@ -599,7 +603,7 @@ class Session:
         return res
 
     def check_example(self, scenario: Scenario, check: Check, draw: Callable) -> None:
-        ex = check.prepare(self, scenario, self.draw_example(scenario, draw))
+        ex = check.prepare(self, scenario, self.draw_example(scenario, strat.HypothesisChooser(draw)))
         self.judge(scenario, check, ex)
 
     def judge(self, scenario: Scenario, check: Check, ex: Example, hypothesis: bool = True) -> None:
@@ -616,6 +620,44 @@ class Session:
             note(f"input modes: {strat.describe_modes(ex.modes)}")
         elif not mask.any():
             raise SpecError(f"{check.name!r}: no element of the example passes `over` and `assume`")
+        verdict, ctx = self._evaluate(scenario, check, ex, elems, mask, over[0])
+        if verdict.aborted:
+            msg = f"{check.name}: the routine aborted\n{verdict.aborted}"
+            self.last_failure = Failure(scenario.name, check.name, ex, msg)
+            raise PropertyFailure(msg)
+        bad = np.flatnonzero(mask & ~verdict.ok)
+        if bad.size:
+            text, node, ev, local = ctx
+            msg = self.report(check, text, node, ev, local, elems, bad, ex, mask, over[0])
+            self.last_failure = Failure(scenario.name, check.name, ex, msg, int(elems[bad[0]]))
+            raise PropertyFailure(msg)
+
+    def evaluate(self, scenario: Scenario, check: Check, ex: Example) -> "Verdict":
+        """The check on a prepared example, per element, without raising (results.Verdict)."""
+        over = check.over or (scenario.level, scenario.filter)
+        elems = check.elements(self, ex, self.elements(over), over[0])
+        mask = check.mask(self, scenario, ex, elems, over[0])
+        verdict, ctx = self._evaluate(scenario, check, ex, elems, mask, over[0])
+        if ctx is not None:
+            text, node, ev, local = ctx
+            for u in uses(node):
+                if u.path[0] in ELEMENT_VARS or (u.applied and len(u.path) == 1 and self.canonical(tuple(u.path)) is None):
+                    continue
+                head = u.path[0] if u.path[0] in (*check.names, INPUT) else None
+                name = self.canonical(tuple(u.path[1:] if head else u.path))
+                label = (f"{head}%" if head else "") + (name or "%".join(u.path[1:] if head else u.path))
+                if label in verdict.values:
+                    continue
+                try:
+                    verdict.values[label] = np.asarray(ev(_use_node(node, u), local, len(elems)))
+                except ExprError:
+                    continue
+        return verdict
+
+    def _evaluate(self, scenario: Scenario, check: Check, ex: Example, elems: np.ndarray, mask: np.ndarray,
+                  level: str) -> tuple["Verdict", Optional[tuple]]:
+        from spel.proptest.results import Verdict
+
         judged = check.expr_for(self, scenario)
         text, node = judged.text, judged.node
         outputs = self.needed([judged, *scenario.assume], (*check.names, INPUT))
@@ -624,21 +666,34 @@ class Session:
             spaces = check.namespaces(self, scenario, ex, arrays)
             spaces[INPUT] = self._inputs_namespace(ex)
         except FortranAbort as exc:
-            msg = f"{check.name}: the routine aborted\n{exc}"
-            self.last_failure = Failure(scenario.name, check.name, ex, msg)
-            raise PropertyFailure(msg) from None
-        ev = self.evaluator(arrays, self.context_functions(scenario, ex, over[0]))
-        local = self.locals_for(elems, over[0])
+            return Verdict(check.name, level, elems, mask, None, aborted=str(exc)), None
+        ev = self.evaluator(arrays, self.context_functions(scenario, ex, level))
+        local = self.locals_for(elems, level)
         local.update(spaces)
         try:
             ok = _per_element(ev(node, local, len(elems)), elems.shape, f"{check.name!r}: {text!r}")
         except ExprError as exc:
             raise SpecError(f"{check.name!r}: {text!r}: {exc}") from None
-        bad = np.flatnonzero(mask & ~ok)
-        if bad.size:
-            msg = self.report(check, text, node, ev, local, elems, bad, ex, mask, over[0])
-            self.last_failure = Failure(scenario.name, check.name, ex, msg, int(elems[bad[0]]))
-            raise PropertyFailure(msg)
+        return Verdict(check.name, level, elems, mask, ok), (text, node, ev, local)
+
+    def execute(self, scenario: Scenario | str, ex: Example, outputs: str | list[str] = "all") -> "Result":
+        """Run an example and keep its inputs and the state after it (results.Result). outputs:
+        "all" (every output and inout live here) or names."""
+        from spel.proptest.results import Result
+
+        scen = self.spec.scenarios[scenario] if isinstance(scenario, str) else scenario
+        names = self.live_outputs() if outputs == "all" else [self.inv.canonical(tuple(n.split("%"))) or n
+                                                              for n in outputs]
+        state = self.compute(scen, ex, list(names))
+        return Result(self, scen, ex, self.arrays(ex, state))
+
+    def built(self) -> "BuiltDomain":
+        """The domain as the case built it at init, with `check()` against the declaration."""
+        from spel.proptest.results import built
+
+        if self._built is None:
+            self._built = built(self)
+        return self._built
 
     def half(self, arrays: dict[str, Any], which: int, permutation: Optional[list[int]] = None) -> Namespace:
         """`base%` (which = 0) or `follow%` (1): the state restricted to that half of the sets.
@@ -697,37 +752,35 @@ class Session:
             k = int(k)
             if not 1 <= k <= len(res["inputs"]):
                 raise ExprError(f"active_dir: direction {k} of {len(res['inputs'])}")
-            coord = np.zeros(len(self.layout.sites))  # per site: subspace steps move a site as a whole
+            coord = np.zeros(self.layout.count("g"))  # per gridcell: subspace steps move a gridcell as a whole
             for name, w in zip(res["inputs"], np.asarray(res["eigenvectors"])[:, k - 1]):
                 if name not in ex.u:
                     raise ExprError(f"active_dir: {name} is not a ruled input of this scenario any more")
                 var = self.inv.vars[name]
                 u = np.asarray(ex.u[name], dtype=float)
-                # a layered input moved as a whole (its mean u over the site's elements); one
+                # a layered input moved as a whole (its mean u over the gridcell's elements); one
                 # without a subgrid dimension is the same for every element
-                u = u.mean() if var.subgrid_axis is None else self.site_mean(var.level, u, var.subgrid_axis)
+                u = u.mean() if var.subgrid_axis is None else self.gridcell_mean(var.level, u, var.subgrid_axis)
                 coord += w * (2.0 * u - 1.0)
-            return coord[self.layout.site_of(level)[np.asarray(p) - 1]]
+            return coord[self.layout.gridcell_of(level)[np.asarray(p) - 1]]
 
         return {"active_dir": active_dir}
 
     # -- reports
-    def site_mean(self, level: str, a: np.ndarray, axis: int) -> np.ndarray:
-        """The mean of a per-element array over each site's elements of `level` (and every other
-        dimension): one value per site."""
+    def gridcell_mean(self, level: str, a: np.ndarray, axis: int) -> np.ndarray:
+        """The mean of a per-element array over each gridcell's elements of `level` (and every
+        other dimension): one value per gridcell."""
         t = np.moveaxis(np.asarray(a, dtype=float), axis, 0).reshape(self.layout.count(level), -1).mean(axis=1)
-        site = self.layout.site_of(level)
-        return np.bincount(site, weights=t, minlength=len(self.layout.sites)) / np.bincount(
-            site, minlength=len(self.layout.sites))
+        g = self.layout.gridcell_of(level)
+        n = self.layout.count("g")
+        return np.bincount(g, weights=t, minlength=n) / np.bincount(g, minlength=n)
 
     def rows_of(self, level: str, k: int, other: str) -> np.ndarray:
         """0-based rows of level `other` that belong to element k (Fortran) of `level`: its
         ancestor, itself, or all its descendants (the columns of an urban landunit)."""
-        if LEVELS.index(other) < LEVELS.index(level):
+        if LEVELS.index(other) <= LEVELS.index(level):
             return np.asarray([self.layout.parent(level, other)[k - 1] - 1])
-        if self.layout.one_to_one(level, other):
-            return np.asarray([k - 1])
-        return np.arange(self.layout.first_child(level, other)[k - 1] - 1, self.layout.last_child(level, other)[k - 1])
+        return self.layout.descendants(level, k, other)
 
     def elements_at(self, level: str, elems: np.ndarray, other: str) -> np.ndarray:
         """The elements (Fortran indices, sorted, unique) of level `other` that belong to the
@@ -952,7 +1005,12 @@ class Session:
     def preflight(self, scenario: Scenario, checks: Optional[list[Check]] = None) -> None:
         """Refuse a scenario that would run on a silently defaulted input. checks: the ones that
         will run (default: all of the scenario's)."""
-        missing = missing_rules(scenario, self.inv, self.domain.constants)
+        pinned = self.domain.pinned
+        ruled = sorted(n for n in [*scenario.inputs, *(v for v, _ in scenario.derive)] if n in pinned)
+        if ruled:
+            raise SpecError(f"[scenario.{scenario.name}]: {', '.join(ruled)} are fixed by the domain (the declared "
+                            "topounit elevations decide downhill_ti); remove their rules")
+        missing = [n for n in missing_rules(scenario, self.inv, self.domain.constants) if n not in pinned]
         if missing:
             raise SpecError(f"[scenario.{scenario.name}]: inputs without a rule (add them, or `extends` the "
                             f"stats rule file): {', '.join(missing)}")

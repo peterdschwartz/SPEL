@@ -91,11 +91,16 @@ def inventory(case_dir: Path, extra: Optional[list[VarInfo]] = None) -> Inventor
     )
 
 
+def vegetated(*pfts: int, copies: int = 1) -> list[dict]:
+    """[[domain.gridcell]] tables: one gridcell per pft, a soil column with that one pft."""
+    return [{"name": f"pft {p}", "copies": copies, "landunits": [{"kind": "soil", "patches": [p]}]} for p in pfts]
+
+
 def spec_data(case_dir: Path, **tables) -> dict:
     data = {
         "case": {"dir": str(case_dir)},
         "settings": {"max_examples": 25, "database": None},
-        "domain": {"pfts": [1, 13], "per_pft": 2, "nsets": 2},
+        "domain": {"gridcell": vegetated(1, 13, copies=2), "nsets": 2},
         "scenario": {
             "s": {
                 "inputs": {

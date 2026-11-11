@@ -50,8 +50,8 @@ SPEL's parser and evaluated with numpy for all elements at once.
 - The element variable of the level a check runs over (`p` for `over = "p"`) is the element.
   `g`, `t`, `l`, `c` are its gridcell, topounit, landunit and column. So `t_grnd(c)` and
   `t_veg(p)` can be used together. A finer level's variable is defined only when it is the same
-  element: over `l`, `c` and `p` exist only if every site has one column (not with urban sites,
-  whose landunit has five).
+  element: over `l`, `c` exists only if every landunit has one column (each level has as many
+  elements).
 - `x(p)` is one value per element, `x(p, :)` all layers of each element, `x(p, 1:nlevsoi)` a
   section. A whole array must be subscripted.
 - Operators are Fortran's (`.and.`, `.not.`, `==`, `**`, integer division truncates).
@@ -96,33 +96,62 @@ Passed to Hypothesis: `max_examples` (default 100), `seed`, and any other settin
 
 ## `[domain]`
 
-The routine runs on a synthetic subgrid domain made of sites. A site is one gridcell with one
-topounit and one landunit:
+The routine runs on a synthetic domain with ELM's subgrid hierarchy: gridcells, topounits,
+landunits, columns and patches, each with a weight in its parent. Gridcells are declared one by
+one (`[[domain.gridcell]]`), each `copies` times, and the whole set is repeated `nsets` times
+(`hierarchy.py`; the Python API builds the same tables, see [Python API](#python-api)).
 
-| Site | Landunit (`lun_pp%itype`) | Columns (`col_pp%itype`) | Patches |
+```toml
+[domain]
+nsets = 2
+reference = "cf_val"
+
+[[domain.gridcell]]
+name = "mixed"                       # reports, queries; `permute` exchanges gridcells of one name
+copies = 2
+landunits = [                        # one topounit
+  { kind = "soil", weight = 0.7, patches = [{ pft = 1, weight = 0.6 }, 13] },
+  { kind = "urban", density = "md", weight = 0.2 },
+  { kind = "lake" },
+]
+
+[[domain.gridcell]]
+name = "hillslope"
+topounits = [                        # several topounits
+  { weight = 0.5, elevation = 300.0, landunits = [{ kind = "soil", patches = [1, 13] }] },
+  { weight = 0.5, elevation = 150.0, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.0, elevation = 50.0, landunits = [{ kind = "soil", patches = [1] }] },   # inactive
+]
+```
+
+| Landunit | `lun_pp%itype` | Columns (`col_pp%itype`) | Patches |
 |---|---|---|---|
-| vegetated, one per pft in `pfts` | `istsoil`, or `istcrop` with `landunit = "crop"` | one: 1, or `istcrop*100 + pft` | one of the pft |
-| urban, one per density in `urban` | `isturb_tbd`, `isturb_hd`, `isturb_md` (`urbpoi`, `ifspecial`) | five: roof, sunwall, shadewall, impervious road, pervious road (71-75) | one bare (`noveg`) per column |
-| lake, with `lake = true` | `istdlak` (`lakpoi`, `ifspecial`) | one: `istdlak` (`is_lake`) | one bare |
+| `{ kind = "soil", patches = [...] }` | `istsoil` | one soil column (1), as ELM's natural vegetation | one per pft (`pft` or `{ pft, weight }`) |
+| `{ kind = "soil", columns = [{ patches = [...], weight }] }` | `istsoil` | several soil columns | per column |
+| `{ kind = "crop", cfts = [...] }` | `istcrop` | one per CFT (`istcrop*100 + cft`); a CFT's weight is its column's | one each |
+| `{ kind = "urban", density = "md" }` (`roof`, `road_perv`: 0.5) | `isturb_tbd/hd/md` (`urbpoi`, `ifspecial`) | roof, sunwall, shadewall, impervious and pervious road (71-75), `set_landunit_urban`'s weights for `roof`/`road_perv` | one bare (`noveg`) each |
+| `{ kind = "lake" }` | `istdlak` (`lakpoi`, `ifspecial`) | one (`istdlak`, `is_lake`) | one bare |
 
-Within a set the sites come in that order, each `per_pft` times; columns and patches follow
-their site. So the gridcell, topounit and landunit levels have one element per site and the
-column and patch levels one per column, and an urban site's elements are landunit `l` and
-columns `coli(l):colf(l)`. The filters come from `setFilters` as in ELM (`urbanl`, `urbanc`,
-`urbanp`, `nourbanl`, `lakec`, `nolakeurbanp`, `hydrologyc`: soil, crop and pervious-road
-columns, ...). Urban column weights (`col_pp%wtlunit`) are `set_landunit_urban`'s for
-`wtlunit_roof = 0.5` and `wtroad_perv = 0.5` (`domain.URBAN_WEIGHT_GEOMETRY`): topology is fixed
-when the domain is built, while the geometry inputs themselves (`lun_pp%wtlunit_roof`, ...) are
-drawn like any input. `spel proptest show SPEC` prints the sites and the element counts.
+- **Weights.** A missing weight shares what the given ones leave; the children of every element
+  must sum to 1. `wtgcell`, `wttopounit`, `wtlunit`, `wtcol` are the products up the tree.
+- **Activity.** A topounit with weight 0 is inactive, and so is everything under it, as are
+  elements with weight 0 (subgridWeightsMod without its special cases). `setFilters` skips them.
+- **Layout.** Depth first, every element's children contiguous, as ELM lays out a clump; set k of
+  every level is a contiguous range. Element counts differ by level.
+- **Topounits.** `top_pp%topo_grc_ind` is the topounit's number within its gridcell;
+  `max_topounits` and `has_topounit` are decided by the declaration (setting them is an error).
+  With declared `elevation`s, `top_pp%downhill_ti` follows `set_topounit`'s algorithm (including
+  its quirk: the lowest topounit keeps the previous `dn_index`) and `top_pp%elevation` is pinned
+  to them: a scenario cannot rule it.
+- **Index fields** (`*_pp%gridcell/topounit/landunit/column`, `topi/topf`, `lndi/lndf`, `coli/colf`,
+  `pfti/pftf`, `ntopounits` ... `npfts`, `grc_pp/top_pp%landunit_indices`) come from the layout;
+  `spel proptest show SPEC` prints the gridcells and the element counts, and
+  `Session.built().check()` compares what the case built with the declaration.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `pfts` | `[]` | vegetated sites: the pfts to test |
-| `urban` | `[]` | urban sites: densities, of `"tbd"`, `"hd"`, `"md"` |
-| `lake` | `false` | a lake site |
-| `per_pft` | 1 | copies of every site (pft, urban density, lake) per set |
-| `nsets` | 1 | copies of that; relations need an even number (base and follow-up halves) |
-| `landunit` | `"soil"` | the vegetated sites' landunit: `"soil"` or `"crop"` |
+| `gridcell` | required | the `[[domain.gridcell]]` tables: `name`, `copies` (1), and `landunits` (one topounit) or `topounits` |
+| `nsets` | 1 | copies of the declared gridcells; relations need an even number (base and follow-up halves) |
 | `snow_layers` | 0 | `col_pp%snl = -snow_layers` |
 | `reference` | none | a capture (name under `unit-tests/input-data`, or a directory): constants, parameters and level extents come from it |
 | `constants` | `{}` | scalar constants the reference lacks or should not decide; namelist options go in [`[namelist]`](#namelist) |
@@ -306,8 +335,8 @@ a copy, changed by `follow`: input = an expression of the base inputs. One call 
 
 - Without `follow` the halves are copies. `same(follow%x(p), base%x(p))` then checks that a
   result does not depend on where the element sits.
-- `permute = true` also reorders the follow-up sites among those of the same kind (pft, urban
-  density, lake), each with its columns and patches.
+- `permute = true` also reorders the follow-up gridcells among those of the same declaration,
+  each with everything under it.
   `follow%x(p)` is still the follow-up of base element `p`. This finds a result that depends on
   a neighbouring element, which identical halves hide.
 - A variable without a subgrid dimension is shared by both halves and cannot be in `follow`.
@@ -359,9 +388,9 @@ regime one capture covers; `ACC = "MULTICORE"` against `OFF` as a race test; two
 
 | Command | Does |
 |---|---|
-| `spel proptest init CASE [--reference REF] [--where EXPR] [--sites KIND...] [--namelist N=V] [-o FILE]` | starter spec with a `[namelist]` table and `# TODO` lines. The domain's sites come from the filters elm_drv passes the routines (`urbanl`... -> urban sites, `lakec`... -> a lake site, any other filter or none -> vegetated sites; `nourbanl` next to `urbanl` adds nothing), or from `--sites`: pfts and urban densities from the reference's selected patches and active urban landunits. A domain of one non-vegetated kind runs over its patch filter (`p in urbanp`); an urban one derives the canyon geometry as ELM does (`scaffold.URBAN_DERIVE`) |
+| `spel proptest init CASE [--reference REF] [--where EXPR] [--landunits KIND...] [--namelist N=V] [-o FILE]` | starter spec with a `[namelist]` table and `# TODO` lines. The domain's landunit kinds come from the filters elm_drv passes the routines (`urbanl`... -> urban, `lakec`... -> lake, any other filter or none -> vegetation; `nourbanl` next to `urbanl` adds nothing), or from `--landunits`; one gridcell per kind, two copies: a soil column with the reference's most common pfts, a town with the densities of its active urban landunits, a lake. A domain of one non-vegetated kind runs over its patch filter (`p in urbanp`); an urban one derives the canyon geometry as ELM does (`scaffold.URBAN_DERIVE`) |
 | `spel proptest build CASE [--fc FC] [--acc ACC] [--dbg]` | the shim and the library (also done by the others when sources changed) |
-| `spel proptest stats CASE --reference REF [--sites KIND...] [--where EXPR] [--stride N] [--namelist N=V]` | rule file and report from a capture, for the inputs read under those options; `--sites soil crop urban lake` keeps the patches on landunits of those kinds (and their coarser elements) |
+| `spel proptest stats CASE --reference REF [--landunits KIND...] [--where EXPR] [--stride N] [--namelist N=V]` | rule file and report from a capture, for the inputs read under those options; `--landunits soil crop urban lake` keeps the patches on landunits of those kinds (and their coarser elements) |
 | `spel proptest show SPEC\|CASE [--kind KIND]` | inventory; per scenario its namelist options and where each value comes from, the variables they leave unused, dormant rules, inputs without a rule; defaults in use |
 | `spel proptest probe SPEC [-s SCENARIO] [-n N]` | runs a few examples: outputs never written, variables never changed, aborts |
 | `spel proptest run SPEC [-s SCENARIO] [-k CHECK] [-n N] [--seed N] [--json F] [--junit F]` | the checks |
@@ -386,13 +415,47 @@ A failing run prints the element, the value of every name the expression uses, a
 inputs at that element. If the routine stops (`endrun`, `stop`, a segfault), that is the failure,
 with the end of its output.
 
+## Python API
+
+`spel.proptest.api` builds the same spec in Python and writes it as TOML; every piece goes
+through the reader's checks when it is added (a bad name fails at once, with the TOML message):
+
+```python
+from spel.proptest import api as pt
+from spel.proptest.api import Gridcell, Lake, Patch, Soil, Topounit, Urban
+
+case = pt.Case("urbval", reference="cf_val")
+dom = pt.Domain([Gridcell.of(Urban("md"), Urban("hd"), copies=2, name="town"),
+                 Gridcell(name="hill", topounits=(Topounit((Soil(1, 13),), weight=0.5, elevation=300.0),
+                                                  Topounit((Lake(),), weight=0.5, elevation=150.0)))],
+                nsets=2, reference="cf_val")
+spec = pt.Spec(case, dom, namelist={"implicit_stress": False})
+base = spec.scenario("base", over="p in urbanp", extends=case.stats_rules(landunits=["urban"]),
+                     inputs={"lun_pp%canyon_hwr": pt.Range(0.5, 1.0)}, derive=pt.URBAN_GEOMETRY)
+spec.property("canopy air is taf", "veg_es%t_ref2m(p) == lun_es%taf(l)", scenarios=[base])
+spec.to_toml("urbval.proptest.toml")          # pt.Spec.from_toml(path) reads one back
+```
+
+| | |
+|---|---|
+| `pt.Case(name)` | the inventory: `var("ht_roof")`, `vars(kind=, level=)`, `find("roof")`, `stats_rules(landunits=, where=)` |
+| rules | `pt.Range`, `LogRange`, `Values`, `Value`, `Scale`, `Dist`, each with `clip=`, `pft={13: ...}`, `levels={"1:3": ...}` |
+| `spec.view()` / `dom.view()` | the declared domain: `gridcells[k].topounits[..].landunits[..].columns[..].patches`, `table(level)` (pandas), `select(level, kind=, role=, pft=, name=)`, `expected_filters()` |
+| `spec.session()` | a `runner.Session` on the validated spec |
+| `s.built()` | what the case built: `filters`, `topology`, `bounds`; `check()` lists differences from the declaration |
+| `s.sample(scenario, seed)` | an example drawn like a test run's (same modes), from a seed |
+| `s.execute(scenario, ex)` | a `Result`: `frame(level, names=, aggregate={"x": "wsum"})` (ancestors joined, descendants reduced), `verdict(check)` (per element, without raising) |
+
+Scripts that open a session need an `if __name__ == "__main__":` guard (the worker is a spawned
+process).
+
 ## Limits
 
-- One site per gridcell, one landunit per site and one patch per column: no vegetated columns
-  with several pfts, no gridcells mixing landunits. Sites are vegetated (soil or crop), urban or
-  lake; no glacier or wetland sites yet.
-- Per-pft rule overrides (`pft = {...}`) apply to vegetated sites only; there are no overrides
-  per urban column type yet (use `derive` with `merge(..., col_pp%itype(c) == 71)`).
+- Landunits are soil, crop, urban or lake; no glacier or wetland yet. Activity follows the
+  weights only (not ELM's `all_active` or zero-weight urban special cases).
+- Per-pft rule overrides (`pft = {...}`) apply to patch variables only (a column holds several
+  pfts); there are no overrides per urban column type yet (use `derive` with
+  `merge(..., col_pp%itype(c) == 71)`).
 - One call per example: no multi-step runs.
 - Type-bound routines cannot be called by the shim yet.
 - `coverage` needs gfortran and its gcov.

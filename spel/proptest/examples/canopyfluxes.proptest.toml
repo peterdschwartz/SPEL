@@ -13,10 +13,26 @@ name = "canflux"
 max_examples = 60
 
 [domain]
-pfts = [1, 4, 13]          # needleleaf evergreen temperate tree, broadleaf evergreen tropical tree, C3 grass
-per_pft = 4
 nsets = 4                  # relations: sets 0-1 base, 2-3 follow-up
 reference = "canflux"      # constants, parameters and level extents (nlevsno = 5)
+
+# One gridcell per pft, a soil column with that single pft, four copies of each: needleleaf
+# evergreen temperate tree, broadleaf evergreen tropical tree, C3 grass. A column with several
+# weighted pfts is `landunits = [{ kind = "soil", patches = [{ pft = 1, weight = 0.5 }, 4, 13] }]`.
+[[domain.gridcell]]
+name = "nl evergreen tree"
+copies = 4
+landunits = [{ kind = "soil", patches = [1] }]
+
+[[domain.gridcell]]
+name = "bl evergreen tropical tree"
+copies = 4
+landunits = [{ kind = "soil", patches = [4] }]
+
+[[domain.gridcell]]
+name = "c3 grass"
+copies = 4
+landunits = [{ kind = "soil", patches = [13] }]
 
 # The namelist options of the runs, over the reference's (`spel proptest show` lists them all).
 # Under the reference's options (use_c13, use_c14, use_hydrstress, ... off) 51 variables are used

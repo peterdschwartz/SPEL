@@ -505,22 +505,32 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
 - `coverage` uses the gcov of the gfortran in use (`gcov-<major>`; the plain `gcov` here is GCC 13's
   and cannot read GCC 14 files) and takes counts as before/after differences, so nothing in the
   build directory is deleted.
-- Domains are sites (`domain.Layout`): vegetated (one column, one patch), urban (five columns,
-  one bare patch each) and lake. Gridcell, topounit and landunit counts are per site, column and
-  patch counts per column, so element counts differ by level: take them from `layout.count(level)`,
-  ancestors from `layout.parent`, the rows of another level from `Session.rows_of`/`elements_at`,
-  relation halves from `Session.half_count(level)`; permutations move whole sites
-  (`layout.row_permutation`). ELM type codes are `domain.TYPE_CODES`, checked against the case's
-  parameters. Checked on UrbanFluxes 2026-11-10: urban filters as in ELM, direct and files init
-  bit-identical, and geometry inputs need ELM's derivations (`z_d_town`, `z_0_town`,
-  `forc_hgt_*_patch`), or about 30% of the drawn sites take logs of negative heights (NaN).
-  `init` writes those derivations (`scaffold.URBAN_DERIVE`) and takes the site kinds from the
-  routine's filter arguments (`scaffold.routine_sites`, tables `domain.FILTER_SITES`/
-  `FILTER_COMPLEMENTS`); `stats --sites` restricts the statistics to patches on those landunits.
-  Site kinds and urban densities are enums (`SiteKind`, `UrbanDensity`), not strings.
-- Not done: multi-step runs (the time scalars would have to advance), vegetated columns with
-  several patches, gridcells with several landunits, glacier/wetland sites, type-bound routines
-  in the shim. No local case has
+- Domains are ELM's hierarchy (`hierarchy.py`: `Gridcell` > `Topounit` > `Landunit` > `Column` >
+  `Patch`, weights in the parent, constructors `Soil`/`Crop`/`Urban`/`Lake` following
+  initGridCellsMod; `[[domain.gridcell]]` in TOML), laid out by `hierarchy.Layout` depth first,
+  set by set. Element counts differ by level: take them from `layout.count(level)`, ancestors from
+  `layout.parent`/`ancestor_of`, descendants (always a contiguous range) from
+  `first_child`/`last_child`/`descendants`, relation halves from `Session.half_count(level)`;
+  permutations move whole gridcells of one declaration (`layout.row_permutation`). Topology
+  values (`domain.topology_value`) all come from the layout, including `topo_grc_ind` (the number
+  within the gridcell), `downhill_ti` (set_topounit's algorithm, quirk included) and the rank-2
+  `landunit_indices`; `max_topounits`/`has_topounit` are `DOMAIN_CONSTANTS`. Declared topounit
+  elevations pin `top_pp%elevation` (`Domain.pinned`). ELM type codes are `hierarchy.TYPE_CODES`,
+  checked against the case's parameters.
+- Checked on UrbanFluxes (`urbval`, 2026-11-11): a town, a mixed gridcell (soil column with two
+  weighted pfts, urban, lake) and three topounits with one inactive; `Session.built().check()`
+  found no difference between the declaration and the case (topology, bounds, the filters of
+  `domain.EXPECTED_FILTERS`), the inactive topounit's landunit is out of `urbanl`. Urban geometry
+  inputs need ELM's derivations (`scaffold.URBAN_DERIVE`), or about 30% of drawn landunits take
+  logs of negative heights (NaN).
+- Python API (`api.py`): builds the TOML-shaped dict `spec.parse` reads, checking each piece with
+  the reader's own code; `tomlw.py` writes it. Inspection: `results.py` (`BuiltDomain`, `Result`
+  frames, `Verdict`), `Session.sample` (the test-run draw through `strategies.RngChooser`).
+  `init` takes the landunit kinds from the routine's filter arguments
+  (`scaffold.routine_landunits`, `domain.FILTER_KINDS`/`FILTER_COMPLEMENTS`); `stats --landunits`
+  restricts the statistics. Kinds and urban densities are enums (`LandunitKind`, `UrbanDensity`).
+- Not done: multi-step runs (the time scalars would have to advance), glacier/wetland landunits,
+  ELM's activity special cases (`all_active`, zero-weight urban), type-bound routines in the shim. No local case has
   `driver_args`, so that path is tested only on a synthetic inventory.
 - Tutorial: `spel/proptest/examples/canopyfluxes_tutorial.ipynb` (executed, with outputs). Change it through
   its narrative and re-execute it (`nbclient`) after API changes; its text quotes actual results.

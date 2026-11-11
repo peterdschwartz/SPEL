@@ -358,6 +358,9 @@ def _scenario(name: str, table: dict, base: Path, inv: Inventory, names: Names) 
         if info.kind == "parameter" and not rules.KINDS[rule.kind].parameters:
             ok = [k for k, kind in rules.KINDS.items() if kind.parameters]
             raise SpecError(f"{where}.inputs: parameter {v} takes one of {', '.join(ok)}")
+        if rule.by_pft and info.level != "p":
+            raise SpecError(f"{where}.inputs.{key}: `pft` overrides apply to patch variables only (a column or "
+                            f"landunit holds several pfts); {v} is not one")
         for sec, _ in rule.by_level:
             _section(sec, names, f"{where}.inputs.{key}.levels")
             if info.rank - (1 if info.level else 0) < 1:

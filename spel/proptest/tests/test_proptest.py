@@ -8,7 +8,7 @@ import pytest
 from spel.proptest import functions as fn
 from spel.proptest import spec as sp
 from spel.proptest import strategies as strat
-from spel.proptest.domain import Layout
+from spel.proptest.hierarchy import Gridcell, Layout, Soil
 from spel.proptest.fexpr import Evaluator, ExprError, FArray, parse_expr
 from spel.proptest.inventory import Inventory, VarInfo, parse_dims
 from spel.proptest.runner import _selected
@@ -57,7 +57,7 @@ def inv(tmp_path):
 def _spec(inv, **scenario):
     data = {
         "case": {"dir": str(inv.case_dir)},
-        "domain": {"pfts": [1]},
+        "domain": {"gridcell": [{"landunits": [{"kind": "soil", "patches": [1]}]}]},
         "scenario": {
             "s": {"inputs": {"top_as%tbot": {"range": [280.0, 300.0]}}, **scenario}
         },
@@ -181,10 +181,10 @@ def test_stats_suggest():
 
 
 def test_layout_sets_and_pfts():
-    lay = Layout([1, 13], per_pft=2, nsets=2)
+    lay = Layout([Gridcell.of(Soil(1), copies=2), Gridcell.of(Soil(13), copies=2)], nsets=2)
     assert lay.sizes() == {lev: 8 for lev in "gtlcp"}
-    assert lay.set_of().tolist() == [0, 0, 0, 0, 1, 1, 1, 1]
-    assert lay.pft_of().tolist() == [1, 1, 13, 13, 1, 1, 13, 13]
+    assert lay.set_of("p").tolist() == [0, 0, 0, 0, 1, 1, 1, 1]
+    assert lay.pft_of("p").tolist() == [1, 1, 13, 13, 1, 1, 13, 13]
 
 
 def test_selected_names_with_brackets():
@@ -249,12 +249,12 @@ def test_domain_keys_must_name_something(inv):
     inv.unit_test = SimpleNamespace(time_scalars=[SimpleNamespace(name="jday_mod")])
     data = _spec(inv)
     data["scenario"]["s"]["inputs"]["col_es%t_soisno"] = 280.0
-    data["domain"] = {"pfts": [1], "time": {"jday_mod": 10}, "dims": {"nlevsno": 5}}
+    data["domain"] = {"gridcell": [{"landunits": [{"kind": "soil", "patches": [1]}]}], "time": {"jday_mod": 10}, "dims": {"nlevsno": 5}}
     sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
-    data["domain"] = {"pfts": [1], "time": {"jdya_mod": 10}}
+    data["domain"] = {"gridcell": [{"landunits": [{"kind": "soil", "patches": [1]}]}], "time": {"jdya_mod": 10}}
     with pytest.raises(DomainError, match="jdya_mod"):
         sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
-    data["domain"] = {"pfts": [1], "dims": {"nlevsnoo": 5}}
+    data["domain"] = {"gridcell": [{"landunits": [{"kind": "soil", "patches": [1]}]}], "dims": {"nlevsnoo": 5}}
     with pytest.raises(DomainError, match="nlevsnoo"):
         sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
 

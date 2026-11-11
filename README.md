@@ -895,7 +895,7 @@ spel proptest run   canflux.proptest.toml [-s SCENARIO] [-k CHECK] [-n EXAMPLES]
 spel proptest replay unit-tests/proptest-data/canflux/failures/<scenario>__<check>   # a saved failure again
 spel proptest coverage canflux.proptest.toml                # if-branches the scenario never enters (gfortran + gcov)
 spel proptest subspace canflux.proptest.toml --scenario S --output "t_veg(p)" [--input NAME ...] [--parameters]
-spel proptest stats canflux --reference canflux [--sites soil crop]   # only the rule file and report
+spel proptest stats canflux --reference canflux [--landunits soil crop]   # only the rule file and report
 spel proptest build canflux [--fc nvfortran] [--acc MULTICORE] [--dbg]   # a build; `run` rebuilds when sources changed
 ```
 
@@ -904,12 +904,18 @@ spel proptest build canflux [--fc nvfortran] [--acc MULTICORE] [--dbg]   # a bui
   (constants), input, inout or output. The read/write category comes from the static trace the
   database export uses: a variable whose first write is conditional and that is read later is an
   inout. Outputs are reset to NaN before every call, so elements the routine skips stay visible.
-- **Domain.** `[domain]` builds a synthetic subgrid domain of sites, each one gridcell and
-  landunit: vegetated sites of the listed `pfts`, urban sites (`urban = ["md", "hd"]`: the five
-  urban columns, one bare patch each) and a lake site (`lake = true`), each `per_pft` times,
-  and `nsets` copies. A reference capture supplies the constants, parameters and level extents.
-  `init` picks the site kinds from the filters the routine takes (UrbanFluxes: urban sites over
-  `p in urbanp`, statistics of urban patches only); `--sites` overrides it.
+- **Domain.** `[domain]` declares ELM's subgrid hierarchy gridcell by gridcell
+  (`[[domain.gridcell]]`): topounits (several per gridcell, with weights and elevations),
+  landunits (soil with one column of weighted pfts, crop with a column per CFT, urban with its
+  five columns, lake), each element weighted in its parent; `copies` per gridcell and `nsets`
+  sets. A reference capture supplies the constants, parameters and level extents. `init` picks
+  the landunit kinds from the filters the routine takes (UrbanFluxes: a town over `p in urbanp`,
+  statistics of urban patches only); `--landunits` overrides it.
+- **Python API.** `spel.proptest.api` builds the same spec in Python (`pt.Case`, `pt.Domain`,
+  `pt.Spec`, rules as `pt.Range(...)`), writes it as TOML, and inspects it: the declared domain
+  (`spec.view()`: per-element tables, filters to expect), what the case built
+  (`session.built().check()`), and drawn examples and their outputs as pandas tables
+  (`session.sample`, `session.execute(...).frame(level)`, `.verdict(check)`).
 - **Scenarios.** `[scenario.<name>]` gives a rule for every input the routine reads; a run refuses
   when one is missing, and when a parameter the routine reads has no value. The rules are
   `range`, `log_range`, `values`, `dist`, `scale`, a constant, with per-pft and per-level

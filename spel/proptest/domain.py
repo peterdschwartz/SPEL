@@ -1,19 +1,18 @@
 """Synthetic subgrid domains for property-based tests.
 
-A domain is a set of independent sites, each one gridcell with one topounit and one landunit
-(`Layout`): a vegetated site (soil or crop landunit) has one column and one patch of its pft, an
-urban site (`urban = ["md", ...]`) an urban landunit of that density with the five urban columns
-(roof, sunwall, shadewall, impervious and pervious road) and one bare patch each, a lake site
-(`lake = true`) a deep-lake landunit with one column and one bare patch. Every site appears
-`per_pft` times per set, laid out set by set (set k of every level is a contiguous range, as
-duplicateMod lays out `nsets` copies), so the gridcell, topounit and landunit levels have one
-element per site and the column and patch levels one per column. The builder writes the two files `elm_init`
-reads (`spel-inputs0001.nc`, `spel-constants0001.nc`) for every variable of the inventory:
+The domain is declared as gridcells with ELM's full hierarchy (`hierarchy.py`: topounits,
+landunits, columns, patches, weights) in `[[domain.gridcell]]` tables, laid out by
+`hierarchy.Layout`. The builder writes what `elm_init` reads (`spel-inputs0001.nc`,
+`spel-constants0001.nc`) for every variable of the inventory:
 
-- topology (subgrid indices, types, flags, weights) from the rules below; a topology field
-  without a rule stops the build, so a new routine never runs on a silently wrong hierarchy;
+- topology (subgrid indices, types, flags, weights) from the layout (`topology_value`); a
+  topology field without a rule stops the build, so a new routine never runs on a silently wrong
+  hierarchy;
 - parameters without a subgrid dimension (pftcon-like arrays, scalars) and the constants from a
-  reference capture (`reference`), with `constants` overrides;
+  reference capture (`reference`), with `constants` overrides; the domain decides
+  `max_topounits`/`has_topounit` (`DOMAIN_CONSTANTS`);
+- with declared topounit elevations, `top_pp%elevation` is pinned to them (`Domain.pinned`):
+  `downhill_ti` follows from them, so a scenario cannot draw them;
 - everything else (inputs, outputs) as fill values: the runner sets inputs through the shim's
   views before each compute.
 
@@ -35,14 +34,15 @@ import contextlib
 import os
 import shutil
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
 from spel.proptest.errors import ProptestError
 from spel.proptest.fexpr import ExprError
+from spel.proptest.hierarchy import (TYPE_CODES, Gridcell, HierarchyError, LandunitKind, Layout,
+                                     UrbanDensity, check_type_codes, ltype_of)
 from spel.proptest.inventory import LEVELS, NC_DIM, Inventory, VarInfo
 
 INPUTS_FILE = "spel-inputs0001.nc"
@@ -78,104 +78,39 @@ class DomainError(ProptestError):
     pass
 
 
-class SiteKind(Enum):
-    """What a site's landunit is (`[domain]`: `pfts` on `landunit`, `urban`, `lake`)."""
-
-    SOIL = "soil"
-    CROP = "crop"
-    URBAN = "urban"
-    LAKE = "lake"
-
-    @property
-    def vegetated(self) -> bool:
-        return self in (SiteKind.SOIL, SiteKind.CROP)
-
-
-class UrbanDensity(Enum):
-    """ELM's urban classes (landunit_varcon): tall building district, high and medium density."""
-
-    TBD = "tbd"
-    HD = "hd"
-    MD = "md"
-
-    @property
-    def type_code(self) -> str:
-        """The landunit_varcon parameter of its landunit type (a TYPE_CODES key)."""
-        return f"isturb_{self.value}"
-
-
 @dataclass
 class DomainSpec:
-    pfts: list[int]
-    per_pft: int = 1
+    gridcells: list[Gridcell]
     nsets: int = 1
-    landunit: SiteKind = SiteKind.SOIL  # SOIL | CROP: the landunit of the vegetated sites (`pfts`)
-    urban: list[UrbanDensity] = field(default_factory=list)  # urban sites, one per density
-    lake: bool = False  # a deep-lake site
     snow_layers: int = 0
-    reference: Optional[Path] = (
-        None  # input-data dir of a capture: constants, parameters, extents
-    )
+    reference: Optional[Path] = None  # input-data dir of a capture: constants, parameters, extents
     constants: dict[str, Any] = field(default_factory=dict)
     time: dict[str, Any] = field(default_factory=dict)
-    dims: dict[str, int] = field(
-        default_factory=dict
-    )  # values for bound names (nlevsno = 5)
+    dims: dict[str, int] = field(default_factory=dict)  # values for bound names (nlevsno = 5)
     # files: elm_init reads an inputs file | direct: see module doc | None: direct when the case
     # can (made with spel_varMod: shim.direct_init), else files (runner.Session decides)
     init: Optional[str] = None
 
+    KEYS = ("gridcell", "nsets", "snow_layers", "reference", "constants", "time", "dims", "init")
+
     @classmethod
-    def from_table(
-        cls, table: dict, base: Path, input_data: Optional[Path] = None
-    ) -> "DomainSpec":
-        known = {
-            "pfts",
-            "per_pft",
-            "nsets",
-            "landunit",
-            "urban",
-            "lake",
-            "snow_layers",
-            "reference",
-            "constants",
-            "time",
-            "dims",
-            "init",
-        }
-        extra = set(table) - known
+    def from_table(cls, table: dict, base: Path, input_data: Optional[Path] = None) -> "DomainSpec":
+        extra = set(table) - set(cls.KEYS)
         if extra:
-            raise DomainError(f"[domain]: unknown keys {sorted(extra)}")
-        if "pfts" not in table and not table.get("urban") and not table.get("lake"):
-            raise DomainError("[domain]: give the sites: `pfts` (vegetated), `urban` and/or `lake`")
-        densities = [d.value for d in UrbanDensity]
-        urban = table.get("urban", [])
-        if isinstance(urban, str) or not isinstance(urban, list):
-            raise DomainError(f"[domain]: urban must be a list of densities {densities}, not {urban!r}")
-        bad = [u for u in urban if str(u).lower() not in densities]
-        if bad or len({str(u).lower() for u in urban}) != len(urban):
-            raise DomainError(f"[domain]: urban takes distinct densities of {densities}, not {urban}")
-        landunit = str(table.get("landunit", SiteKind.SOIL.value)).lower()
-        if landunit not in (SiteKind.SOIL.value, SiteKind.CROP.value):
-            raise DomainError(f"[domain]: landunit must be soil or crop, not {landunit!r}")
-        ref = table.get("reference")
-        ref_path = None
-        if ref:
-            ref_path = Path(ref)
-            if not ref_path.is_absolute():
-                cand = (input_data / ref) if input_data is not None else None
-                ref_path = cand if cand is not None and cand.is_dir() else (base / ref)
-            if not ref_path.is_dir():
-                raise DomainError(f"[domain]: reference {ref!r} is not a directory")
+            raise DomainError(f"[domain]: unknown keys {sorted(extra)} (sites are [[domain.gridcell]] tables; "
+                              "see SPEC.md)")
+        cells = table.get("gridcell", [])
+        if not isinstance(cells, list) or not cells:
+            raise DomainError("[domain]: declare the gridcells as [[domain.gridcell]] tables")
+        try:
+            gridcells = [Gridcell.from_table(g, f"[[domain.gridcell]] {k}") for k, g in enumerate(cells)]
+        except HierarchyError as exc:
+            raise DomainError(str(exc)) from None
         spec = cls(
-            pfts=[int(p) for p in table.get("pfts", [])],
-            per_pft=int(table.get("per_pft", 1)),
+            gridcells=gridcells,
             nsets=int(table.get("nsets", 1)),
-            landunit=SiteKind(landunit),
-            urban=[UrbanDensity(str(u).lower()) for u in urban],
-            lake=bool(table.get("lake", False)),
             snow_layers=int(table.get("snow_layers", 0)),
-            reference=ref_path,
+            reference=_reference_path(table.get("reference"), base, input_data),
             constants=dict(table.get("constants", {})),
             time={k.lower(): v for k, v in table.get("time", {}).items()},
             dims={k.lower(): int(v) for k, v in table.get("dims", {}).items()},
@@ -183,13 +118,36 @@ class DomainSpec:
         )
         if spec.init is not None and spec.init not in INIT_MODES:
             raise DomainError(f"[domain]: init must be one of {list(INIT_MODES)}, not {spec.init!r}")
-        if not isinstance(table.get("lake", False), bool):
-            raise DomainError("[domain]: lake is true or false")
-        if not (spec.pfts or spec.urban or spec.lake) or spec.per_pft < 1 or spec.nsets < 1:
-            raise DomainError(
-                "[domain]: need at least one site (pfts, urban, lake), per_pft >= 1 and nsets >= 1"
-            )
+        if spec.nsets < 1:
+            raise DomainError("[domain]: nsets must be >= 1")
         return spec
+
+    def to_table(self, input_data: Optional[Path] = None) -> dict:
+        """The `[domain]` table (the inverse of from_table)."""
+        out: dict[str, Any] = {"nsets": self.nsets}
+        if self.reference is not None:
+            ref = Path(self.reference)
+            under = input_data is not None and ref.resolve().parent == Path(input_data).resolve()
+            out["reference"] = ref.name if under else str(ref)
+        for key in ("snow_layers",):
+            if getattr(self, key):
+                out[key] = getattr(self, key)
+        for key in ("constants", "time", "dims"):
+            if getattr(self, key):
+                out[key] = dict(getattr(self, key))
+        if self.init is not None:
+            out["init"] = self.init
+        out["gridcell"] = [g.to_table() for g in self.gridcells]
+        return out
+
+    def layout(self, params: Optional[dict[str, Any]] = None) -> Layout:
+        """The layout of the declared gridcells (type codes checked against the case's `params`)."""
+        try:
+            if params:
+                check_type_codes(params)
+            return Layout(self.gridcells, self.nsets)
+        except HierarchyError as exc:
+            raise DomainError(str(exc)) from None
 
     def check(self, inv: Inventory) -> None:
         """The `time` and `dims` keys name something of the case (a misspelt key would otherwise
@@ -210,201 +168,79 @@ class DomainSpec:
             )
 
 
-# ELM's subgrid type codes (landunit_varcon, column_varcon, pftvarcon). The case's own module
-# parameters, when the analysis has them, must agree (`check_type_codes`).
-TYPE_CODES = {
-    "istsoil": 1, "istcrop": 2, "istdlak": 5, "isturb_tbd": 7, "isturb_hd": 8, "isturb_md": 9,
-    "icol_roof": 71, "icol_sunwall": 72, "icol_shadewall": 73, "icol_road_imperv": 74, "icol_road_perv": 75,
-    "noveg": 0,
-}
-# the columns of an urban landunit, in initGridCellsMod's order (set_landunit_urban)
-URBAN_COLUMNS = ("icol_roof", "icol_sunwall", "icol_shadewall", "icol_road_imperv", "icol_road_perv")
-# The urban column weights in their landunit follow set_landunit_urban for this geometry. The
-# geometry itself (`lun_pp%wtlunit_roof`, `wtroad_perv`) is an input a scenario draws, but the
-# weights are topology, fixed when the domain is built.
-URBAN_WEIGHT_GEOMETRY = {"wtlunit_roof": 0.5, "wtroad_perv": 0.5}
-# filterMod members that select the elements of one site kind, and the complements that only add
-# the other sites (a routine taking `urbanl` and `nourbanl` works on urban sites)
-FILTER_SITES = {
-    "urbanl": SiteKind.URBAN, "urbanc": SiteKind.URBAN, "urbanp": SiteKind.URBAN,
-    "lakec": SiteKind.LAKE, "lakep": SiteKind.LAKE, "lakesnowc": SiteKind.LAKE, "lakenosnowc": SiteKind.LAKE,
+def _reference_path(ref: Any, base: Path, input_data: Optional[Path]) -> Optional[Path]:
+    if not ref:
+        return None
+    path = Path(ref)
+    if not path.is_absolute():
+        cand = (input_data / ref) if input_data is not None else None
+        path = cand if cand is not None and cand.is_dir() else (base / ref)
+    if not path.is_dir():
+        raise DomainError(f"[domain]: reference {ref!r} is not a directory")
+    return path
+
+
+# -- filters
+
+# filterMod members that select the elements of one landunit kind, and the complements that only
+# add the others (a routine taking `urbanl` and `nourbanl` works on urban landunits)
+FILTER_KINDS = {
+    "urbanl": LandunitKind.URBAN, "urbanc": LandunitKind.URBAN, "urbanp": LandunitKind.URBAN,
+    "lakec": LandunitKind.LAKE, "lakep": LandunitKind.LAKE, "lakesnowc": LandunitKind.LAKE,
+    "lakenosnowc": LandunitKind.LAKE,
 }
 FILTER_COMPLEMENTS = {"nourbanl": "urbanl", "nourbanc": "urbanc", "nourbanp": "urbanp",
                       "nolakec": "lakec", "nolakep": "lakep"}
-SITE_PATCH_FILTER = {SiteKind.URBAN: "urbanp", SiteKind.LAKE: "lakep"}  # a scenario's `over` for the kind
+KIND_PATCH_FILTER = {LandunitKind.URBAN: "urbanp", LandunitKind.LAKE: "lakep"}  # a scenario's `over`
+
+_U, _L, _S, _C = LandunitKind.URBAN, LandunitKind.LAKE, LandunitKind.SOIL, LandunitKind.CROP
 
 
-def landunit_types(kind: SiteKind, codes: Optional[dict[str, int]] = None) -> tuple[int, ...]:
-    """The lun_pp%itype values of a site kind."""
-    c = {**TYPE_CODES, **(codes or {})}
-    if kind is SiteKind.URBAN:
-        return tuple(c[d.type_code] for d in UrbanDensity)
-    return (c[{SiteKind.SOIL: "istsoil", SiteKind.CROP: "istcrop", SiteKind.LAKE: "istdlak"}[kind]],)
+def _road_perv(lay: Layout, level: str) -> np.ndarray:
+    c = lay.ancestor_of(level, "c")
+    return lay.itype("c")[c] == TYPE_CODES["icol_road_perv"]
 
 
-def density_of(ltype: int, codes: Optional[dict[str, int]] = None) -> Optional[UrbanDensity]:
-    c = {**TYPE_CODES, **(codes or {})}
-    return next((d for d in UrbanDensity if c[d.type_code] == ltype), None)
+# The members setFilters builds from the topology alone (filterMod::setFiltersOneGroup, active
+# elements on active topounits): member -> (level, layout, level -> mask). Members that depend on
+# other data (pcropp: pftcon, snowc: the snow state) are not predicted.
+EXPECTED_FILTERS: dict[str, tuple[str, Callable[[Layout, str], np.ndarray]]] = {
+    "urbanl": ("l", lambda y, v: y.is_kind(v, _U)),
+    "nourbanl": ("l", lambda y, v: ~y.is_kind(v, _U)),
+    "urbanc": ("c", lambda y, v: y.is_kind(v, _U)),
+    "nourbanc": ("c", lambda y, v: ~y.is_kind(v, _U)),
+    "urbanp": ("p", lambda y, v: y.is_kind(v, _U)),
+    "nourbanp": ("p", lambda y, v: ~y.is_kind(v, _U)),
+    "lakec": ("c", lambda y, v: y.is_kind(v, _L)),
+    "nolakec": ("c", lambda y, v: ~y.is_kind(v, _L)),
+    "lakep": ("p", lambda y, v: y.is_kind(v, _L)),
+    "nolakep": ("p", lambda y, v: ~y.is_kind(v, _L)),
+    "nolakeurbanp": ("p", lambda y, v: ~y.is_kind(v, _L, _U)),
+    "soilc": ("c", lambda y, v: y.is_kind(v, _S, _C)),
+    "soilp": ("p", lambda y, v: y.is_kind(v, _S, _C)),
+    "hydrologyc": ("c", lambda y, v: y.is_kind(v, _S, _C) | _road_perv(y, v)),
+    "hydrononsoic": ("c", lambda y, v: _road_perv(y, v)),
+}
 
 
-BOUND_LEVEL = {"g": "g", "t": "t", "l": "l", "c": "c", "p": "p"}  # bounds_type begX/endX -> level
-SITE_LEVELS = ("g", "t", "l")  # one element per site
-COLUMN_LEVELS = ("c", "p")  # one element per column (every column has one patch)
-
-
-def _urban_weights(wtlunit_roof: float, wtroad_perv: float) -> tuple[float, ...]:
-    canyon = (1.0 - wtlunit_roof) / 3.0
-    return (wtlunit_roof, canyon, canyon, canyon * (1.0 - wtroad_perv), canyon * wtroad_perv)
-
-
-@dataclass(frozen=True)
-class Site:
-    """One site of a set: a gridcell with one topounit and one landunit, and its columns."""
-
-    kind: SiteKind
-    pft: int  # the patches' itype (noveg for urban and lake sites)
-    ltype: int  # lun_pp%itype
-    ctypes: tuple[int, ...]  # col_pp%itype of each column
-    weights: tuple[float, ...]  # each column's weight in the landunit
-    label: str  # "pft 1", "urban md", "lake"
-
-    @property
-    def vegetated(self) -> bool:
-        return self.kind.vegetated
-
-
-def make_sites(pfts: list[int], per_pft: int = 1, landunit: SiteKind | str = SiteKind.SOIL,
-               urban: tuple[UrbanDensity | str, ...] = (), lake: bool = False,
-               codes: Optional[dict[str, int]] = None) -> list[Site]:
-    """The sites of one set: each pft, urban density and the lake `per_pft` times, in that order.
-    landunit and urban also take the enums' values ("crop", "md")."""
-    c = {**TYPE_CODES, **(codes or {})}
-    out: list[Site] = []
-    landunit = SiteKind(landunit)
-    if not landunit.vegetated:
-        raise DomainError(f"vegetated sites are on a soil or crop landunit, not {landunit.value}")
-    crop = landunit is SiteKind.CROP
-    for pft in pfts:
-        # initGridCellsMod: soil columns are type 1, crop columns istcrop*100 + cft
-        site = Site(landunit, int(pft), c["istcrop" if crop else "istsoil"],
-                    (c["istcrop"] * 100 + int(pft),) if crop else (1,), (1.0,), f"pft {pft}")
-        out += [site] * per_pft
-    weights = _urban_weights(**URBAN_WEIGHT_GEOMETRY)
-    for density in map(UrbanDensity, urban):
-        site = Site(SiteKind.URBAN, c["noveg"], c[density.type_code], tuple(c[k] for k in URBAN_COLUMNS),
-                    weights, f"urban {density.value}")
-        out += [site] * per_pft
-    if lake:
-        # set_landunit_wet_ice_lake: the lake column's type is the landunit's
-        out += [Site(SiteKind.LAKE, c["noveg"], c["istdlak"], (c["istdlak"],), (1.0,), "lake")] * per_pft
+def expected_filters(layout: Layout) -> dict[str, np.ndarray]:
+    """The Fortran indices of every predicted filter member (EXPECTED_FILTERS), active elements only."""
+    out = {}
+    for member, (level, pred) in EXPECTED_FILTERS.items():
+        mask = pred(layout, level) & layout.active(level)
+        out[member] = np.flatnonzero(mask) + 1
     return out
 
 
-class Layout:
-    """Sites laid out set by set. Gridcell, topounit and landunit element k (0-based) is site k;
-    column and patch element k is column k, the columns of a site consecutive. Arrays are per
-    element of a level, 0-based; `parent`/`first_child`/`last_child` give Fortran indices."""
+def landunit_types(kind: LandunitKind) -> tuple[int, ...]:
+    """The lun_pp%itype values of a landunit kind."""
+    if kind is LandunitKind.URBAN:
+        return tuple(ltype_of(kind, d) for d in UrbanDensity)
+    return (ltype_of(kind, None),)
 
-    def __init__(self, pfts: list[int] = (), per_pft: int = 1, nsets: int = 1,
-                 landunit: SiteKind | str = SiteKind.SOIL, urban: tuple[UrbanDensity | str, ...] = (), lake: bool = False, codes: Optional[dict[str, int]] = None,
-                 sites: Optional[list[Site]] = None):
-        self.pfts = list(pfts)
-        self.per_pft = per_pft
-        self.nsets = nsets
-        self.set_sites: list[Site] = sites if sites is not None else make_sites(
-            list(pfts), per_pft, landunit, tuple(urban), lake, codes)
-        if not self.set_sites:
-            raise DomainError("the domain has no sites")
-        self.sites: list[Site] = self.set_sites * nsets
-        ncols = [len(s.ctypes) for s in self.sites]
-        self.col_site = np.repeat(np.arange(len(self.sites)), ncols)  # site of each column
-        self.site_first = np.concatenate([[0], np.cumsum(ncols)[:-1]]).astype(np.int64)  # its first column
-        self.site_ncols = np.asarray(ncols, dtype=np.int64)
-        self.col_pos = np.arange(len(self.col_site)) - self.site_first[self.col_site]  # column within its site
 
-    @classmethod
-    def of(cls, spec: "DomainSpec", codes: Optional[dict[str, int]] = None) -> "Layout":
-        return cls(spec.pfts, spec.per_pft, spec.nsets, spec.landunit, tuple(spec.urban), spec.lake, codes)
-
-    @property
-    def per_set_sites(self) -> int:
-        return len(self.set_sites)
-
-    def per_set(self, level: str = "p") -> int:
-        """Elements of one set at this level."""
-        return self.count(level) // self.nsets
-
-    def count(self, level: str) -> int:
-        return len(self.sites) if level in SITE_LEVELS else len(self.col_site)
-
-    def sizes(self) -> dict[str, int]:
-        return {lev: self.count(lev) for lev in LEVELS}
-
-    def site_of(self, level: str = "p") -> np.ndarray:
-        """The site (0-based, over every set) of each element of the level."""
-        return np.arange(len(self.sites)) if level in SITE_LEVELS else self.col_site
-
-    def set_of(self, level: str = "p") -> np.ndarray:
-        return self.site_of(level) // self.per_set_sites
-
-    def _site_attr(self, level: str, attr) -> np.ndarray:
-        return np.asarray([attr(self.sites[k]) for k in range(len(self.sites))])[self.site_of(level)]
-
-    def pft_of(self, level: str = "p") -> np.ndarray:
-        """The pft of each element's site; -1 for urban and lake sites (no per-pft rule applies)."""
-        return self._site_attr(level, lambda s: s.pft if s.vegetated else -1)
-
-    def kind_of(self, level: str = "p") -> list[SiteKind]:
-        site = self.site_of(level)
-        return [self.sites[k].kind for k in site]
-
-    def is_kind(self, level: str, *kinds: SiteKind) -> np.ndarray:
-        """Whether each element of the level belongs to a site of one of these kinds."""
-        return np.asarray([kind in kinds for kind in self.kind_of(level)], dtype=bool)
-
-    def one_to_one(self, a: str, b: str) -> bool:
-        """Whether the two levels have the same elements (element k of one is element k of the other)."""
-        return (a in SITE_LEVELS) == (b in SITE_LEVELS) or bool(np.all(self.site_ncols == 1))
-
-    def parent(self, level: str, coarser: str) -> np.ndarray:
-        """Fortran index of each element's ancestor at a coarser (or the same) level."""
-        if coarser in SITE_LEVELS:
-            return self.site_of(level) + 1
-        return np.arange(1, self.count(level) + 1)
-
-    def first_child(self, level: str, finer: str) -> np.ndarray:
-        if level in SITE_LEVELS and finer in COLUMN_LEVELS:
-            return self.site_first + 1
-        return np.arange(1, self.count(level) + 1)
-
-    def last_child(self, level: str, finer: str) -> np.ndarray:
-        if level in SITE_LEVELS and finer in COLUMN_LEVELS:
-            return self.site_first + self.site_ncols
-        return np.arange(1, self.count(level) + 1)
-
-    def children(self, level: str, finer: str) -> np.ndarray:
-        if level in SITE_LEVELS and finer in COLUMN_LEVELS:
-            return self.site_ncols.copy()
-        return np.ones(self.count(level), dtype=np.int64)
-
-    def row_permutation(self, level: str, site_perm: np.ndarray) -> np.ndarray:
-        """A permutation of the first `len(site_perm)` sites as rows of a level: row k of the
-        result holds what row `perm[k]` held. Sites are only exchanged with sites of the same
-        kind, so their column blocks have the same length."""
-        site_perm = np.asarray(site_perm, dtype=np.int64)
-        if level in SITE_LEVELS:
-            return site_perm
-        return np.concatenate([np.arange(self.site_first[s], self.site_first[s] + self.site_ncols[s])
-                               for s in site_perm]).astype(np.int64)
-
-    def describe(self, level: str, k: int) -> str:
-        """Element k (Fortran index) of a level, for reports."""
-        site = int(self.site_of(level)[k - 1])
-        s = self.sites[site]
-        text = f"set {site // self.per_set_sites}, {s.label}"
-        if level in COLUMN_LEVELS and len(s.ctypes) > 1:
-            text += f", column {int(self.col_pos[k - 1]) + 1} of {len(s.ctypes)} (itype {s.ctypes[self.col_pos[k - 1]]})"
-        return text
+def density_of(ltype: int) -> Optional[UrbanDensity]:
+    return next((d for d in UrbanDensity if TYPE_CODES[d.type_code] == ltype), None)
 
 
 @dataclass
@@ -431,6 +267,12 @@ class Domain:
     # init = "direct": {"sizes": {level: elements}, "alloc": {name: (extents, type)}, "values": {name: array}}
     direct: Optional[dict[str, Any]] = None
 
+    # inputs the domain fixes (declared topounit elevations): name -> values; no rule may set them
+    pinned: dict[str, np.ndarray] = field(default_factory=dict)
+
+    # the topology values written: name -> Fortran-shaped array (BuiltDomain compares the case's)
+    topology: dict[str, np.ndarray] = field(default_factory=dict)
+
     @property
     def path_arg(self) -> str:
         """What spel_py_init takes: the directory with a trailing slash."""
@@ -439,52 +281,50 @@ class Domain:
 
 # -- topology rules
 
-
+BOUND_LEVEL = {"g": "g", "t": "t", "l": "l", "c": "c", "p": "p"}  # bounds_type begX/endX -> level
 # Subgrid structure fields by what they hold. A field of a routine that is in none of these (and
 # has no rule in `topology_value`) stops the build.
 LEVEL_OF_FIELD = {"gridcell": "g", "topounit": "t", "landunit": "l", "column": "c", "patch": "p",
-                  "topo_grc_ind": "g", "grc_ind": "g"}  # the element's ancestor (or first descendant)
+                  "grc_ind": "g"}  # the element's ancestor (or first descendant)
 FIRST_CHILD = {"topi": "t", "lndi": "l", "coli": "c", "pfti": "p"}
 LAST_CHILD = {"topf": "t", "lndf": "l", "colf": "c", "pftf": "p"}
-TOPOLOGY_INDEX = set(LEVEL_OF_FIELD) | set(FIRST_CHILD) | set(LAST_CHILD)
 TOPOLOGY_COUNT = {"npfts": "p", "ncolumns": "c", "nlandunits": "l", "ntopounits": "t"}
-TOPOLOGY_WEIGHT = {"wtgcell", "wtlunit", "wtcol", "wttopounit", "wtgcell_save"}
-TOPOLOGY_TRUE = {"active"}
+# weight fields: the ancestor level the weight is relative to
+TOPOLOGY_WEIGHT = {"wtgcell": "g", "wtgcell_save": "g", "wttopounit": "t", "wtlunit": "l", "wtcol": "c"}
 TOPOLOGY_FALSE = {"glcmecpoi", "is_fates"}
-# logical fields that hold for the elements of sites of these kinds
+# logical fields that hold for the elements of landunits of these kinds
 TOPOLOGY_KIND = {
-    "lakpoi": (SiteKind.LAKE,), "is_lake": (SiteKind.LAKE,), "urbpoi": (SiteKind.URBAN,),
-    "ifspecial": (SiteKind.URBAN, SiteKind.LAKE),
-    "is_soil": (SiteKind.SOIL,), "is_on_soil_col": (SiteKind.SOIL,),
-    "is_crop": (SiteKind.CROP,), "is_on_crop_col": (SiteKind.CROP,),
+    "lakpoi": (_L,), "is_lake": (_L,), "urbpoi": (_U,), "ifspecial": (_U, _L),
+    "is_soil": (_S,), "is_on_soil_col": (_S,), "is_crop": (_C,), "is_on_crop_col": (_C,),
+}
+# constants the domain decides (topounit_varcon): name -> layout -> value
+DOMAIN_CONSTANTS: dict[str, Callable[[Layout], Any]] = {
+    "max_topounits": lambda y: y.max_topounits,
+    "has_topounit": lambda y: y.max_topounits > 1,
 }
 
 
-def check_type_codes(params: dict[str, Any]) -> dict[str, int]:
-    """TYPE_CODES, checked against the case's module parameters where the analysis has them."""
-    for name, value in TYPE_CODES.items():
-        have = params.get(name)
-        if isinstance(have, int) and have != value:
-            raise DomainError(f"the case has {name} = {have}; the synthetic domain assumes {value} "
-                              "(update TYPE_CODES in spel/proptest/domain.py)")
-    return dict(TYPE_CODES)
-
-
-def _ancestor_or_descendant(layout: "Layout", lev: str, target: str) -> np.ndarray:
-    if LEVELS.index(target) <= LEVELS.index(lev):
-        return layout.parent(lev, target)
-    return layout.first_child(lev, target)
-
-
-def topology_value(
-    var: VarInfo, layout: Layout, spec: DomainSpec, params: dict[str, Any]
-) -> np.ndarray:
-    """Values of a subgrid structure field, per element of its level."""
+def topology_value(var: VarInfo, layout: Layout, spec: DomainSpec, ext: list[tuple[int, int]]) -> np.ndarray:
+    """Values of a subgrid structure field in its Fortran shape."""
     lev = var.level
     f = var.field
+    if f == "landunit_indices" and lev in ("g", "t") and var.rank == 2:
+        nl = ext[0][1] - ext[0][0] + 1
+        return layout.landunit_indices(lev, nl).astype(np.int32)
+    if var.rank != 1:
+        raise DomainError(f"{var.name}: topology field of rank {var.rank} (no rule)")
     n = layout.count(lev)
+    if f == "topo_grc_ind" and lev == "t":
+        return layout.topo_index().astype(np.int32)
+    if f == "downhill_ti" and lev == "t":
+        try:
+            return layout.downhill().astype(np.int32)
+        except HierarchyError as exc:
+            raise DomainError(f"{var.name}: {exc}") from None
     if f in LEVEL_OF_FIELD:
-        return _ancestor_or_descendant(layout, lev, LEVEL_OF_FIELD[f]).astype(np.int32)
+        target = LEVEL_OF_FIELD[f]
+        idx = layout.parent(lev, target) if LEVELS.index(target) <= LEVELS.index(lev) else layout.first_child(lev, target)
+        return idx.astype(np.int32)
     if f in FIRST_CHILD:
         return layout.first_child(lev, FIRST_CHILD[f]).astype(np.int32)
     if f in LAST_CHILD:
@@ -492,31 +332,24 @@ def topology_value(
     if f in TOPOLOGY_COUNT:
         return layout.children(lev, TOPOLOGY_COUNT[f]).astype(np.int32)
     if f in TOPOLOGY_WEIGHT:
-        if f == "wtcol" or lev in SITE_LEVELS:  # one patch per column, one landunit per gridcell
-            return np.ones(n)
-        w = np.asarray([wt for s in layout.sites for wt in s.weights])
-        return w if lev in COLUMN_LEVELS else np.ones(n)
-    if f in TOPOLOGY_TRUE:
-        return np.ones(n, dtype=bool)
+        rel = TOPOLOGY_WEIGHT[f]
+        return layout.weight(lev, rel) if LEVELS.index(rel) < LEVELS.index(lev) else np.ones(n)
+    if f == "active":
+        return layout.active(lev)
     if f in TOPOLOGY_FALSE:
         return np.zeros(n, dtype=bool)
-    if f in TOPOLOGY_KIND:
+    if f in TOPOLOGY_KIND and lev in ("l", "c", "p"):
         return layout.is_kind(lev, *TOPOLOGY_KIND[f])
-    if f == "hydrologically_active" and lev in COLUMN_LEVELS:
+    if f == "hydrologically_active" and lev == "c":
         # column_varcon::is_hydrologically_active: soil and crop landunits, the pervious road
-        ctype = np.asarray([ct for s in layout.sites for ct in s.ctypes])[np.arange(n)]
-        return layout.is_kind(lev, SiteKind.SOIL, SiteKind.CROP) | (ctype == TYPE_CODES["icol_road_perv"])
+        return layout.is_kind("c", _S, _C) | _road_perv(layout, "c")
     if f == "snl":
         return np.full(n, -spec.snow_layers, dtype=np.int32)
     if f == "itype" and lev in ("l", "c", "p"):
-        if lev == "l":
-            return np.asarray([s.ltype for s in layout.sites], dtype=np.int32)
-        if lev == "c":
-            return np.asarray([ct for s in layout.sites for ct in s.ctypes], dtype=np.int32)
-        return np.asarray([s.pft for s in layout.sites for _ in s.ctypes], dtype=np.int32)
+        return layout.itype(lev).astype(np.int32)
     raise DomainError(
         f"no synthetic-domain rule for topology field {var.name} (level {lev}); "
-        "add one to spel/proptest/domain.py (the TOPOLOGY_* sets or topology_value)"
+        "add one to spel/proptest/domain.py (the TOPOLOGY_* tables or topology_value)"
     )
 
 
@@ -605,7 +438,12 @@ def build_domain(inv: Inventory, spec: DomainSpec, directory: Path) -> Domain:
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    layout = Layout.of(spec, check_type_codes(inv.parameters))
+    layout = spec.layout(inv.parameters)
+    decided = {k: f(layout) for k, f in DOMAIN_CONSTANTS.items() if k in inv.constants}
+    clash = sorted(k for k in decided if k.lower() in {c.lower() for c in spec.constants})
+    if clash:
+        raise DomainError(f"{clash} follow from the declared gridcells (the most topounits a gridcell has); "
+                          "remove them from [domain.constants]/[namelist]")
 
     # Both files are written under temporary names and renamed at the end, so a worker of
     # another run on the same domain never reads a half-written file.
@@ -619,7 +457,7 @@ def build_domain(inv: Inventory, spec: DomainSpec, directory: Path) -> Domain:
     else:
         with netCDF4.Dataset(const_out, "w"):
             pass
-    _apply_constant_overrides(inv, const_out, spec.constants)
+    _apply_constant_overrides(inv, const_out, {**spec.constants, **decided})
     missing = _complete_constants(inv, const_out)
     constants = _read_constants(const_out)
 
@@ -637,6 +475,8 @@ def build_domain(inv: Inventory, spec: DomainSpec, directory: Path) -> Domain:
     skipped: dict[str, str] = {}
     filled: dict[str, str] = {}
     time_defaulted: dict[str, Any] = {}
+    topology: dict[str, np.ndarray] = {}
+    pinned = _pinned(inv, layout)
     direct = spec.init == "direct"
     alloc: dict[str, tuple[list[tuple[int, int]], str]] = {}
     values: dict[str, np.ndarray] = {}
@@ -707,6 +547,10 @@ def build_domain(inv: Inventory, spec: DomainSpec, directory: Path) -> Domain:
                 data, why = _data_for(var, inv, spec, layout, ref, ext)
                 if why and var.kind == "parameter":
                     filled[var.name] = why
+                if var.name in pinned:
+                    data = pinned[var.name]
+                if _is_topology(var, inv) or var.name in pinned:
+                    topology[var.name] = np.asarray(data)
 
                 put(
                     ds,
@@ -755,7 +599,26 @@ def build_domain(inv: Inventory, spec: DomainSpec, directory: Path) -> Domain:
         filled=filled,
         time_defaulted=time_defaulted,
         direct={"sizes": layout.sizes(), "alloc": alloc, "values": values} if direct else None,
+        pinned=pinned,
+        topology=topology,
     )
+
+
+def _pinned(inv: Inventory, layout: Layout) -> dict[str, np.ndarray]:
+    """Inputs the declaration fixes: `top_pp%elevation` when topounit elevations are declared
+    (`downhill_ti` follows from them)."""
+    out = {}
+    elev = layout.elevation
+    var = inv.vars.get("top_pp%elevation")
+    if var is not None and any(e is not None for e in elev):
+        if any(e is None for e in elev):
+            raise DomainError("declare the elevation of every topounit, or of none")
+        out[var.name] = np.asarray(elev, dtype=float)
+    return out
+
+
+def _is_topology(var: VarInfo, inv: Inventory) -> bool:
+    return var.kind == "topology" or (var.instance in _physical_instances(inv) and var.type in ("integer", "logical"))
 
 
 def _complete_constants(inv: Inventory, path: Path) -> list[str]:
@@ -787,13 +650,8 @@ def _data_for(
     """The values the domain file gets, and for a variable without a subgrid dimension that got
     fill values, why the reference had none."""
     shape = tuple(hi - lo + 1 for lo, hi in ext)
-    if var.kind == "topology" or (
-        var.instance in _physical_instances(inv) and var.type in ("integer", "logical")
-    ):
-        val = topology_value(var, layout, spec, inv.parameters)
-        if var.rank != 1:
-            raise DomainError(f"{var.name}: topology field of rank {var.rank}")
-        return val, ""
+    if _is_topology(var, inv):
+        return topology_value(var, layout, spec, ext), ""
     why = ""
     if var.level is None:
         val, why = _reference_value(var, ref, ext)

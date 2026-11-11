@@ -125,13 +125,13 @@ def analyze(spec: Spec, inv: Inventory, scenario: str, output: str, samples: int
     rng = np.random.default_rng(seed)
     rows = []
     with (session(sspec) if session is not None else Session(sspec, inv, fc=fc, namelist=scen.namelist)) as s:
-        # Set j > 0 steps input j of a block; every site of the set moves as a whole (all its
-        # elements and levels by one step), and an output element's gradient is its site's.
+        # Set j > 0 steps input j of a block; every gridcell of the set moves as a whole (all its
+        # elements and levels by one step), and an output element's gradient is its gridcell's.
         layout = s.layout
         level = scen.level
         per_set = layout.per_set(level)
-        n_sites = layout.per_set_sites
-        out_site = layout.site_of(level)[:per_set]  # site (within set 0) of each output element
+        n_cells = layout.per_set_gridcells
+        out_cell = layout.gridcell_of(level)[:per_set]  # gridcell (within set 0) of each output element
         n = layout.count(level)
         idx = np.arange(1, n + 1)
         base_elems = np.asarray([k for k in s.elements((scen.level, scen.filter)) if k <= per_set], dtype=np.int64)
@@ -160,13 +160,13 @@ def analyze(spec: Spec, inv: Inventory, scenario: str, output: str, samples: int
                     var = inv.vars[name]
                     t = np.moveaxis(uu[name], var.subgrid_axis, 0)
                     sel = layout.set_of(var.level) == j
-                    site = layout.site_of(var.level)[sel] - j * n_sites
+                    cell = layout.gridcell_of(var.level)[sel] - j * n_cells
                     elem_top = t[sel].reshape(int(sel.sum()), -1).max(axis=1)
-                    top = np.full(n_sites, -np.inf)
-                    np.maximum.at(top, site, elem_top)
-                    step = np.where(top + h <= 1.0, h, -h)  # one step per site, all its elements and levels
-                    t[sel] = np.clip(t[sel] + step[site].reshape((len(site),) + (1,) * (t.ndim - 1)), 0.0, 1.0)
-                    steps[name] = step[out_site]
+                    top = np.full(n_cells, -np.inf)
+                    np.maximum.at(top, cell, elem_top)
+                    step = np.where(top + h <= 1.0, h, -h)  # one step per gridcell, all its elements and levels
+                    t[sel] = np.clip(t[sel] + step[cell].reshape((len(cell),) + (1,) * (t.ndim - 1)), 0.0, 1.0)
+                    steps[name] = step[out_cell]
                 f = evaluate(uu)
                 if f0 is None:
                     f0 = f[:per_set].copy()

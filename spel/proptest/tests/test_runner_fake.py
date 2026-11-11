@@ -72,7 +72,8 @@ def test_copies_relation_needs_no_follow_and_permute_finds_neighbour_dependence(
 
 def test_urban_sites_in_relations_and_reports(tmp_path):
     # urban sites have five columns: halves, permutations (whole sites) and reports per column
-    urban = {"pfts": [1], "urban": ["md", "hd"], "per_pft": 2, "nsets": 2}
+    urban = {"gridcell": [*fake.vegetated(1, copies=2), {"name": "town", "copies": 2, "landunits": [
+        {"kind": "urban", "density": "md"}, {"kind": "urban", "density": "hd"}]}], "nsets": 2}
     copies = {"name": "copies", "expect": "same(follow%y(p), base%y(p))"}
     assert run(tmp_path, domain=urban, relation=[dict(copies, permute=True)])[0][0].passed
     res, _ = run(tmp_path, "neighbour", domain=urban, relation=[dict(copies, permute=True)])
@@ -82,7 +83,7 @@ def test_urban_sites_in_relations_and_reports(tmp_path):
 
 
 def test_finer_element_variable_is_unbound_for_a_site_with_columns(tmp_path):
-    s, inv, backend = load(tmp_path, domain={"pfts": [], "urban": ["md"], "nsets": 2})
+    s, inv, backend = load(tmp_path, domain={"gridcell": [{"landunits": [{"kind": "urban", "density": "md"}]}], "nsets": 2})
     with runner.Session(s, inv, backend=backend) as session:
         loc = session.locals_for(np.array([1, 2]), "l")
         assert "c" not in loc and "p" not in loc and loc["g"].tolist() == [1, 2]
@@ -93,7 +94,7 @@ def test_finer_element_variable_is_unbound_for_a_site_with_columns(tmp_path):
 
 def test_relation_needs_an_even_number_of_sets(tmp_path):
     with pytest.raises(sp.SpecError, match="nsets must be even"):
-        load(tmp_path, domain={"pfts": [1], "nsets": 3}, relation=[{"name": "c", "expect": "same(follow%y(p), base%y(p))"}])
+        load(tmp_path, domain={"gridcell": fake.vegetated(1), "nsets": 3}, relation=[{"name": "c", "expect": "same(follow%y(p), base%y(p))"}])
 
 
 def test_abort_is_a_failure_that_is_saved_and_replayed(tmp_path):
@@ -155,21 +156,24 @@ def test_levels_override_and_uniform_columns(tmp_path):
         load(tmp_path, scenario={"s": {"inputs": {"a%x": {"range": [0.0, 1.0], "levels": {"1": 0.0}},
                                                   "a%prof": 1.0, "a%state": 0.0}}})
 
-    class Draw:  # the mode asked for, then u = 0.25 for whatever else is drawn
+    class Choose:  # the mode asked for, then u = 0.25 for whatever else is chosen
         def __init__(self, mode):
             self.mode = mode
 
-        def __call__(self, strategy, label=""):
-            return self.mode if label.startswith("mode") else 0.25
+        def integer(self, lo, hi, label):
+            return self.mode
+
+        def real(self, label):
+            return 0.25
 
     rule = s.scenarios["s"].inputs["a%prof"]
-    u, mode = strat.draw_u(Draw(3), "a%prof", rule, (8, 4), np.random.default_rng(1), axis=0)
+    u, mode = strat.draw_u(Choose(3), "a%prof", rule, (8, 4), np.random.default_rng(1), axis=0)
     assert mode == 3 and (u == u[:, :1]).all() and len(np.unique(u[:, 0])) == 8  # one value down each column
 
 
 def test_derive_fills_layers_per_element_when_counts_coincide(tmp_path):
     # 4 elements and 4 levels: only the expression says which axis a vector is along
-    s, inv, backend = load(tmp_path, domain={"pfts": [1], "per_pft": 2, "nsets": 2}, scenario={"s": {
+    s, inv, backend = load(tmp_path, domain={"gridcell": fake.vegetated(1, copies=2), "nsets": 2}, scenario={"s": {
         "inputs": {"a%x": {"range": [0.0, 1.0]}, "a%state": 0.0},
         "derive": {"a%prof": "cumsum(x(p) + 0.0 * prof(p, :))"},
     }}, property=[{"name": "p", "expr": "finite(y(p))"}])
@@ -232,9 +236,9 @@ def _bindings(*actuals):
     return SimpleNamespace(driver_bindings=[SimpleNamespace(callee="m::r", actual=a) for a in actuals])
 
 
-def test_init_takes_the_site_kinds_from_the_routine_filters(tmp_path):
+def test_init_takes_the_landunit_kinds_from_the_routine_filters(tmp_path):
     from spel.proptest import scaffold
-    from spel.proptest.domain import SiteKind
+    from spel.proptest.hierarchy import LandunitKind as SiteKind
 
     inv = fake.inventory(tmp_path / "case")
     cases = [
@@ -246,28 +250,31 @@ def test_init_takes_the_site_kinds_from_the_routine_filters(tmp_path):
     ]
     for actuals, kinds in cases:
         inv.unit_test = _bindings(*actuals)
-        assert scaffold.routine_sites(inv) == kinds, actuals
+        assert scaffold.routine_landunits(inv) == kinds, actuals
     inv.unit_test = _bindings("filter%urbanl", "filter%urbanp")
     path, _ = scaffold.write(tmp_path / "case", inv, tmp_path / "nofilter.proptest.toml")
     assert 'over = "p"' in path.read_text()  # the case has no urbanp filter: over every patch
     inv.filters.update({"urbanp": 1, "num_urbanp": 0})
     path, todo = scaffold.write(tmp_path / "case", inv, tmp_path / "u.proptest.toml")
     text = path.read_text()
-    assert 'urban = ["hd", "md"]' in text and "pfts" not in text.split("[namelist]")[0]
+    domain = text.split("[namelist]")[0]
+    assert 'density = "hd"' in domain and 'density = "md"' in domain and '"soil"' not in domain
     assert 'over = "p in urbanp"' in text and any("densities" in line for line in todo)
     s, _ = sp.load(path, inv=inv)
-    assert [d.value for d in s.domain.urban] == ["hd", "md"] and s.domain.pfts == []
+    assert [lu.density.value for lu in s.domain.gridcells[0].topounits[0].landunits] == ["hd", "md"]
+    assert [g.name for g in s.domain.gridcells] == ["town"] and s.domain.gridcells[0].copies == 2
     inv.unit_test = _bindings("filter%lakep")
-    path, _ = scaffold.write(tmp_path / "case", inv, tmp_path / "l.proptest.toml", sites={SiteKind.SOIL, SiteKind.LAKE})
+    path, _ = scaffold.write(tmp_path / "case", inv, tmp_path / "l.proptest.toml", landunits={SiteKind.SOIL, SiteKind.LAKE})
     text = path.read_text()
-    assert "lake = true" in text and "pfts = [1]" in text and 'over = "p"' in text and "# sites: lake, soil (--sites)" in text
+    assert '{ kind = "lake" }' in text and '{ kind = "soil", patches = [1] }' in text and 'over = "p"' in text
+    assert "# landunit kinds: lake, soil (--landunits)" in text
 
 
-def test_stats_sites_select_patches_by_their_landunit(tmp_path):
+def test_stats_select_patches_by_their_landunit(tmp_path):
     import netCDF4
 
     from spel.proptest import stats
-    from spel.proptest.domain import SiteKind
+    from spel.proptest.hierarchy import LandunitKind as SiteKind
 
     path = tmp_path / "ref.nc"
     with netCDF4.Dataset(path, "w") as ds:
@@ -279,17 +286,17 @@ def test_stats_sites_select_patches_by_their_landunit(tmp_path):
     ref = stats.Reference(path)
     try:
         steps = np.arange(2)
-        assert stats.site_mask(ref, steps, {SiteKind.URBAN})[0].tolist() == [False, True, True, False]
-        assert stats.site_mask(ref, steps, {SiteKind.SOIL, SiteKind.LAKE})[1].tolist() == [True, False, False, True]
+        assert stats.landunit_mask(ref, steps, {SiteKind.URBAN})[0].tolist() == [False, True, True, False]
+        assert stats.landunit_mask(ref, steps, {SiteKind.SOIL, SiteKind.LAKE})[1].tolist() == [True, False, False, True]
     finally:
         ref.close()
 
 
-def test_site_choices_of_the_cli_are_the_site_kinds():
-    from spel.proptest.cli import SITE_CHOICES
-    from spel.proptest.domain import SiteKind
+def test_landunit_choices_of_the_cli_are_the_landunit_kinds():
+    from spel.proptest.cli import LANDUNIT_CHOICES
+    from spel.proptest.hierarchy import LandunitKind
 
-    assert set(SITE_CHOICES) == {k.value for k in SiteKind}
+    assert set(LANDUNIT_CHOICES) == {k.value for k in LandunitKind}
 
 
 def test_active_dir_reads_the_saved_subspace(tmp_path):
@@ -376,7 +383,7 @@ def test_relation_under_other_options(tmp_path):
               "a%boost": {"range": [1.0, 2.0]}}
     rel = {"name": "the option adds the boost", "namelist": {"use_extra": True},
            "expect": "close(follow%y(p), base%y(p) + follow%boost(p), atol=1.0e-12) .and. finite(follow%extra(p))"}
-    tables = dict(domain={"pfts": [1, 13], "per_pft": 2, "nsets": 1}, scenario={"s": {"inputs": inputs}})  # one set is enough
+    tables = dict(domain={"gridcell": fake.vegetated(1, 13, copies=2), "nsets": 1}, scenario={"s": {"inputs": inputs}})  # one set is enough
     made = []
     s, inv, _ = load(tmp_path, relation=[rel, dict(rel, name="with a transform", follow={"a%x": "x(p) + 1.0"},
                                                  expect="close(follow%y(p), base%y(p) + 2.0 + follow%boost(p), atol=1.0e-12)")],

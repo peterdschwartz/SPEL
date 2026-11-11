@@ -9,8 +9,8 @@ import tomllib
 from pathlib import Path
 from typing import Any, Optional
 
-# `--sites` values: domain.SiteKind's (not imported here: the CLI loads lazily)
-SITE_CHOICES = ("soil", "crop", "urban", "lake")
+# `--landunits` values: hierarchy.LandunitKind's (not imported here: the CLI loads lazily)
+LANDUNIT_CHOICES = ("soil", "crop", "urban", "lake")
 
 
 def add_parser(subparsers) -> None:
@@ -22,100 +22,262 @@ def add_parser(subparsers) -> None:
     sub = p.add_subparsers(dest="proptest_cmd", required=True)
 
     def build_options(q, rebuild: bool = True) -> None:
-        q.add_argument("--fc", default=None, help="compiler (default: the spec's [case] build, $SPEL_FC, the machine's)")
-        q.add_argument("--acc", default=None, choices=["OFF", "MULTICORE", "GPU", "OPENMP"],
-                       help="OpenACC target of the build (default: the spec's, else OFF)")
+        q.add_argument(
+            "--fc",
+            default=None,
+            help="compiler (default: the spec's [case] build, $SPEL_FC, the machine's)",
+        )
+        q.add_argument(
+            "--acc",
+            default=None,
+            choices=["OFF", "MULTICORE", "GPU", "OPENMP"],
+            help="OpenACC target of the build (default: the spec's, else OFF)",
+        )
         if rebuild:
-            q.add_argument("--rebuild", action="store_true", help="rebuild the shared library first (the default "
-                           "when the case's sources changed since the last build)")
-            q.add_argument("--no-build", action="store_true", help="use the library as it is, even when sources changed")
+            q.add_argument(
+                "--rebuild",
+                action="store_true",
+                help="rebuild the shared library first (the default "
+                "when the case's sources changed since the last build)",
+            )
+            q.add_argument(
+                "--no-build",
+                action="store_true",
+                help="use the library as it is, even when sources changed",
+            )
 
-    b = sub.add_parser("build", help="generate the Python shim (SpelPyMod.F90) and build the case as a shared library")
+    b = sub.add_parser(
+        "build",
+        help="generate the Python shim (SpelPyMod.F90) and build the case as a shared library",
+    )
     b.add_argument("case", help="unit-test case name (unit-tests/<case>) or directory")
     build_options(b, rebuild=False)
-    b.add_argument("--dbg", action="store_true", help="debug build (-O0 + checks + coverage), in its own directory")
+    b.add_argument(
+        "--dbg",
+        action="store_true",
+        help="debug build (-O0 + checks + coverage), in its own directory",
+    )
     b.set_defaults(func=_reported(_build))
 
-    i = sub.add_parser("init", help="write a starter <case>.proptest.toml (rules from a reference capture, "
-                       "two first checks, TODO lines for what needs a decision)")
+    i = sub.add_parser(
+        "init",
+        help="write a starter <case>.proptest.toml (rules from a reference capture, "
+        "two first checks, TODO lines for what needs a decision)",
+    )
     i.add_argument("case", help="unit-test case name or directory")
-    i.add_argument("--reference", default=None, help="capture directory, or its name under unit-tests/input-data "
-                   "(default: the case's own, when it has one)")
-    i.add_argument("--where", default=None, help='patch-level condition for the statistics, e.g. "frac_veg_nosno(p) > 0"')
-    i.add_argument("--stride", type=int, default=1, help="use every N-th time step of the reference")
-    i.add_argument("--sites", nargs="+", default=None, choices=SITE_CHOICES, metavar="KIND",
-                   help="the site kinds of the domain and the statistics (soil crop urban lake; default: from "
-                   "the filters the routines take, e.g. urbanl -> urban)")
-    i.add_argument("--namelist", "--constant", dest="constant", action="append", default=[], metavar="NAME=VALUE",
-                   help="a namelist option or constant for the spec's [namelist] table, e.g. use_c13=true or one "
-                   "the reference lacks (soil_stress_method=0)")
-    i.add_argument("-o", "--output", default=None, help="the spec to write (default: ./<case>.proptest.toml)")
+    i.add_argument(
+        "--reference",
+        default=None,
+        help="capture directory, or its name under unit-tests/input-data "
+        "(default: the case's own, when it has one)",
+    )
+    i.add_argument(
+        "--where",
+        default=None,
+        help='patch-level condition for the statistics, e.g. "frac_veg_nosno(p) > 0"',
+    )
+    i.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="use every N-th time step of the reference",
+    )
+    i.add_argument(
+        "--landunits",
+        nargs="+",
+        default=None,
+        choices=LANDUNIT_CHOICES,
+        metavar="KIND",
+        help="the landunit kinds of the domain and the statistics (soil crop urban lake; default: "
+        "from the filters the routines take, e.g. urbanl -> urban)",
+    )
+    i.add_argument(
+        "--namelist",
+        "--constant",
+        dest="constant",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="a namelist option or constant for the spec's [namelist] table, e.g. use_c13=true or one "
+        "the reference lacks (soil_stress_method=0)",
+    )
+    i.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="the spec to write (default: ./<case>.proptest.toml)",
+    )
     i.add_argument("--force", action="store_true", help="replace an existing file")
     i.set_defaults(func=_reported(_init))
 
     r = sub.add_parser("run", help="run the checks of a spec")
     r.add_argument("spec", help="<name>.proptest.toml")
-    r.add_argument("-s", "--scenario", action="append", help="scenario name or glob (repeatable)")
-    r.add_argument("-k", "--check", action="append", help="check name or glob (repeatable)")
-    r.add_argument("-n", "--max-examples", type=int, default=None, help="Hypothesis examples per check")
+    r.add_argument(
+        "-s", "--scenario", action="append", help="scenario name or glob (repeatable)"
+    )
+    r.add_argument(
+        "-k", "--check", action="append", help="check name or glob (repeatable)"
+    )
+    r.add_argument(
+        "-n",
+        "--max-examples",
+        type=int,
+        default=None,
+        help="Hypothesis examples per check",
+    )
     r.add_argument("--seed", type=int, default=None, help="Hypothesis seed")
-    r.add_argument("--json", default=None, metavar="FILE", help="also write the outcomes as JSON")
-    r.add_argument("--junit", default=None, metavar="FILE", help="also write a JUnit XML report (CI)")
+    r.add_argument(
+        "--json", default=None, metavar="FILE", help="also write the outcomes as JSON"
+    )
+    r.add_argument(
+        "--junit",
+        default=None,
+        metavar="FILE",
+        help="also write a JUnit XML report (CI)",
+    )
     build_options(r)
     r.set_defaults(func=_reported(_run))
 
-    pr = sub.add_parser("probe", help="run a few examples of a scenario and say what the routine did: outputs "
-                        "never written, elements selected, aborts (do this before writing checks)")
+    pr = sub.add_parser(
+        "probe",
+        help="run a few examples of a scenario and say what the routine did: outputs "
+        "never written, elements selected, aborts (do this before writing checks)",
+    )
     pr.add_argument("spec", help="<name>.proptest.toml")
-    pr.add_argument("-s", "--scenario", action="append", help="scenario name or glob (default: all)")
-    pr.add_argument("-n", "--examples", type=int, default=5, help="examples per scenario (the first at the midpoints)")
+    pr.add_argument(
+        "-s", "--scenario", action="append", help="scenario name or glob (default: all)"
+    )
+    pr.add_argument(
+        "-n",
+        "--examples",
+        type=int,
+        default=5,
+        help="examples per scenario (the first at the midpoints)",
+    )
     pr.add_argument("--seed", type=int, default=0)
     build_options(pr)
     pr.set_defaults(func=_reported(_probe))
 
-    rp = sub.add_parser("replay", help="run a saved failing example again, without Hypothesis")
-    rp.add_argument("directory", help="unit-tests/proptest-data/<case>/failures/<scenario>__<check>")
+    rp = sub.add_parser(
+        "replay", help="run a saved failing example again, without Hypothesis"
+    )
+    rp.add_argument(
+        "directory", help="unit-tests/proptest-data/<case>/failures/<scenario>__<check>"
+    )
     build_options(rp, rebuild=False)
     rp.set_defaults(func=_reported(_replay))
 
-    cv = sub.add_parser("coverage", help="the branches of the routines a scenario never enters (gfortran debug build + gcov)")
+    cv = sub.add_parser(
+        "coverage",
+        help="the branches of the routines a scenario never enters (gfortran debug build + gcov)",
+    )
     cv.add_argument("spec", help="<name>.proptest.toml")
-    cv.add_argument("-s", "--scenario", action="append", help="scenario name or glob (default: all)")
-    cv.add_argument("-n", "--examples", type=int, default=20, help="examples per scenario")
+    cv.add_argument(
+        "-s", "--scenario", action="append", help="scenario name or glob (default: all)"
+    )
+    cv.add_argument(
+        "-n", "--examples", type=int, default=20, help="examples per scenario"
+    )
     cv.add_argument("--seed", type=int, default=0)
-    cv.add_argument("--all-files", action="store_true", help="every source of the case, not only the routines under test")
-    cv.add_argument("--all", action="store_true", help="also list the branches the namelist options turn off")
+    cv.add_argument(
+        "--all-files",
+        action="store_true",
+        help="every source of the case, not only the routines under test",
+    )
+    cv.add_argument(
+        "--all",
+        action="store_true",
+        help="also list the branches the namelist options turn off",
+    )
     cv.set_defaults(func=_reported(_coverage))
 
-    s = sub.add_parser("show", help="the case's variable inventory and the spec's scenarios and checks")
+    s = sub.add_parser(
+        "show", help="the case's variable inventory and the spec's scenarios and checks"
+    )
     s.add_argument("target", help="<name>.proptest.toml or a case name/directory")
-    s.add_argument("--kind", action="append", help="list the variables of this kind (input, inout, output, ...)")
+    s.add_argument(
+        "--kind",
+        action="append",
+        help="list the variables of this kind (input, inout, output, ...)",
+    )
     s.set_defaults(func=_reported(_show))
 
-    st = sub.add_parser("stats", help="reference statistics -> an input rule file and a markdown report "
-                        "(design aid; values never feed a test)")
+    st = sub.add_parser(
+        "stats",
+        help="reference statistics -> an input rule file and a markdown report "
+        "(design aid; values never feed a test)",
+    )
     st.add_argument("case", help="unit-test case name or directory")
-    st.add_argument("--reference", required=True, help="capture directory (or its name under unit-tests/input-data)")
-    st.add_argument("--where", default=None, help='patch-level Fortran condition, e.g. "frac_veg_nosno(p) > 0"')
+    st.add_argument(
+        "--reference",
+        required=True,
+        help="capture directory (or its name under unit-tests/input-data)",
+    )
+    st.add_argument(
+        "--where",
+        default=None,
+        help='patch-level Fortran condition, e.g. "frac_veg_nosno(p) > 0"',
+    )
     st.add_argument("--stride", type=int, default=1, help="use every N-th time step")
-    st.add_argument("--sites", nargs="+", default=None, choices=SITE_CHOICES, metavar="KIND",
-                    help="only patches on landunits of these kinds (soil crop urban lake), and their coarser "
-                    "elements")
-    st.add_argument("--namelist", "--constant", dest="constant", action="append", default=[], metavar="NAME=VALUE",
-                    help="a namelist option or constant over the reference's (e.g. soil_stress_method=0): the "
-                    "statistics cover the inputs that are read under these options")
+    st.add_argument(
+        "--landunits",
+        nargs="+",
+        default=None,
+        choices=LANDUNIT_CHOICES,
+        metavar="KIND",
+        help="only patches on landunits of these kinds (soil crop urban lake), and their coarser "
+        "elements",
+    )
+    st.add_argument(
+        "--namelist",
+        "--constant",
+        dest="constant",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="a namelist option or constant over the reference's (e.g. soil_stress_method=0): the "
+        "statistics cover the inputs that are read under these options",
+    )
     st.set_defaults(func=_reported(_stats))
 
-    a = sub.add_parser("subspace", help="active subspace of an output over a scenario (batched finite differences)")
+    a = sub.add_parser(
+        "subspace",
+        help="active subspace of an output over a scenario (batched finite differences)",
+    )
     a.add_argument("spec", help="<name>.proptest.toml")
     a.add_argument("--scenario", required=True)
-    a.add_argument("--output", required=True, help='Fortran expression per element, e.g. "t_veg(p)"')
-    a.add_argument("--input", action="append", help="restrict to these inputs (repeatable)")
-    a.add_argument("--parameters", action="store_true", help="also step the inputs without a subgrid dimension "
-                   "(ruled parameters): one more call per direction and base draw")
-    a.add_argument("--samples", type=int, default=4, help="base draws (each gives one point per element)")
-    a.add_argument("--h", type=float, default=1.0e-3, help="step in the inputs' [0, 1] quantile coordinate")
-    a.add_argument("--max-sets", type=int, default=33, help="domain copies per call (directions per call + 1)")
+    a.add_argument(
+        "--output",
+        required=True,
+        help='Fortran expression per element, e.g. "t_veg(p)"',
+    )
+    a.add_argument(
+        "--input", action="append", help="restrict to these inputs (repeatable)"
+    )
+    a.add_argument(
+        "--parameters",
+        action="store_true",
+        help="also step the inputs without a subgrid dimension "
+        "(ruled parameters): one more call per direction and base draw",
+    )
+    a.add_argument(
+        "--samples",
+        type=int,
+        default=4,
+        help="base draws (each gives one point per element)",
+    )
+    a.add_argument(
+        "--h",
+        type=float,
+        default=1.0e-3,
+        help="step in the inputs' [0, 1] quantile coordinate",
+    )
+    a.add_argument(
+        "--max-sets",
+        type=int,
+        default=33,
+        help="domain copies per call (directions per call + 1)",
+    )
     a.add_argument("--bootstrap", type=int, default=200)
     a.add_argument("--seed", type=int, default=0)
     a.set_defaults(func=_reported(_subspace))
@@ -152,10 +314,10 @@ def _build(args) -> None:
     print(build.build(_case_dir(args.case), quiet=False, variant=variant))
 
 
-def _sites(names: Optional[list[str]]):
-    from spel.proptest.domain import SiteKind
+def _landunits(names: Optional[list[str]]):
+    from spel.proptest.hierarchy import LandunitKind
 
-    return {SiteKind(n) for n in names} if names else None
+    return {LandunitKind(n) for n in names} if names else None
 
 
 def _init(args) -> None:
@@ -164,15 +326,28 @@ def _init(args) -> None:
 
     case_dir = _case_dir(args.case)
     inv = Inventory.load(case_dir)
-    out = Path(args.output) if args.output else Path.cwd() / f"{case_dir.name}.proptest.toml"
-    path, todo = scaffold.write(case_dir, inv, out, reference=scaffold.reference_dir(case_dir, args.reference),
-                                where=args.where, stride=args.stride,
-                                constants=dict(_parse_constant(c) for c in args.constant), force=args.force,
-                                sites=_sites(args.sites))
+    out = (
+        Path(args.output)
+        if args.output
+        else Path.cwd() / f"{case_dir.name}.proptest.toml"
+    )
+    path, todo = scaffold.write(
+        case_dir,
+        inv,
+        out,
+        reference=scaffold.reference_dir(case_dir, args.reference),
+        where=args.where,
+        stride=args.stride,
+        constants=dict(_parse_constant(c) for c in args.constant),
+        force=args.force,
+        landunits=_landunits(args.landunits),
+    )
     print(path)
     for line in todo:
         print(f"  to do: {line}")
-    print(f"next: spel proptest show {path}; spel proptest probe {path}; spel proptest run {path}")
+    print(
+        f"next: spel proptest show {path}; spel proptest probe {path}; spel proptest run {path}"
+    )
 
 
 def _run(args) -> None:
@@ -184,8 +359,17 @@ def _run(args) -> None:
         settings["max_examples"] = args.max_examples
     if args.seed is not None:
         settings["seed"] = args.seed
-    outcomes = runner.run(sp, inv, scenarios=args.scenario, checks=args.check, settings=settings,
-                          fc=args.fc, acc=args.acc, rebuild=args.rebuild, no_build=args.no_build)
+    outcomes = runner.run(
+        sp,
+        inv,
+        scenarios=args.scenario,
+        checks=args.check,
+        settings=settings,
+        fc=args.fc,
+        acc=args.acc,
+        rebuild=args.rebuild,
+        no_build=args.no_build,
+    )
     if args.json:
         runner.write_json(outcomes, sp, settings, Path(args.json))
     if args.junit:
@@ -214,10 +398,14 @@ def _probe(args) -> None:
 
     sp, inv = spec.load(Path(args.spec))
     names = _selected_scenarios(sp, args.scenario)
-    with runner.Session(sp, inv, fc=args.fc, acc=args.acc, rebuild=args.rebuild, no_build=args.no_build) as s:
+    with runner.Session(
+        sp, inv, fc=args.fc, acc=args.acc, rebuild=args.rebuild, no_build=args.no_build
+    ) as s:
         for name in names:
             scen = sp.scenarios[name]
-            print(s.for_scenario(scen).probe(scen, n=args.examples, seed=args.seed).text())
+            print(
+                s.for_scenario(scen).probe(scen, n=args.examples, seed=args.seed).text()
+            )
 
 
 def _replay(args) -> None:
@@ -233,7 +421,14 @@ def _coverage(args) -> None:
 
     sp, inv = spec.load(Path(args.spec))
     for name in _selected_scenarios(sp, args.scenario):
-        res = coverage.measure(sp, inv, name, examples=args.examples, seed=args.seed, all_files=args.all_files)
+        res = coverage.measure(
+            sp,
+            inv,
+            name,
+            examples=args.examples,
+            seed=args.seed,
+            all_files=args.all_files,
+        )
         print(coverage.report(res, show_off=args.all))
 
 
@@ -264,48 +459,82 @@ def _show(args) -> None:
             print(f"  {v.name}({dims}) {v.type}{units}")
     if sp is None:
         if inv.options():
-            print("namelist options the routines test (declared defaults): "
-                  + ", ".join(f"{n} = {inv.fortran_value(n, d) if d is not None else '?'}" for n, d in sorted(inv.options().items())))
+            print(
+                "namelist options the routines test (declared defaults): "
+                + ", ".join(
+                    f"{n} = {inv.fortran_value(n, d) if d is not None else '?'}"
+                    for n, d in sorted(inv.options().items())
+                )
+            )
         return
-    from spel.proptest.domain import CONSTANTS_FILE, read_constants, time_values
+    from spel.proptest.domain import CONSTANTS_FILE, DOMAIN_CONSTANTS, read_constants, time_values
     from spel.proptest.shim import direct_init
 
-    from spel.proptest.domain import Layout, check_type_codes
-
-    lay = Layout.of(sp.domain, check_type_codes(inv.parameters))
-    sites = Counter(s.label for s in lay.set_sites)
-    print(f"domain: {', '.join(f'{n} x {label}' for label, n in sites.items())} per set, {sp.domain.nsets} sets; "
-          "elements " + ", ".join(f"{lev} {n}" for lev, n in lay.sizes().items()))
+    lay = sp.domain.layout(inv.parameters)
+    cells = Counter(g.label for g in lay.set_gridcells)
+    print(
+        f"domain: {', '.join(f'{n} x {label}' for label, n in cells.items())} per set, {sp.domain.nsets} sets; "
+        "elements " + ", ".join(f"{lev} {n}" for lev, n in lay.sizes().items())
+    )
+    decided = {k: f(lay) for k, f in DOMAIN_CONSTANTS.items() if k in inv.constants}
+    if decided:
+        print("decided by the domain: " + ", ".join(f"{k} = {v}" for k, v in decided.items()))
     if sp.domain.init:
         print(f"init: {sp.domain.init} ([domain] init)")
     elif direct_init(inv):
-        print("init: direct (the case allocates from descriptors: no inputs file is written)")
+        print(
+            "init: direct (the case allocates from descriptors: no inputs file is written)"
+        )
     else:
-        print("init: files (the case predates direct init; `spel create` it again for that)")
-    reference = read_constants(sp.domain.reference / CONSTANTS_FILE) if sp.domain.reference is not None else {}
+        print(
+            "init: files (the case predates direct init; `spel create` it again for that)"
+        )
+    reference = (
+        read_constants(sp.domain.reference / CONSTANTS_FILE)
+        if sp.domain.reference is not None
+        else {}
+    )
     for name, sc in sp.scenarios.items():
         consts = spec.constants(sp, inv, sc)
         live = inv.configured(consts)
         over = f"{sc.level} in {sc.filter}" if sc.filter else sc.level
         dormant = spec.dormant_rules(sc, live)
-        print(f"\nscenario {name}: over {over}, {len(sc.inputs)} ruled inputs, {len(sc.derive)} derived, "
-              f"{len(sc.assume)} assumptions")
+        print(
+            f"\nscenario {name}: over {over}, {len(sc.inputs)} ruled inputs, {len(sc.derive)} derived, "
+            f"{len(sc.assume)} assumptions"
+        )
         print("  namelist options: " + _options(sp, inv, sc, consts, reference))
-        dead = Counter(", ".join(v.dead_under) for v in live.vars.values() if v.kind == "unused" and v.dead_under)
+        dead = Counter(
+            ", ".join(v.dead_under)
+            for v in live.vars.values()
+            if v.kind == "unused" and v.dead_under
+        )
         if dead:
-            print(f"  {sum(dead.values())} variables are not used under these options ("
-                  + "; ".join(f"{k}: {n}" for k, n in dead.most_common()) + ")")
+            print(
+                f"  {sum(dead.values())} variables are not used under these options ("
+                + "; ".join(f"{k}: {n}" for k, n in dead.most_common())
+                + ")"
+            )
         if dormant:
-            print("  rules for inputs that are not read under these options (dormant): " + ", ".join(dormant))
+            print(
+                "  rules for inputs that are not read under these options (dormant): "
+                + ", ".join(dormant)
+            )
         missing = spec.missing_rules(sc, live, consts)
         if missing:
             print("  inputs without a rule: " + ", ".join(missing))
     consts = spec.constants(sp, inv)
     defaulted = time_values(inv, sp.domain, consts)[1]
     if defaulted:
-        print("\ntime scalars not set in [domain.time]: " + ", ".join(f"{k} = {v}" for k, v in sorted(defaulted.items())))
+        print(
+            "\ntime scalars not set in [domain.time]: "
+            + ", ".join(f"{k} = {v}" for k, v in sorted(defaulted.items()))
+        )
     if sp.compare is not None:
-        print(f"compare: {sp.compare.case_dir.name}" + (f" build {sp.compare.build}" if sp.compare.build else ""))
+        print(
+            f"compare: {sp.compare.case_dir.name}"
+            + (f" build {sp.compare.build}" if sp.compare.build else "")
+        )
     for c in sp.checks:
         extra = f" [namelist {c.namelist}]" if getattr(c, "namelist", None) else ""
         print(f"{c.table} {c.name!r}{extra}: {c.judged.text}")
@@ -328,7 +557,9 @@ def _options(sp, inv, scenario, consts, reference) -> str:
             source = "reference"
         else:
             source = "not given: 0"
-        out.append(f"{name} = {inv.fortran_value(name, consts.get(name, 0))} ({source})")
+        out.append(
+            f"{name} = {inv.fortran_value(name, consts.get(name, 0))} ({source})"
+        )
     return ", ".join(out)
 
 
@@ -341,7 +572,9 @@ def _parse_constant(text: str) -> tuple[str, Any]:
     try:
         return name.strip().lower(), tomllib.loads(f"v = {value.strip()}")["v"]
     except tomllib.TOMLDecodeError:
-        raise SpecError(f"--constant {text!r}: VALUE must be a number or a quoted string") from None
+        raise SpecError(
+            f"--constant {text!r}: VALUE must be a number or a quoted string"
+        ) from None
 
 
 def _stats(args) -> None:
@@ -355,8 +588,15 @@ def _stats(args) -> None:
     inv = Inventory.load(case_dir)
     consts = read_constants(ref / CONSTANTS_FILE)
     consts.update(dict(_parse_constant(c) for c in args.constant))
-    live = inv.configured(consts) 
-    res = stats.compute(live, ref, where=args.where, stride=args.stride, constants=consts, sites=_sites(args.sites))
+    live = inv.configured(consts)
+    res = stats.compute(
+        live,
+        ref,
+        where=args.where,
+        stride=args.stride,
+        constants=consts,
+        landunits=_landunits(args.landunits),
+    )
     for path in stats.write(live, res, case_dir):
         print(path)
 
@@ -365,9 +605,19 @@ def _subspace(args) -> None:
     from spel.proptest import spec, subspace
 
     sp, inv = spec.load(Path(args.spec))
-    res = subspace.analyze(sp, inv, args.scenario, args.output, samples=args.samples, h=args.h,
-                           max_sets=args.max_sets, seed=args.seed, bootstrap=args.bootstrap, inputs=args.input,
-                           parameters=args.parameters)
+    res = subspace.analyze(
+        sp,
+        inv,
+        args.scenario,
+        args.output,
+        samples=args.samples,
+        h=args.h,
+        max_sets=args.max_sets,
+        seed=args.seed,
+        bootstrap=args.bootstrap,
+        inputs=args.input,
+        parameters=args.parameters,
+    )
     j, md = subspace.write(res, sp.case_dir)
     print(subspace.report_md(res))
     print(j)
