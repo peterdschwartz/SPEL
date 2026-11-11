@@ -50,7 +50,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterator, Optional
+from typing import TYPE_CHECKING, Iterator, Optional
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_parser.spel_ast import SubroutineDefinitionConstruct
 
 from spel.transforms.core.registry import transform
 from spel.transforms.core.transform import Change, Plan as TPlan, Refusal, Transform
@@ -228,10 +232,13 @@ def pointer_target(stmt) -> Optional[tuple[Expression, Expression]]:
     return None
 
 
-def is_spval_fill(stmt) -> bool:
+def is_spval_fill(stmt: Statement) -> bool:
     """`x(...) = spval` (any section) on its own."""
     expr = stmt.expression if isinstance(stmt, ExpressionStatement) else None
-    rhs = expr.right_expr if isinstance(expr, InfixExpression) else getattr(stmt, "right", None)
+    if isinstance(expr, InfixExpression):
+        rhs = expr.right_expr
+    else:
+        rhs = stmt.right if isinstance(stmt, AssignmentStatement) else None
     return rhs is not None and str(rhs).strip().lower() == "spval"
 
 
@@ -328,6 +335,10 @@ class Rewriter:
     module, the driver and initialization calls, the clump offset) are made once.
     """
 
+    # None on a Rewriter made without __init__ (snippet tests): no analysis, no cache yet
+    subs: Optional[dict[str, Subroutine]] = None
+    _routines: Optional[dict[str, SubroutineDefinitionConstruct]] = None
+
     def __init__(self, fut, sels: Selection | list[Selection]):
         self.fut = fut
         self.sels = sels if isinstance(sels, list) else [sels]
@@ -337,7 +348,7 @@ class Rewriter:
         self._prologued: dict[str, set[str]] = defaultdict(set)  # routine -> subgrids with a k0 local
         self._module_use: set = set()
         self._trees: dict[str, object] = {}  # file -> parsed ModuleConstruct
-        self._routines: dict[str, object] = {}  # routine -> parse tree with spans
+        self._routines = {}  # routine -> parse tree with spans
         self.init_plans: dict[str, list[InitPlan]] = {}  # selection type -> plans
         self.restart_plans: dict[str, list[RestartPlan]] = {}
         self.bind_module: str = ""
@@ -488,14 +499,14 @@ class Rewriter:
             ]
         )
 
-    def tree(self, sub):
+    def tree(self, sub: Subroutine) -> SubroutineDefinitionConstruct:
         """The routine's parse tree with source spans (cached)."""
-        if not hasattr(self, "_routines"):
+        if self._routines is None:
             self._routines = {}
         if sub.id not in self._routines:
             try:
                 # to the END statement: `endline` stops at the routine's own `contains`, if any
-                end = getattr(sub, "end_stmt_ln", None) or sub.endline
+                end = sub.end_stmt_ln or sub.endline
                 self._routines[sub.id] = parse_routine(sub.filepath, sub.startline, end, keep_spans=True)
             except BaseException as err:  # the parser exits on fatal errors
                 raise RewriteError(f"{sub.id}: does not parse: {err}")
@@ -503,7 +514,7 @@ class Rewriter:
 
     def site_tree(self, fe: FileEdits, site, end: int):
         """The tree of the site's routine; without an analysis (snippets), of its statement alone."""
-        subs = getattr(self, "subs", None)
+        subs = self.subs
         if subs is not None and site.sub in subs:
             return self.tree(subs[site.sub])
         lines = [LineTuple(line=fe.lines[i], ln=i) for i in range(statement_start(fe.lines, site.ln), end + 1)]

@@ -21,26 +21,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from typing import TYPE_CHECKING, Optional
+
 from spel.scripts.fortran_parser.scope_walk import Access
 from spel.transforms.core.edits import replace_cols
 from spel.transforms.core.registry import transform
 from spel.transforms.core.transform import Change, Plan, Refusal, Transform
 from spel.transforms.filter_locals import TextUses
 
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_parser.spel_ast import EntityDecl, SubroutineDefinitionConstruct
 
-def _one_line(span) -> bool:
+
+def _one_line(span: Optional[tuple[int, int, int, int]]) -> bool:
     return span is not None and span[0] == span[2]
 
 
-def plan_routine(sub, lines: list[str], tree, findings) -> tuple[list, list[str], list[str]]:
+def plan_routine(sub: Subroutine, lines: list[str], tree: SubroutineDefinitionConstruct,
+                 findings) -> tuple[list, list[str], list[str]]:
     """(edits, changed names, reasons) for the `scalar` findings of one routine."""
     from spel.scripts.fortran_parser.spel_ast import VariableDecl
     from spel.scripts.registrations import iter_statements
 
-    if getattr(tree, "contains", None):
+    if tree.contains:
         return [], [], ["has internal procedures"]
     uses = TextUses(sub, lines, tree)
-    ents = {}
+    ents: dict[str, EntityDecl] = {}
     for stmt, _ in iter_statements(tree.body):
         if isinstance(stmt, VariableDecl):
             for ent in stmt.entities:
@@ -53,7 +60,7 @@ def plan_routine(sub, lines: list[str], tree, findings) -> tuple[list, list[str]
     for f in findings:
         name = f.name.lower()
         ent = ents.get(name)
-        if ent is None or not ent.bounds or ent.init is not None or not _one_line(getattr(ent, "span", None)):
+        if ent is None or not ent.bounds or ent.init is not None or not _one_line(ent.span):
             why.append(f"{name}: declaration is not `{name}(dims)` on one line")
             continue
         found = uses.subscripted.get(name, [])

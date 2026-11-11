@@ -177,10 +177,10 @@ def excluded_calls(fut, drv: Path) -> list[tuple[int, int, list[tuple[str, str]]
     from spel.transforms.acc_sync import _Types
     from spel.transforms.core.query import construct_end as _end_of
 
-    mod = next(m for m in parse_modules(drv) if m.name.lower() == "elm_driver")
-    body = next(p for p in mod.subprograms if p.name.lower() == "elm_drv")
+    mod: A.ModuleConstruct = next(m for m in parse_modules(drv) if m.name.lower() == "elm_driver")
+    body: A.SubroutineDefinitionConstruct = next(p for p in mod.subprograms if p.name.lower() == "elm_drv")
     names: set[str] = set()
-    for st in list(getattr(mod.spec, "statements", [])) + list(body.body.statements):
+    for st in list(mod.spec.statements) + list(body.body.statements):
         if isinstance(st, A.UseStatement) and st.module.lower() in bad_modules and st.has_only:
             names |= {str(o).split("=>")[0].strip().lower() for o in st.objs}
     for skip in ("t_startf", "t_stopf", "endrun", "shr_sys_flush", "shr_sys_abort", "get_curr_date",
@@ -196,7 +196,8 @@ def excluded_calls(fut, drv: Path) -> list[tuple[int, int, list[tuple[str, str]]
         if name is None or name not in names:
             continue
         insts = []
-        for arg in getattr(st.function, "args", []) or []:
+        # only a FuncExpression (`call x(...)`) has arguments; `call x` parses to an Identifier
+        for arg in st.function.args if isinstance(st.function, A.FuncExpression) else []:
             parts = _designator_parts(arg)
             if parts is None or parts[1]:
                 continue

@@ -41,12 +41,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from spel.transforms.core.edits import Edit, EditSet, insert, replace
 from spel.transforms.core.registry import transform
 from spel.transforms.core.source import indent
 from spel.transforms.core.transform import Change, Plan, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_parser.spel_ast import SubroutineDefinitionConstruct
 
 TAG = "! spel section-loop"
 INDEX = "spel_i"
@@ -401,7 +405,7 @@ def rewrite(stmt: SectionStmt, indent: str, first_index: int = 1) -> tuple[list[
     return out, n
 
 
-def section_edits(sub, lines: list[str], stmts: list[SectionStmt], tree,
+def section_edits(sub: Subroutine, lines: list[str], stmts: list[SectionStmt], tree: SubroutineDefinitionConstruct,
                   notes: Optional[list[str]] = None) -> tuple[list[Edit], int]:
     """The edits rewriting the statements of one routine as loop nests, plus the declaration of
     the loop indices after the last declaration (`tree`: the routine's parse tree). A statement
@@ -424,14 +428,13 @@ def section_edits(sub, lines: list[str], stmts: list[SectionStmt], tree,
         return [], 0
     # after the last declaration, not at the first executable statement: `!$acc enter data`
     # directives placed between them by acc-locals are executable
-    last = getattr(sub.record, "last_decl_ln", -1)
+    last = sub.record.last_decl_ln
     at = statement_end(lines, last) + 1 if last >= 0 else first_executable(tree, sub.record)
     # before the routine's DATA statements: nvfortran rejects a type declaration after them
     # ("Incorrect sequence of statements"; SNICAR's mie tables), Intel and gfortran accept it
     from spel.scripts.fortran_parser.spel_ast import DataStatement
 
-    data = [st.lineno for st in getattr(getattr(tree, "body", None), "statements", [])
-            if isinstance(st, DataStatement) and getattr(st, "lineno", None) is not None]
+    data = [st.lineno for st in tree.body.statements if isinstance(st, DataStatement)]
     if data and min(data) < at:
         at = min(data)
     ref = lines[last] if last >= 0 and lines[last] else lines[at]
@@ -440,7 +443,7 @@ def section_edits(sub, lines: list[str], stmts: list[SectionStmt], tree,
     return edits, len(edits) - 1
 
 
-def apply_to_lines(sub, lines: list[str], stmts: list[SectionStmt], tree, notes: Optional[list[str]] = None) -> int:
+def apply_to_lines(sub: Subroutine, lines: list[str], stmts: list[SectionStmt], tree: SubroutineDefinitionConstruct, notes: Optional[list[str]] = None) -> int:
     """`section_edits` applied to `lines` in place. Returns the count."""
     edits, done = section_edits(sub, lines, stmts, tree, notes)
     lines[:] = EditSet().extend(edits).apply(lines)

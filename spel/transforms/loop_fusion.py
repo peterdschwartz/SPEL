@@ -58,13 +58,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from spel.scripts.fortran_parser import spel_ast as A
 from spel.transforms.core.edits import replace
 from spel.transforms.core.registry import transform
 from spel.transforms.core.source import code, statement_end
 from spel.transforms.core.transform import Change, Plan, Refusal, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.utilityFunctions import Variable
+    from spel.transforms.acc_sync import _Types
 
 TAG = "! spel loop-fusion"
 NO_FUSE = (A.ExitStatement, A.ReturnStatement, A.GotoStatement, A.StopStatement)  # CycleStatement is an ExitStatement
@@ -98,7 +103,8 @@ class Body:
 
 
 class Fuser:
-    def __init__(self, ctx, sub, lines: list[str], types, directives, tree):
+    def __init__(self, ctx, sub: Subroutine, lines: list[str], types: _Types, directives,
+                 tree: A.SubroutineDefinitionConstruct):
         self.ctx, self.sub, self.lines, self.types = ctx, sub, lines, types
         self.rec = sub.record
         self.directives = directives
@@ -121,11 +127,9 @@ class Fuser:
             from spel.scripts.registrations import iter_statements
 
             self._assoc = []
-            body = getattr(self.tree, "body", None)
-            if body is not None:
-                for st, _ in iter_statements(body):
-                    if isinstance(st, A.AssociateConstruct):
-                        self._assoc.append((st.lineno, st.end_ln, {k.lower(): v for k, v in st.associations.items()}))
+            for st, _ in iter_statements(self.tree.body):
+                if isinstance(st, A.AssociateConstruct):
+                    self._assoc.append((st.lineno, st.end_ln, {k.lower(): v for k, v in st.associations.items()}))
         return self._assoc
 
     def _whole_array(self, name: str, ln: int, depth: int = 0) -> bool:
@@ -150,20 +154,20 @@ class Fuser:
         parts = path.lower().split("%")
         bounds = None
         if len(parts) == 1:
-            g = self.types.globals.get(parts[0])
+            g: Optional[Variable] = self.types.globals.get(parts[0])
             if g is not None and self.rec.declaration(parts[0]) is None:
-                bounds = getattr(g, "alloc_bounds", None) or getattr(g, "bounds", None)
+                bounds = g.alloc_bounds or g.bounds
         else:
             b = self.types.base(self.sub, parts[0])
             typ = b[0] if b else None
-            comp = None
+            comp: Optional[Variable] = None
             for p in parts[1:]:
                 t = self.types.types.get(typ)
                 comp = t.components.get(p) if t is not None else None
                 if comp is None:
                     return None
                 typ = str(comp.type).lower()
-            bounds = getattr(comp, "bounds", None)
+            bounds = comp.bounds if comp is not None else None
         if not bounds:
             return None
         dims = [d.replace(" ", "").lower() for d in split_top_level(bounds.strip().strip("()"), ",")]
@@ -393,7 +397,9 @@ class LoopFusion(Transform):
         types = _Types(ctx.fut)
         for sub in sorted(ctx.routines(opts.routines or None), key=lambda s: (str(ctx.path(s)), s.id)):
             rec = sub.record
-            tops = [l for l in getattr(rec, "loop_nest", []) or [] if l.depth == 0]
+            if rec is None:
+                continue
+            tops = [l for l in rec.loop_nest if l.depth == 0]
             if len(tops) < 1:
                 continue
             lines = ctx.lines(sub)

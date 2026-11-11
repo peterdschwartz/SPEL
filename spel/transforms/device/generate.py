@@ -36,11 +36,19 @@ import subprocess
 from spel.transforms.core.fortran import if_then, wrap_statement
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from spel.transforms.core.edits import EditSet, insert
 from spel.transforms.core.registry import transform
 from spel.transforms.core.transform import Change, Plan as TPlan, Refusal, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.DerivedType import DerivedType
+    from spel.scripts.fortran_modules import FortranModule
+    from spel.scripts.functional_unit_test import FunctionalUnitTest
+    from spel.scripts.registrations import Guard
+    from spel.scripts.utilityFunctions import Variable
 
 MODULE_NAME = "ElmDeviceDataMod"
 TAG = "! spel device-data"
@@ -115,14 +123,14 @@ def type_is_public(dtype, fut) -> bool:
     return t is not None and t.access == "public"
 
 
-def variable_is_public(name: str, mod) -> bool:
+def variable_is_public(name: str, mod: FortranModule) -> bool:
     """Whether module variable `name` can be `use`d (from the parsed declarations)."""
     spec = _spec(_module_path(mod))
     v = spec.variables.get(name.lower()) if spec else None
     return v is not None and v.access == "public"
 
 
-def plan(fut, only_instances: Optional[set[str]] = None, source_of=None) -> Plan:
+def plan(fut: FunctionalUnitTest, only_instances: Optional[set[str]] = None, source_of=None) -> Plan:
     """
     Every module-level instance of an analyzed derived type, with what the copy needs.
     `only_instances` restricts the instances (a unit test's); `source_of(mod)` gives the
@@ -152,7 +160,7 @@ def plan(fut, only_instances: Optional[set[str]] = None, source_of=None) -> Plan
             if not mod or mod not in fut.module_dict:
                 skipped.append(f"{inst.name}: no declaring module ({inst.declaration!r})")
                 continue
-            if getattr(inst, "private", False):
+            if inst.private:
                 skipped.append(f"{mod}::{inst.name}: private")
                 continue
             gv = fut.module_dict[mod].global_vars
@@ -161,7 +169,7 @@ def plan(fut, only_instances: Optional[set[str]] = None, source_of=None) -> Plan
                 # instances of the component's type; only module variables are copied here
                 skipped.append(f"{mod}::{inst.name}: not a module variable (nested component)")
                 continue
-            if getattr(inst, "parameter", False):
+            if inst.parameter:
                 skipped.append(f"{mod}::{inst.name}: parameter (constant, cannot be a data-clause item)")
                 continue
             if not variable_is_public(inst.name, fut.module_dict[mod]):
@@ -184,8 +192,8 @@ def plan(fut, only_instances: Optional[set[str]] = None, source_of=None) -> Plan
                     module=mod,
                     type_name=dtype.type_name,
                     dim=int(inst.dim or 0),
-                    allocatable=bool(getattr(inst, "allocatable", False)),
-                    pointer=bool(getattr(inst, "ptrscalar", False)),
+                    allocatable=bool(inst.allocatable),
+                    pointer=bool(inst.ptrscalar),
                     declared=inst.name.lower() in declared_cache[mod],
                 )
             )
@@ -208,7 +216,7 @@ class GlobalVar:
     pointer: bool = False
 
 
-def plan_globals(fut, type_dict, source_of=None) -> tuple[list[GlobalVar], list[str]]:
+def plan_globals(fut: FunctionalUnitTest, type_dict: dict[str, DerivedType], source_of=None) -> tuple[list[GlobalVar], list[str]]:
     from spel.scripts.io.netcdf_io import alloc_status
 
     """
@@ -235,11 +243,11 @@ def plan_globals(fut, type_dict, source_of=None) -> tuple[list[GlobalVar], list[
             g = gv.get(n)
             if g is None:
                 skipped.append(f"global {mname}::{n}: declared but not a module variable of the analysis")
-            elif getattr(g, "parameter", False) or str(g.type).lower() in type_dict:
+            elif g.parameter or str(g.type).lower() in type_dict:
                 continue
             elif str(g.type).lower().startswith("character"):
                 skipped.append(f"global {mname}::{n}: character (stays on the host)")
-            elif getattr(g, "private", False) or not variable_is_public(g.name, mod):
+            elif g.private or not variable_is_public(g.name, mod):
                 skipped.append(f"global {mname}::{n}: private (its module must update the device copy)")
             else:
                 # storage test from the parsed declaration (the analysis flags some fixed-size
@@ -263,35 +271,37 @@ class Guards:
     notes: list[str] = field(default_factory=list)
 
 
-def _history_registrations(fut) -> dict[str, list[tuple]]:
+def _history_registrations(fut: FunctionalUnitTest) -> dict[str, list[tuple[Guard, ...]]]:
     """type -> the guards (enclosing ifs, `registrations.Guard`) of each of its history registrations."""
-    out: dict[str, list[tuple]] = {}
+    out: dict[str, list[tuple[Guard, ...]]] = {}
     inst_type = {i.name.lower(): t.type_name.lower() for t in fut.type_dict.values() for i in t.instances.values()}
+    sub: Subroutine
     for sub in fut.subroutine_dict.values():
-        for r in getattr(sub, "registrations", []) or []:
+        for r in sub.registrations:
             if r.kind != "hist" or not r.field:
                 continue
-            var = sub.arguments.get(r.base) if hasattr(sub, "arguments") else None
+            var = sub.arguments.get(r.base)
             if var is not None:
                 tname = str(var.type).lower().replace("class(", "").replace("type(", "").rstrip(")")
             else:
                 tname = inst_type.get(r.base.lower(), "")
             if tname:
-                out.setdefault(tname, []).append(tuple(getattr(r, "guards", ()) or ()))
+                out.setdefault(tname, []).append(tuple(r.guards))
     return out
 
 
-def _history_components(fut) -> set[tuple[str, str]]:
+def _history_components(fut: FunctionalUnitTest) -> set[tuple[str, str]]:
     """(type, first component) of every history registration: hist_update_hbuf (outside the
     analysis) reads these on the device whatever the analyzed routines do."""
     out: set[tuple[str, str]] = set()
     inst_type = {i.name.lower(): t.type_name.lower() for t in fut.type_dict.values() for i in t.instances.values()}
+    sub: Subroutine
     for sub in fut.subroutine_dict.values():
-        for r in getattr(sub, "registrations", []) or []:
+        for r in sub.registrations:
             if r.kind != "hist" or not r.field:
                 continue
             first = r.field.split("%")[0].lower()
-            var = sub.arguments.get(r.base) if hasattr(sub, "arguments") else None
+            var = sub.arguments.get(r.base)
             if var is not None:
                 tname = str(var.type).lower().replace("class(", "").replace("type(", "").rstrip(")")
             else:
@@ -305,12 +315,12 @@ def _cond_key(text: str) -> str:
     return str(text).replace(" ", "").replace("(", "").replace(")", "").lower()
 
 
-def _registration_implies(guards: tuple, cond) -> bool:
+def _registration_implies(guards: tuple[Guard, ...], cond) -> bool:
     """Whether a registration's enclosing ifs imply `cond` (the copy guard): some disjunct of `cond`
     has all its literals among the (non-negated) guards. Conservative: anything else is False."""
     from spel.scripts.fortran_parser.boolen_expression import AllOf, AnyOf
 
-    keys = {_cond_key(g) for g in guards if not getattr(g, "negated", False)}
+    keys = {_cond_key(g) for g in guards if not g.negated}
     if not keys:
         return False
     disjuncts = cond.items if isinstance(cond, AnyOf) else (cond,)
@@ -349,7 +359,7 @@ def _fortran(cond) -> str:
     return cond.to_fortran()
 
 
-def access_guards(fut, type_dict) -> Guards:
+def access_guards(fut: FunctionalUnitTest, type_dict: dict[str, DerivedType]) -> Guards:
     """
     Namelist guards for the copies and updates, from SPEL's access analysis
     (`nml_guards`: the namelist ifs around every access in elm_drv's tree, through the
@@ -377,7 +387,7 @@ def access_guards(fut, type_dict) -> Guards:
     if drv is None:
         g.notes.append("guards: elm_drv not in the analysis, no namelist guards")
         return g
-    roots = [fut.subroutine_dict[r] for r in DEVICE_ROOTS if r in fut.subroutine_dict]
+    roots: list[Subroutine] = [fut.subroutine_dict[r] for r in DEVICE_ROOTS if r in fut.subroutine_dict]
     for r in DEVICE_ROOTS:
         if r not in fut.subroutine_dict:
             g.notes.append(f"guards: device root {r} not in the analysis")
@@ -409,7 +419,7 @@ def access_guards(fut, type_dict) -> Guards:
                 continue
             g.components[id(c)] = text
             names |= cond.variable_names()
-    accessed = {v for r in roots for v in getattr(r, "elmtype_access_by_ln", {})}
+    accessed = {v for r in roots for v in r.elmtype_access_by_ln}
     fields_of: dict[str, list[str]] = {}
     for v in sorted(accessed):
         fields_of.setdefault(v.split("%")[0].lower(), []).append(v)
@@ -460,19 +470,19 @@ def _gated(cond: Optional[str], stmts: list[str]) -> list[str]:
 # --- code generation -----------------------------------------------------------------
 
 
-def _assoc(c) -> Optional[str]:
+def _assoc(c: Variable) -> Optional[str]:
     """The Fortran test that `this%c` has storage, or None when it always has."""
     if id(c) in _STORAGE:  # from the parsed type definition
         return _STORAGE[id(c)]
-    if getattr(c, "ptrscalar", False):
+    if c.ptrscalar:
         return "associated"
-    if getattr(c, "allocatable", False):
+    if c.allocatable:
         return "allocated"
     return None
 
 
-def _is_alias(c) -> bool:
-    return bool(getattr(c, "ptrscalar", False) and getattr(c, "pointer", None))
+def _is_alias(c: Variable) -> bool:
+    return bool(c.ptrscalar and c.pointer)
 
 
 def private_components(t, fut) -> set[str]:
@@ -1134,12 +1144,12 @@ def generate(fut, srcroot: Path, only_instances: Optional[set[str]] = None, sour
 # --- unit tests ------------------------------------------------------------------------
 
 
-def unit_test_guards(unit_test, type_dict) -> Guards:
+def unit_test_guards(unit_test: FunctionalUnitTest, type_dict: dict[str, DerivedType]) -> Guards:
     """The unit test's own namelist guards (`guarded_usage_dict`, as ReadWriteMod uses them)."""
     from spel.scripts.fortran_parser.boolen_expression import minimize
 
     g = Guards()
-    for cond, variables in getattr(unit_test, "guarded_usage_dict", {}).items():
+    for cond, variables in unit_test.guarded_usage_dict.items():
         text = _fortran(minimize(cond))
         if "spel_streq" in text or text in (".true.", ".false."):
             continue
@@ -1348,7 +1358,7 @@ def call_kinds(fut) -> list[tuple[int, str, str]]:
     return out
 
 
-def device_routines(fut) -> set[str]:
+def device_routines(fut: FunctionalUnitTest) -> set[str]:
     """
     Basenames of the analyzed routines whose call tree contains an OpenACC compute
     construct (`parallel`, `kernels`, `serial`): calling one runs device kernels.
@@ -1356,7 +1366,7 @@ def device_routines(fut) -> set[str]:
     """
     from spel.transforms.acc_directives import find_directives
 
-    subs = fut.subroutine_dict
+    subs: dict[str, Subroutine] = fut.subroutine_dict
     has_region: set[str] = set()
     callees: dict[str, set[str]] = {}
     text_cache: dict[str, list[str]] = {}
@@ -1370,7 +1380,7 @@ def device_routines(fut) -> set[str]:
                 has_region.add(base)
         except Exception:
             pass
-        rec = getattr(sub, "record", None)
+        rec = sub.record
         if rec is not None:
             callees.setdefault(base, set()).update(str(c.name).split("%")[-1].lower() for c in rec.calls)
     device = set(has_region) | DEVICE_EXTRA

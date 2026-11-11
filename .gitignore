@@ -79,3 +79,8 @@ spel/db/*.env
 spel/db/staticfiles/
 spel/db/media/
 .claude/settings.local.json
+
+# Jupyter
+.ipynb_checkpoints/
+.pytest-fixtures/
+.hypothesis

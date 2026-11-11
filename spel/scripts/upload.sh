@@ -8,7 +8,7 @@ fi
 REMOTE_HOST="$1"
 DEST_PATH="$2"
 
-files="FUTConstantsMod.F90  nc_allocMod.F90  nc_io.F90  ReadWriteMod.F90"
+files="FUTConstantsMod.F90  nc_allocMod.F90  spel_varMod.F90  nc_io.F90  ReadWriteMod.F90"
 
 if [ $REMOTE_HOST = "local" ]; then
     rsync -avR $files "${DEST_PATH}"

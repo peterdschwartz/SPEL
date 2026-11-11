@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from spel.scripts.fortran_parser import spel_ast as A
 from spel.transforms.acc_directives import DirectiveError, find_directives, next_code_line, strip_comment
@@ -39,6 +39,10 @@ from spel.transforms.core.fortran import declaration
 from spel.transforms.core.registry import transform
 from spel.transforms.core.source import indent
 from spel.transforms.core.transform import Change, Refusal, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_parser.scope_walk import SubroutineRecord
 
 TAG = "! spel collapse-bounds"
 INQUIRY = {"lbound", "ubound", "size"}
@@ -76,13 +80,13 @@ def _header(line: str, index: str, lo: str, hi: str, step: Optional[str]) -> str
     return text + (f"  {cm}" if cm else "")
 
 
-def plan_routine(sub, lines: list[str], notes: Optional[list[str]] = None) -> list[Edit]:
+def plan_routine(sub: Subroutine, lines: list[str], notes: Optional[list[str]] = None) -> list[Edit]:
     """The edits hoisting the inquiry bounds of the collapsed nests of one routine (none: nothing
     to do). Nests the pass can't rewrite are reported in `notes` and left whole."""
     from spel.transforms.core.query import first_executable, routine_tree
     from spel.transforms.core.source import statement_end
 
-    rec = sub.record
+    rec: SubroutineRecord = sub.record
     loops = {}
     for top in rec.loop_nest:
         for lp in top.walk():
@@ -146,7 +150,7 @@ def plan_routine(sub, lines: list[str], notes: Optional[list[str]] = None) -> li
     if not edits:
         return []
     names = [f"spel_lb{k}" for k in range(1, nmax + 1)] + [f"spel_ub{k}" for k in range(1, nmax + 1)]
-    last = getattr(rec, "last_decl_ln", -1)
+    last = rec.last_decl_ln
     if last >= 0:
         at = statement_end(lines, last) + 1
         ref = lines[last]

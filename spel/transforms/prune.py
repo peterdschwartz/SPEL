@@ -39,6 +39,7 @@ from spel.scripts.fortran_parser.spel_ast import (
     InfixExpression,
     NullifyStatement,
     PointerAssignment,
+    PrefixExpression,
     VariableDecl,
 )
 from spel.scripts.fortran_parser.spel_parser import Parser
@@ -98,7 +99,7 @@ def is_constant(expr) -> bool:
             stack.extend(e.args)
         elif isinstance(e, InfixExpression):
             stack += [e.left_expr, e.right_expr]
-        elif hasattr(e, "right_expr"):
+        elif isinstance(e, PrefixExpression):
             stack.append(e.right_expr)
     return True
 
@@ -138,7 +139,7 @@ def classify(text: str, names: set[str]) -> tuple[dict[str, str], set[str]]:
     def assignment(lhs, rhs) -> Optional[str]:
         for n in counts:
             if last_is(lhs, n) and counts[n] == 1 and is_constant(rhs) and not component_refs(
-                    ",".join(str(a) for a in getattr(lhs, "args", []) or [])):
+                    ",".join(str(a) for a in (lhs.args if isinstance(lhs, FuncExpression) else []))):
                 return n
         return None
 
@@ -153,7 +154,7 @@ def classify(text: str, names: set[str]) -> tuple[dict[str, str], set[str]]:
                 if k == counts[n] and not any(n in component_refs(str(v)) for v in node.options.values()):
                     removable[n] = "object" if len(node.objects) > 1 else "delete"
         case NullifyStatement():
-            objs = getattr(node, "objects", None) or getattr(node, "pointers", None) or []
+            objs = node.objects
             for n in counts:
                 if sum(last_is(o, n) for o in objs) == counts[n]:
                     removable[n] = "delete" if len(objs) == 1 else "keep"

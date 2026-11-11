@@ -47,7 +47,7 @@ MAX_TAG = 40  # Fortran names are <= 63 characters
 CAPTURE_DIR = "elm-capture"
 # Case-independent modules; taken from SourceFiles when available since a
 # case dir may hold a copy predating the current generator.
-SHARED_IO_MODULES = ("nc_io.F90", "nc_allocMod.F90")
+SHARED_IO_MODULES = ("nc_io.F90", "nc_allocMod.F90", "spel_varMod.F90")
 # Per-case modules; renamed <Module>_<tag> in ELM.
 CASE_IO_MODULES = ("ReadWriteMod.F90", "FUTConstantsMod.F90")
 MANIFEST = "spel_instrument.json"

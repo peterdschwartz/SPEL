@@ -12,7 +12,7 @@ import sys
 from collections import namedtuple
 from itertools import zip_longest
 from pprint import pprint
-from typing import TYPE_CHECKING, List, Pattern, TextIO, Tuple
+from typing import TYPE_CHECKING, List, Optional, Pattern, TextIO, Tuple
 
 from spel.scripts.fortran_parser.lexer import Lexer
 from spel.scripts.fortran_parser.spel_ast import VariableDecl
@@ -64,6 +64,11 @@ class Variable(object):
         * self.optional : optional arguments
         * self.subs : list of subroutines that use variable (not implemented)
     """
+
+    # a component path of an embedded type (core%leaf), set by DerivedType.resolve_nested
+    nested: bool = False
+    # the bounds of a module array's allocation, set by allocations.scan_module (None: none recorded)
+    alloc_bounds: Optional[str] = None
 
     def __init__(
         self,

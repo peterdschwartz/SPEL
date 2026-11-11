@@ -1,0 +1,159 @@
+# Property-based tests of CanopyFluxes (master E3SM), case unit-tests/canflux:
+#   spel create -s canopyfluxes -c canflux --run-case      (the case and its reference capture)
+#   spel proptest run spel/proptest/examples/canopyfluxes.proptest.toml
+# The format is described in spel/proptest/SPEC.md. canopyfluxes.inputs.toml is the unedited output of
+#   spel proptest stats canflux --reference canflux --where "frac_veg_nosno(p) > 0" --stride 6 \
+#        --namelist soil_stress_method=0
+# (a winter-ish reference: small LAI); the scenario overrides what needs care.
+
+[case]
+name = "canflux"
+
+[settings]
+max_examples = 60
+
+[domain]
+pfts = [1, 4, 13]          # needleleaf evergreen temperate tree, broadleaf evergreen tropical tree, C3 grass
+per_pft = 4
+nsets = 4                  # relations: sets 0-1 base, 2-3 follow-up
+reference = "canflux"      # constants, parameters and level extents (nlevsno = 5)
+
+# The namelist options of the runs, over the reference's (`spel proptest show` lists them all).
+# Under the reference's options (use_c13, use_c14, use_hydrstress, ... off) 51 variables are used
+# by no branch that runs: they need no rule and cannot be named in a check.
+[namelist]
+soil_stress_method = 0     # set in ELM's code, not in the namelist; the reference does not record it
+
+[scenario.snowfree_day]
+over = "p in nolakeurbanp"
+extends = "canopyfluxes.inputs.toml"
+
+[scenario.snowfree_day.inputs]
+"top_as%tbot" = { range = [278.0, 313.0] }
+"top_as%qbot" = { range = [0.001, 0.02] }
+"top_as%ubot" = { range = [0.5, 10.0] }
+"top_af%lwrad" = { range = [200.0, 450.0] }
+"col_es%t_grnd" = { range = [278.0, 315.0] }
+"col_es%emg" = { range = [0.94, 0.98] }
+"col_pp%dz" = { range = [0.02, 1.5] }
+"col_ws%h2osoi_ice" = 0.0
+"col_ws%frac_sno_eff" = 0.0
+"col_ws%snow_depth" = 0.0
+"col_ws%frac_h2osfc" = 0.0
+"canopystate_vars%elai_patch" = { range = [0.1, 6.0] }
+"canopystate_vars%esai_patch" = { range = [0.05, 1.5] }
+"canopystate_vars%htop_patch" = { range = [0.3, 20.0], pft = { 13 = { range = [0.3, 1.0] } } }
+"solarabs_vars%sabv_patch" = { range = [0.0, 600.0] }
+"solarabs_vars%parsun_z_patch" = { range = [0.0, 1200.0] }
+"solarabs_vars%parsha_z_patch" = { range = [0.0, 150.0] }
+# Only read with use_c13 on: dormant in this scenario, used by the follow-up of the C13 relation below.
+"photosyns_vars%alphapsnsun_patch" = 1.0     # C13 fractionation: fill values only in the reference (C13 off)
+"photosyns_vars%alphapsnsha_patch" = 1.0
+"cnstate_vars%downreg_patch" = { range = [0.0, 1.0] }
+
+[scenario.snowfree_day.derive]
+"soilstate_vars%rootfr_patch" = "1.0 / nlevgrnd"   # uniform roots; must sum to 1 (btran sums them)
+"top_as%thbot" = "top_as%tbot(t)"
+"top_as%vbot" = "top_as%ubot(t)"
+"top_as%rhobot" = "top_as%pbot(t) / (287.04 * top_as%tbot(t))"
+"top_as%po2bot" = "0.209 * top_as%pbot(t)"
+"top_as%pco2bot" = "4.0e-4 * top_as%pbot(t)"
+"top_as%pc13o2bot" = "0.011 * top_as%pco2bot(t)"   # only read with use_c13 on
+"col_es%thv" = "forc_th(t) * (1.0 + 0.61 * forc_q(t))"
+"col_es%t_h2osfc" = "t_grnd(c)"
+"col_es%t_soisno" = "t_grnd(c)"
+"col_ws%qg_soil" = "qg(c)"
+"col_ws%qg_snow" = "qg(c)"
+"col_ws%qg_h2osfc" = "qg(c)"
+"veg_es%thm" = "forc_t(t) + 0.0098 * frictionvel_vars%forc_hgt_t_patch(p)"
+"veg_es%emv" = "1.0 - exp(-(elai(p) + esai(p)))"
+"veg_ws%fdry" = "(1.0 - fwet(p)) * elai(p) / (elai(p) + esai(p))"
+"canopystate_vars%laisun_patch" = "0.5 * elai(p)"
+"canopystate_vars%laisha_patch" = "elai(p) - laisun(p)"
+"canopystate_vars%laisun_z_patch" = "laisun(p)"
+"canopystate_vars%laisha_z_patch" = "laisha(p)"
+"surfalb_vars%tlai_z_patch" = "elai(p)"
+"canopystate_vars%displa_patch" = "0.67 * htop(p)"
+"frictionvel_vars%z0mv_patch" = "0.055 * htop(p)"
+"frictionvel_vars%forc_hgt_u_patch" = "30.0 + htop(p)"
+"frictionvel_vars%forc_hgt_t_patch" = "30.0 + htop(p)"
+"frictionvel_vars%forc_hgt_q_patch" = "30.0 + htop(p)"
+
+[[property]]
+name = "outputs are finite"
+expr = """finite(t_veg(p)) .and. finite(btran(p)) .and. finite(rssun(p)) .and. finite(rssha(p))
+          .and. finite(eflx_sh_veg(p)) .and. finite(qflx_tran_veg(p)) .and. finite(qflx_evap_veg(p))
+          .and. finite(ustar(p)) .and. finite(t_ref2m(p))"""
+
+[[property]]
+name = "soil water stress in [0, 1]"
+expr = "between(btran(p), 0.0, 1.0)"
+
+[[property]]
+name = "stomatal resistances in (0, rsmax]"
+# rs = laican/gscan - rb over layers capped at rsmax0 (PhotosynthesisMod): rsmax up to rounding
+expr = "rssun(p) > 0.0 .and. rssun(p) <= 2.0e4 * (1.0 + 1.0e-12) .and. rssha(p) > 0.0 .and. rssha(p) <= 2.0e4 * (1.0 + 1.0e-12)"
+
+[[property]]
+name = "transpiration is not negative"
+expr = "qflx_tran_veg(p) >= 0.0"
+
+[[relation]]
+# No `follow`: the second half of the sets is a copy of the first. Catches an element's result
+# depending on where it is in memory (uninitialized values, a wrong index), and harness mistakes.
+name = "copies of the inputs give identical outputs"
+expect = "same(follow%t_veg(p), base%t_veg(p)) .and. same(follow%eflx_sh_veg(p), base%eflx_sh_veg(p))"
+
+[[relation]]
+# The copies in another order (among the patches of one pft): a result that depends on a
+# neighbouring element passes the relation above and fails this one.
+name = "the order of the patches does not matter"
+permute = true
+expect = "same(follow%t_veg(p), base%t_veg(p)) .and. same(follow%qflx_tran_veg(p), base%qflx_tran_veg(p))"
+
+[[relation]]
+# Fails (finding, 2026-11-08): a short grass patch (pft 13, htop 0.37 m) in a strongly stable
+# surface layer (t_grnd 278 K under tbot 306 K, ubot 1 m/s) ends 0.13 K cooler with more sabv.
+# The extra energy changes the stability iteration (the Monin-Obukhov length and the resistances), and
+# the leaf temperature it converges to is lower. Kept as a known failure for review.
+# Also seen with a warm ground (2026-11-08: pft 4, t_grnd 315 K over tbot 291.5 K, ubot 0.5 m/s, 2.0 K
+# cooler). With `assume = ["top_as%ubot(t) >= 2.0"]` it held in 240 examples; restricted to
+# abs(t_grnd - tbot) <= 5 K it failed once at 2.2 m/s (the tutorial notebook, Part 8).
+name = "more absorbed shortwave does not cool the leaf"
+follow = { "solarabs_vars%sabv_patch" = "1.1 * solarabs_vars%sabv_patch(p) + 10.0" }
+expect = "follow%t_veg(p) >= base%t_veg(p) - 1.0e-3"
+
+# Namelist options. The follow-up of a relation with `namelist` is the same example under other
+# options (a second process on the same library); base% and follow% are the two runs.
+[[relation]]
+name = "methane off: the canopy fluxes are identical"
+namelist = { use_lch4 = false }
+expect = """same(follow%t_veg(p), base%t_veg(p)) .and. same(follow%eflx_sh_veg(p), base%eflx_sh_veg(p))
+            .and. same(follow%qflx_tran_veg(p), base%qflx_tran_veg(p))"""
+
+[[relation]]
+# The isotope code only adds outputs. Its inputs (alphapsn, downreg, pc13o2bot) have rules above.
+name = "C13 on: the fluxes are identical and the 13C flux is finite"
+namelist = { use_c13 = true }
+expect = """same(follow%t_veg(p), base%t_veg(p)) .and. same(follow%qflx_tran_veg(p), base%qflx_tran_veg(p))
+            .and. finite(follow%photosyns_vars%c13_psnsun_patch(p))"""
+
+[[relation]]
+# Two settings that select the same code: with atm_gustiness off the land adds its own convective
+# gustiness in unstable conditions, and force_land_gustiness asks for exactly that whatever
+# atm_gustiness says. (A monotonicity guess for atm_gustiness alone, "the friction velocity is
+# not higher without the land's gustiness", failed in a few elements by more than 1e-4: the
+# stability iteration takes another path.)
+name = "force_land_gustiness overrides atm_gustiness"
+namelist = { atm_gustiness = true, force_land_gustiness = true }
+expect = "same(follow%ustar(p), base%ustar(p)) .and. same(follow%t_veg(p), base%t_veg(p))"
+
+# The same examples on another build of the case, or on another case (a refactored copy of the
+# routine): uncomment to compare. `spel proptest build canflux --fc nvfortran` builds the other one.
+# [compare]
+# build = { fc = "nvfortran" }            # or: case = "canflux_acc"
+#
+# [[differential]]
+# name = "nvfortran agrees with gfortran"
+# outputs = ["t_veg", "eflx_sh_veg", "qflx_tran_veg", "btran"]    # default: every output ("all")
+# rtol = 1.0e-9                                                   # default: identical

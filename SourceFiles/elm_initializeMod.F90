@@ -5,27 +5,18 @@ module elm_initializeMod
 
    implicit None
 
-   public :: elm_init
+   public :: elm_init, elm_setup
 
 contains
 
    subroutine elm_init(nsets, dt, yr, bounds, nclumps)
-      ! Read the input sites and, for nsets > 1, duplicate them nsets times.
-      ! The sets are split into nclumps clumps of whole sets (see init_clumps);
-      ! with nclumps = 1 one clump spans the process, so the filters (and the
-      ! parallelism inside each routine) cover every set.
-      use duplicateMod, only: duplicate_sets, scale_bounds
+      ! Read the input sites, then set up the sets, clumps and filters (elm_setup).
+      ! The proptest shim (spel/proptest/shim.py) allocates and fills the variables
+      ! itself and calls elm_setup directly.
       use ReadWriteMod, only: read_elmtypes
       use FUTConstantsMod, only: read_constants
       use nc_io, only: spel_nsets
-      use elm_varctl
-      use filterMod
-      use decompMod, only: get_proc_bounds, get_clump_bounds, procinfo, clumps
       use decompMod, only: bounds_type
-      use timeInfoMod
-      use pftvarcon
-      use decompInitMod
-      use domainMod
 
       implicit none
 
@@ -34,10 +25,6 @@ contains
       integer, intent(in) :: yr
       type(bounds_type), intent(out) :: bounds
       integer, intent(in) :: nclumps
-      integer :: begp, endp, begc, endc, begg, endg, begl, endl, begt, endt
-      integer :: nc
-      real*8, allocatable  :: icemask_grc(:)
-      type(bounds_type) :: bounds_clump, bounds_set
 
       if (nsets < 1) stop "(elm_init) nsets must be >= 1"
       if (nclumps < 1 .or. nclumps > nsets) then
@@ -50,6 +37,36 @@ contains
 
       call read_constants(io_constants)
       !#SPEL_IO
+
+      call elm_setup(nsets, bounds, nclumps)
+
+   end subroutine elm_init
+
+   subroutine elm_setup(nsets, bounds, nclumps)
+      ! For nsets > 1, duplicate the input sites (one set, as read) nsets times.
+      ! The sets are split into nclumps clumps of whole sets (see init_clumps);
+      ! with nclumps = 1 one clump spans the process, so the filters (and the
+      ! parallelism inside each routine) cover every set.
+      ! bounds: one set on entry, the process on return.
+      use duplicateMod, only: duplicate_sets, scale_bounds
+      use elm_varctl
+      use filterMod
+      use decompMod, only: get_proc_bounds, get_clump_bounds, procinfo, clumps
+      use decompMod, only: bounds_type
+      use timeInfoMod
+      use pftvarcon
+      use decompInitMod
+      use domainMod
+
+      implicit none
+
+      integer, intent(in)  :: nsets
+      type(bounds_type), intent(inout) :: bounds
+      integer, intent(in) :: nclumps
+      integer :: begp, endp, begc, endc, begg, endg, begl, endl, begt, endt
+      integer :: nc
+      real*8, allocatable  :: icemask_grc(:)
+      type(bounds_type) :: bounds_clump, bounds_set
 
       ! bounds now hold one set (the input file); offset the subgrid indices
       ! of the copies and extend the bounds over all sets
@@ -86,7 +103,7 @@ contains
 
       !#VAR_INIT_START
 
-   end subroutine elm_init
+   end subroutine elm_setup
 
    subroutine init_clumps(bounds_proc, bounds_set, nsets, nclumps)
       ! Splits the process into nclumps clumps, as ELM's decomposition does for

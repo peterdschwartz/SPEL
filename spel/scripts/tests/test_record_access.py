@@ -62,6 +62,12 @@ class StubSub:
         self.sub_call_desc = {}
         self.sub_lines = []
         self.record_access = None
+        # as a Subroutine has them: the routine's lines are the snippet's, with no file
+        self.filepath = None
+        self.startline = 0
+        self.endline = len(txt.splitlines()) - 1
+        self.child_subroutines = {}
+        self.active_global_vars = {}
 
     def walk_syntax_tree(self, scopes):
         return self.record

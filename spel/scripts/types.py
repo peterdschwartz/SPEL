@@ -1060,12 +1060,11 @@ class Dependence:
         self.pairs = val_pairs
         # the triggers' values when the namelist does not set them (Fortran literals), for
         # triggers the analysis records no declared default for (the dynamic_subgrid namelist
-        # variables are locals of its read routine, set by assignments); None: unknown
-        self.trigger_defaults: Optional[tuple[str, ...]] = tuple(trigger_defaults) if trigger_defaults else None
+        # variables are locals of its read routine, set by assignments); missing: unknown
+        self.trigger_defaults: tuple[str, ...] = tuple(trigger_defaults or ())
 
     def all_triggers(self) -> tuple[str, ...]:
-        # analyses pickled before multi-trigger cascades only have `trigger`
-        return getattr(self, "triggers", (self.trigger,))
+        return self.triggers
 
     @property
     def trigger_name(self) -> str:
@@ -1206,18 +1205,19 @@ class Precedence(Enum):
     LOWEST = 1
     ASSIGN = 2
     SECTION = 3  # the `:` of a subscript triplet binds loosest: `n+1:m` is (n+1):m
-    OR = 4
-    AND = 5
-    NOT = 6
-    EQUALS = 7
-    LESSGREATER = 8
-    CONCAT = 9
-    SUM = 10
-    PRODUCT = 11
-    EXP = 12
-    PREFIX = 13
-    BOUNDS = 14
-    CALL = 15
+    EQV = 4  # .eqv. / .neqv.
+    OR = 5
+    AND = 6
+    NOT = 7
+    EQUALS = 8
+    LESSGREATER = 9
+    CONCAT = 10
+    SUM = 11
+    PRODUCT = 12
+    EXP = 13
+    PREFIX = 14
+    BOUNDS = 15
+    CALL = 16
 
 
 @dataclass

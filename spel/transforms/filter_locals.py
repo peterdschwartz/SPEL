@@ -32,15 +32,20 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from spel.scripts.fortran_parser.scope_walk import Access
+from spel.scripts.fortran_parser.spel_ast import BoundsExpression, Expression
 from spel.scripts.fortran_parser.symbols import Origin
 from spel.transforms.compact.index_forms import IndexContext, norm
 from spel.transforms.core.edits import replace_cols, span_text
 from spel.transforms.core.registry import transform
 from spel.transforms.core.source import statement_start
 from spel.transforms.core.transform import Change, Plan, Refusal, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_parser.spel_ast import SubroutineDefinitionConstruct
 
 INTRINSIC_TYPES = ("integer", "real", "logical", "double precision", "doubleprecision", "complex")
 LEVELS = ("c", "p", "l", "g", "t")
@@ -55,9 +60,9 @@ class Candidate:
     sites: dict[int, str] = field(default_factory=dict)  # line -> loop index (fc) of its accesses
 
 
-def _clump_bounds(b) -> bool:
+def _clump_bounds(b: Optional[Expression]) -> bool:
     """`bounds%begc:bounds%endc` (or `begc:endc`) as a declared dimension."""
-    if b is None or getattr(b, "start", None) is None or getattr(b, "end", None) is None:
+    if not isinstance(b, BoundsExpression) or b.start is None or b.end is None:
         return False
     s, e = norm(b.start).lower(), norm(b.end).lower()
     for x in LEVELS:
@@ -133,14 +138,14 @@ def _check(name, accs, ctx, loops, rec, decl_ln: int) -> tuple[Optional[Candidat
     return cand, ""
 
 
-def plan_routine(sub, lines: list[str], tree) -> tuple[list, list[str], list[str]]:
+def plan_routine(sub: Subroutine, lines: list[str], tree: SubroutineDefinitionConstruct) -> tuple[list, list[str], list[str]]:
     """(edits, changed names, reasons) for one routine; `tree` parsed with keep_spans."""
     from spel.scripts.fortran_parser.spel_ast import EntityDecl, VariableDecl
     from spel.scripts.registrations import iter_statements
     from spel.transforms.compact.rewrite import subscripted_designators
 
     rec = sub.record
-    if getattr(tree, "contains", None):
+    if tree.contains:
         return [], [], ["has internal procedures"]
     uses = TextUses(sub, lines, tree)
     ents: dict[str, EntityDecl] = {}

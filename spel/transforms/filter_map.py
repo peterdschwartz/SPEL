@@ -36,14 +36,19 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from spel.scripts.fortran_parser import spel_ast as A
+from spel.scripts.fortran_parser.scope_walk import Access
 from spel.transforms.core.edits import insert, replace, replace_cols, span_text
 from spel.transforms.core.fortran import fresh_name
 from spel.transforms.core.registry import transform
 from spel.transforms.core.source import code, statement_end
 from spel.transforms.core.transform import Change, Plan, Refusal, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_parser.scope_walk import LoopInfo, SubroutineRecord
 
 BEG, END = "soilc_soilp_beg", "soilc_soilp_end"
 TAG = "! spel filter-map"
@@ -205,7 +210,7 @@ class FilterMapLoops(Transform):
         subs = ctx.fut.subroutine_dict
         callers: dict[str, list] = defaultdict(list)  # callee -> [(caller id, ArgBinding)]
         for s in subs.values():
-            maps = getattr(s, "record_access", None)
+            maps = s.record_access
             for b in maps.bindings if maps is not None else []:
                 callers[b.callee].append((s.id, b))
         calls: dict[tuple[str, int], tuple[str, Optional[str]]] = {}
@@ -250,22 +255,22 @@ class FilterMapLoops(Transform):
         return calls, failed
 
     # --- edits ------------------------------------------------------------------------------
-    def tree(self, ctx, sub):
+    def tree(self, ctx, sub: Subroutine) -> A.SubroutineDefinitionConstruct:
         from spel.scripts.registrations import parse_routine
 
-        end = getattr(sub, "end_stmt_ln", None) or sub.endline
+        end = sub.end_stmt_ln or sub.endline
         try:
             return parse_routine(sub.filepath, sub.startline, end, keep_spans=True)
         except BaseException as err:  # the parser exits on fatal errors
             raise Skip(f"does not parse: {err}")
 
-    def routine_edits(self, ctx, sub, col_dummy: str, found_loops, pf: str, pf_new: bool) -> list:
+    def routine_edits(self, ctx, sub: Subroutine, col_dummy: str, found_loops, pf: str, pf_new: bool) -> list:
         lines = ctx.lines(sub)
         rec = sub.record
         tree = self.tree(ctx, sub)
         edits = []
         # dummies: appended to the dummy list
-        close = getattr(tree, "args_close", None)
+        close = tree.args_close
         if close is None or lines[close[0]][close[1]:close[3]] != ")":
             raise Skip("no closing parenthesis of the dummy list")
         if any(rec.declaration(n) is not None for n in (BEG, END)):
@@ -289,8 +294,8 @@ class FilterMapLoops(Transform):
         taken = {d.lower() for d in self.declared(rec)}
         fp = "fp"
         loop_lines = [ln for found in found_loops for ln in range(found[0][1].loop.start_ln, found[0][1].loop.end_ln + 1)]
-        if fp not in taken or any(a.path == fp for a in rec.events if getattr(a, "ln", -1) in set(loop_lines)
-                                  and hasattr(a, "path")):
+        if fp not in taken or any(isinstance(a, Access) and a.ln in set(loop_lines) and a.path == fp
+                                  for a in rec.events):
             fp = fresh_name("fp_map", taken)
             new.append(f"{ind}integer :: {fp}  {TAG}: position in the soil patch filter")
         elif fp in taken and rec.declaration(fp).dim != 0:
@@ -323,8 +328,8 @@ class FilterMapLoops(Transform):
         return edits
 
     @staticmethod
-    def declared(rec) -> set:
-        return {n.lower() for n in (getattr(rec, "declarations", None) or {})}
+    def declared(rec: SubroutineRecord) -> set:
+        return {n.lower() for n in rec.declarations}
 
     def loop_edits(self, lines, tree, rec, cl, fp: str, pf: str) -> list:
         loop = cl.loop
@@ -344,7 +349,8 @@ class FilterMapLoops(Transform):
                replace(a, [f"{_indent(lines[a])}{cl.child} = {pf}({fp})"], expect=[lines[a]],
                        why="patches from the soil patch filter")]
         guard = self.slot_guard(tree, loop)
-        used = {e.ln for e in rec.events if getattr(e, "path", None) == loop.index and loop.start_ln < e.ln <= loop.end_ln}
+        used = {e.ln for e in rec.events if isinstance(e, Access) and e.path == loop.index
+                and loop.start_ln < e.ln <= loop.end_ln}
         allowed = {a} | ({guard[0]} if guard else set())
         if used - allowed:
             raise Skip(f"line {min(used - allowed) + 1}: the slot index {loop.index} is used in the body")
@@ -358,7 +364,7 @@ class FilterMapLoops(Transform):
         return out
 
     @staticmethod
-    def slot_guard(tree, loop) -> Optional[tuple[int, int]]:
+    def slot_guard(tree: A.SubroutineDefinitionConstruct, loop: LoopInfo) -> Optional[tuple[int, int]]:
         """(if line, end if line) of `if (pi <= ...) then` without else branches in the slot loop."""
         from spel.scripts.registrations import iter_statements
 
@@ -377,8 +383,8 @@ class FilterMapLoops(Transform):
             cond = st.condition
             if isinstance(cond, A.InfixExpression) and cond.operator in ("<=", ".le.") \
                     and isinstance(cond.left_expr, A.Identifier) and cond.left_expr.value.lower() == loop.index:
-                end = getattr(st, "construct_end_ln", None) or getattr(st, "end_ln", None)
-                if end is not None and end > st.lineno:
+                end = st.construct_end_ln or st.end_ln
+                if end > st.lineno:
                     return st.lineno, end
         return None
 
@@ -414,12 +420,12 @@ class FilterMapLoops(Transform):
         return self.append_text(lines, l1, c1 - 1, items)
 
     @staticmethod
-    def actual_text(lines, fn, path: str) -> str:
+    def actual_text(lines: list[str], fn: A.FuncExpression, path: str) -> str:
         """Source text of the actual whose path is `path` (`filter(nc)%soilc` for filter%soilc)."""
         want = path.lower()
         for arg in fn.args:
             e = arg.value if isinstance(arg, A.KeywordArgument) else arg
-            if getattr(e, "span", None) is None:
+            if e.span is None:
                 continue
             text = span_text(lines, e.span).replace(" ", "")
             bare = "".join(_strip_subscripts(text)).lower()

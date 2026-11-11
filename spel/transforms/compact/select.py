@@ -33,7 +33,11 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.functional_unit_test import FunctionalUnitTest
 
 from spel.transforms.compact.inventory import (
     Entry,
@@ -196,7 +200,7 @@ def rewritable(e: Entry, subgrid: str) -> Optional[str]:
     return None
 
 
-def select_fields(fut, dtype_name: str) -> Selection:
+def select_fields(fut: FunctionalUnitTest, dtype_name: str) -> Selection:
     holder = find_holder(fut, dtype_name)
     reports, tracer = build_inventory(fut, types=(dtype_name,))
     dtype = fut.type_dict[dtype_name]
@@ -226,7 +230,7 @@ def select_fields(fut, dtype_name: str) -> Selection:
         str(target).lower().replace(" ", "")
         for dtype in fut.type_dict.values()
         for c in dtype.components.values()
-        for target in (getattr(c, "pointer", None) or [])
+        for target in (c.pointer or [])
     }
     chosen: dict[str, str] = {}
     history: dict[str, bool] = {}
@@ -419,7 +423,7 @@ def statement_end(lines: list[str], ln: int) -> int:
     return end
 
 
-def untraced_uses(fut, tracer: Tracer, sel: Selection, by_field) -> list[tuple[str, str, bool]]:
+def untraced_uses(fut: FunctionalUnitTest, tracer: Tracer, sel: Selection, by_field) -> list[tuple[str, str, bool]]:
     """
     (component, file:line routine: text, relevant) for every use of a selected
     component outside the elm_drv trace. Analyzed routines the trace never
@@ -457,7 +461,7 @@ def untraced_uses(fut, tracer: Tracer, sel: Selection, by_field) -> list[tuple[s
     failures: dict[str, str] = {}
     mapper = AccessMapper(fut.subroutine_dict, ModuleScopes(fut.module_dict, fut.subroutine_dict), failures)
 
-    def where(sub, ln: int) -> str:
+    def where(sub: Subroutine, ln: int) -> str:
         path = Path(sub.filepath)
         rel = path.relative_to(srcroot) if path.is_relative_to(srcroot) else path
         text = path.read_text(errors="replace").split("\n")[ln].strip()[:100]
@@ -468,7 +472,7 @@ def untraced_uses(fut, tracer: Tracer, sel: Selection, by_field) -> list[tuple[s
         if not sub.filepath:
             continue
         analyzed_lines[str(sub.filepath)].update(range(sub.startline, sub.endline + 1))
-        if sub.id in handled or sub.id in tracer.visited or getattr(sub, "library", False):
+        if sub.id in handled or sub.id in tracer.visited or sub.library:
             continue
         rec = sub.record
         if rec is None and mapper.maps(sub) is not None:

@@ -34,7 +34,7 @@ def _sub(tmp_path):
     rec = walk(SRC)
     lns = [ln for ln, line in enumerate(SRC.split("\n")) if line.strip()]
     sub = SimpleNamespace(id="m::host", name="host", record=rec, filepath=path,
-                          startline=lns[0], endline=lns[-1])
+                          startline=lns[0], endline=lns[-1], sub_call_desc={})
     inner = walk(SRC, host=rec, tree_index=0)
     return sub, inner
 
@@ -112,7 +112,8 @@ def test_host_initialized_locals_are_copied_in(tmp_path):
     path.write_text(DATA_SRC)
     rec = walk(DATA_SRC)
     lns = [ln for ln, line in enumerate(DATA_SRC.split("\n")) if line.strip()]
-    sub = SimpleNamespace(id="m::s", name="s", record=rec, filepath=path, startline=lns[0], endline=lns[-1])
+    sub = SimpleNamespace(id="m::s", name="s", record=rec, filepath=path, startline=lns[0], endline=lns[-1],
+                          sub_call_desc={})
     lines = DATA_SRC.split("\n")
     r = check_routine(sub, set(), lines)
     assert set(r.locals_needed) == {"dzmin", "work", "scale"}

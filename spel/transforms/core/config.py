@@ -24,7 +24,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-PRESETS = Path(__file__).resolve().parents[2] / "db" / "app" / "management" / "commands" / "presets"
+from spel.scripts.analyze_subroutines import Subroutine
+from spel.scripts.functional_unit_test import FunctionalUnitTest
+from spel.scripts.types import FlatIfs
+
+PRESETS = (
+    Path(__file__).resolve().parents[2]
+    / "db"
+    / "app"
+    / "management"
+    / "commands"
+    / "presets"
+)
 
 
 def parse_namelist_values(path: Path) -> dict[str, str]:
@@ -69,7 +80,8 @@ class Configuration:
 
     values: dict[str, Any]
     source: str = ""
-    defaults: set[str] = field(default_factory=set)  # names whose value is the declaration's default
+    # names whose value is the declaration's default
+    defaults: set[str] = field(default_factory=set)
 
     @classmethod
     def load(cls, spec: str, fut=None) -> "Configuration":
@@ -80,7 +92,9 @@ class Configuration:
             cand = PRESETS / f"{spec}.cfg"
             if not cand.exists():
                 known = ", ".join(sorted(x.stem for x in PRESETS.glob("*.cfg")))
-                raise FileNotFoundError(f"no configuration {spec!r}: not a file, nor a preset ({known})")
+                raise FileNotFoundError(
+                    f"no configuration {spec!r}: not a file, nor a preset ({known})"
+                )
             p = cand
         raw = parse_namelist_values(p)
         cfg = cls({k: _python_value(v) for k, v in raw.items()}, str(p))
@@ -100,12 +114,12 @@ class Configuration:
 
     # --- deciding branches -----------------------------------------------------------------
 
-    def branch(self, flat_if) -> Optional[bool]:
+    def branch(self, flat_if: FlatIfs) -> Optional[bool]:
         """Whether a namelist-gated branch runs: True/False when the values decide it."""
         from spel.scripts.nml.analyze_namelist import cascade_to_triggers
         from spel.scripts.validate_access import evaluate_guard
 
-        cond = getattr(flat_if, "condtional_expectation", None)
+        cond = flat_if.condtional_expectation
         if cond is None:
             return None
         try:
@@ -113,18 +127,17 @@ class Configuration:
         except Exception:
             return None
 
-    def dead_branches(self, sub) -> list[tuple[int, int]]:
+    def dead_branches(self, sub: Subroutine) -> list[tuple[int, int]]:
         """(first, last) body lines (0-based) of the routine's branches that cannot run."""
         cache = self.__dict__.setdefault("_dead", {})
         if sub.id not in cache:
             out = []
-            for f in getattr(sub, "flat_ifs", None) or []:
+            for f in sub.flat_ifs:
                 if not (f.nml_vars or f.nml_cascades) or self.branch(f) is not False:
                     continue
-                if f.start_ln == f.end_ln:  # `if (use_fates) call x`: the action is on the if's line
-                    out.append((f.start_ln, f.start_ln))
-                elif f.end_ln - f.start_ln > 1:
-                    out.append((f.start_ln + 1, f.end_ln - 1))
+                span = branch_lines(f)
+                if span is not None:
+                    out.append(span)
             cache[sub.id] = sorted(out)
         return cache[sub.id]
 
@@ -137,7 +150,12 @@ class Configuration:
         dead = self.dead_branches(sub)
         return not any(a <= lo and hi <= b for a, b in dead)
 
-    def call_tree(self, fut, roots: Iterable[str], exclude=None) -> dict[str, object]:
+    def call_tree(
+        self,
+        fut: FunctionalUnitTest,
+        roots: Iterable[str],
+        exclude=None,
+    ) -> dict[str, object]:
         """`core.query.call_tree`, without the routines reached only through dead branches."""
         out: dict[str, object] = {}
         stack = list(roots)
@@ -149,10 +167,10 @@ class Configuration:
                 continue
             sub = fut.subroutine_dict[sid]
             out[sid] = sub
-            children = getattr(sub, "child_subroutines", {}) or {}
+            children = sub.child_subroutines
             lines: dict[str, list[int]] = {}
-            for ln, desc in (getattr(sub, "sub_call_desc", {}) or {}).items():
-                ch = children.get(getattr(desc, "fn", None))
+            for ln, desc in sub.sub_call_desc.items():
+                ch = children.get(desc.fn)
                 if ch is not None:
                     lines.setdefault(ch.id, []).append(ln)
             for ch in children.values():
@@ -167,22 +185,64 @@ class Configuration:
         return f"configuration {self.source}: {set_} namelist values set, {len(self.defaults)} from declarations"
 
 
-def namelist_defaults(fut) -> dict[str, Any]:
+def branch_lines(flat_if: FlatIfs) -> Optional[tuple[int, int]]:
+    """(first, last) lines (0-based) a branch's condition decides: its body, or for a one-line
+    `if (use_fates) call x` the if's own line. None for a branch without body lines."""
+    if flat_if.start_ln == flat_if.end_ln:
+        return flat_if.start_ln, flat_if.start_ln
+    if flat_if.end_ln - flat_if.start_ln > 1:
+        return flat_if.start_ln + 1, flat_if.end_ln - 1
+    return None
+
+
+def gates(sub: Subroutine, ln: int) -> list:
+    """
+    The namelist conditions under which line `ln` of the routine runs:
+    `ConditionExpectation` (cascades as their triggers) of every namelist-gated branch whose
+    lines include it. `validate_access.evaluate_guard(gate, values)` decides one;
+    the line is dead in a configuration when a gate is False (what `Configuration.line_active` says for the
+    whole configuration).
+    """
+    from spel.scripts.nml.analyze_namelist import cascade_to_triggers
+
+    out = []
+    for f in sub.flat_ifs:
+        if not (f.nml_vars or f.nml_cascades):
+            continue
+        cond = f.condtional_expectation
+        span = branch_lines(f)
+        if cond is not None and span is not None and span[0] <= ln <= span[1]:
+            out.append(cascade_to_triggers(cond))
+    return out
+
+
+def namelist_names(fut: FunctionalUnitTest) -> set[str]:
+    """Every namelist variable the analysis' namelist ifs test, directly or as a cascade's trigger."""
+    out: set[str] = set()
+    for sub in fut.subroutine_dict.values():
+        for f in sub.flat_ifs:
+            out.update(k.lower() for k in (f.nml_vars or {}))
+            for dep in (f.nml_cascades or {}).values():
+                out.update(n.lower() for n in dep.trigger_names)
+    return out
+
+
+def namelist_defaults(fut: FunctionalUnitTest) -> dict[str, Any]:
     """Declared defaults of the namelist variables the analysis' namelist ifs test."""
     out: dict[str, Any] = {}
     for sub in fut.subroutine_dict.values():
-        for f in getattr(sub, "flat_ifs", None) or []:
-            for name, nml in (f.nml_vars or {}).items():
-                v = getattr(nml, "variable", None)
-                d = getattr(v, "default_value", None) if v is not None else None
-                if name.lower() not in out and d not in (None, ""):
-                    out[name.lower()] = _python_value(d)
-            for dep in (f.nml_cascades or {}).values():
-                defaults = getattr(dep, "trigger_defaults", None) or ()  # older pickles: no defaults
+        for f in sub.flat_ifs:
+            for name, nml in f.nml_vars.items():
+                v = nml.variable
+                default_val = v.default_value
+                if name.lower() not in out and default_val not in (None, ""):
+                    out[name.lower()] = _python_value(default_val)
+            for dep in f.nml_cascades.values():
+                defaults = dep.trigger_defaults
                 for k, name in enumerate(dep.trigger_names):
-                    d = defaults[k] if k < len(defaults) else None
-                    if out.get(name.lower()) is None and d is not None:
-                        out[name.lower()] = _python_value(d)
+                    default_val = defaults[k] if k < len(defaults) else None
+                    if out.get(name.lower()) is None and default_val is not None:
+                        out[name.lower()] = _python_value(default_val)
                     else:
                         out.setdefault(name.lower(), None)
     return {k: v for k, v in out.items() if v is not None}

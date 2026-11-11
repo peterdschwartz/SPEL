@@ -102,6 +102,8 @@ precedences = {
     TokenTypes.LTEQ: Precedence.LESSGREATER,
     TokenTypes.AND: Precedence.AND,
     TokenTypes.OR: Precedence.OR,
+    TokenTypes.EQV: Precedence.EQV,
+    TokenTypes.NEQV: Precedence.EQV,
     TokenTypes.CONCAT: Precedence.CONCAT,
     TokenTypes.MACRO: Precedence.PREFIX,
     TokenTypes.BANG: Precedence.PREFIX,
@@ -137,11 +139,15 @@ class Parser:
         keep_directives: bool = False,
         keep_string_case: bool = False,
         keep_spans: bool = False,
+        fortran_unary: bool = False,
     ):
         """keep_spans: tokens and expressions get `span`, their (ln0, c0, ln1, c1) in the file
         lines (columns [c0, c1) on ln1); a subprogram gets `args_close`, the span of the `)`
-        closing its dummy arguments."""
+        closing its dummy arguments.
+        fortran_unary: a unary sign binds as in the standard (`-a**2` is `-(a**2)`); by
+        default it binds tightest (`(-a)**2`), the form existing analyses were built with."""
         self.keep_spans = keep_spans
+        self.fortran_unary = fortran_unary
         if lex:
             self.lexer: lexer.Lexer = lex
         elif lines:
@@ -197,6 +203,8 @@ class Parser:
         self.register_infix_fns(Tok.NOT_EQUIV, self.parse_infix_expr)
         self.register_infix_fns(Tok.AND, self.parse_infix_expr)
         self.register_infix_fns(Tok.OR, self.parse_infix_expr)
+        self.register_infix_fns(Tok.EQV, self.parse_infix_expr)
+        self.register_infix_fns(Tok.NEQV, self.parse_infix_expr)
         #
         self.register_infix_fns(Tok.PERCENT, self.parse_field_access_expr)
 
@@ -2042,7 +2050,13 @@ class Parser:
         tok = self.cur_token
         op = tok.literal
         self.next_token()
-        prec = Precedence.NOT if tok.token == Tok.BANG else Precedence.PREFIX
+        if tok.token == Tok.BANG:
+            prec = Precedence.NOT
+        elif self.fortran_unary and tok.token in (Tok.MINUS, Tok.PLUS):
+            # a unary sign applies to an add-operand: -a**2 is -(a**2), -a+b is (-a)+b
+            prec = Precedence.SUM
+        else:
+            prec = Precedence.PREFIX
         right_expr = self.parse_expression(prec)
         expr = PrefixExpression(tok=tok, op=op, right=right_expr)
 

@@ -10,10 +10,16 @@ VARS = {v.name: v for v in (FIXED, DEFERRED, PTR, COMP)}
 
 def test_nc_read_allocates_only_deferred_shape_arrays():
     lines = "".join(create_nc_read(VARS, False))
-    assert 'nc_alloc(ncid, "d_con_w"' not in lines
+    assert "nc_desc(ncid, 'd_con_w'" not in lines
+    assert "spel_var_allocate(d_con_w" not in lines
     assert "nc_read_var(ncid, 'd_con_w', 2, d_con_w, -1)" in lines
-    assert 'nc_alloc(ncid, "aroot", 1, aroot)' in lines
-    assert 'nc_alloc(ncid, "col_cf__phr_vr", 2, col_cf%phr_vr)' in lines
+    assert "call nc_desc(ncid, 'aroot', 1, spel_d)\n" in lines
+    assert "call spel_var_allocate(aroot, spel_d)\n" in lines
+    assert "call nc_desc(ncid, 'col_cf__phr_vr', 2, spel_d)\n" in lines
+    assert "call spel_var_allocate(col_cf%phr_vr, spel_d)\n" in lines
+    # bounds first, then the allocation, then the read
+    assert lines.index("nc_desc(ncid, 'aroot'") < lines.index("spel_var_allocate(aroot") < lines.index(
+        "nc_read_var(ncid, 'aroot'")
 
 
 def test_unallocated_module_arrays_are_skipped():
@@ -35,7 +41,21 @@ def test_component_with_dimension_name_bounds_is_allocated():
     # components carry their allocate dimension names in `bounds`, not `(:)`
     active = Variable("logical", "top_pp%active", "?", 0, 1, bounds="topo")
     lines = "".join(create_nc_read({active.name: active}, True))
-    assert 'nc_alloc(ncid, "top_pp__active", 1, top_pp%active)' in lines
+    assert "call nc_desc(ncid, 'top_pp__active', 1, spel_d)\n" in lines
+    assert "call spel_var_allocate(top_pp%active, spel_d)\n" in lines
+
+
+def test_spel_var_module_has_every_specific():
+    from spel.scripts.io.netcdf_io import SPEL_VAR_MAXRANK, gen_spel_var_module
+
+    text = gen_spel_var_module()
+    for sfx in ("r8", "int", "lgc"):
+        for kind in ("alloc", "ptr"):
+            for r in range(SPEL_VAR_MAXRANK + 1):
+                name = f"{kind}_{sfx}_{r}"
+                assert f"subroutine {name}(var, d)" in text and f"end subroutine {name}" in text
+                assert name in text[: text.index("end interface")]
+    assert "use netcdf" not in text  # shared with instrumented ELM: no netCDF dependency
 
 
 def test_derived_constants_are_written_not_read():

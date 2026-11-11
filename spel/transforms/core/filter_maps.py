@@ -60,7 +60,7 @@ from spel.scripts.fortran_parser.spel_ast import (
     SelectCaseConstruct,
     WhereConstruct,
 )
-from spel.scripts.registrations import iter_statements
+from spel.scripts.registrations import Guard, iter_statements
 from spel.transforms.compact.index_forms import IndexContext, IndexForm, callee_context
 
 DRIVER_ID = "elm_driver::elm_drv"
@@ -123,18 +123,18 @@ def _is_active_ref(node, index: str) -> bool:
             and str(args[0]).replace(" ", "").lower() == index.replace(" ", "").lower())
 
 
-def requires_active(guard, index: str) -> bool:
+def requires_active(guard: Guard, index: str) -> bool:
     """Whether the if condition `guard` holds only if `veg_pp%active(index)`: one of its `.and.` terms."""
-    node = getattr(guard, "node", None)
-    if node is None or getattr(guard, "negated", False):
+    node = guard.node
+    if node is None or guard.negated:
         return False
     return any(_is_active_ref(t, index) for t in _terms(node, ".and."))
 
 
-def skips_inactive(guard, index: str) -> bool:
+def skips_inactive(guard: Guard, index: str) -> bool:
     """Whether the if condition `guard` holds whenever `.not. veg_pp%active(index)`: one of its `.or.` terms."""
-    node = getattr(guard, "node", None)
-    if node is None or getattr(guard, "negated", False):
+    node = guard.node
+    if node is None or guard.negated:
         return False
     return any(isinstance(t, PrefixExpression) and t.operator.lower() == ".not." and _is_active_ref(t.right_expr, index)
                for t in _terms(node, ".or."))

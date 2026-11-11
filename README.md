@@ -211,6 +211,26 @@ Examples include:
 
 All source rewrites go through [`spel transform`](#spel-transform).
 
+### 9. Property-based tests of a process
+
+```bash
+spel create -s canopyfluxes -c canflux                           # an ordinary unit-test case
+spel proptest init canflux --namelist soil_stress_method=0       # a starter canflux.proptest.toml
+spel proptest probe canflux.proptest.toml                        # a few examples: what does the routine write?
+spel proptest run   canflux.proptest.toml                        # the checks, on inputs Hypothesis draws
+```
+
+[`spel proptest`](#spel-proptest) runs an extracted routine from Python on synthetic inputs that
+Hypothesis draws from a *scenario*, and checks invariants, metamorphic relations (also between
+two namelist settings) and agreement between two builds, all written in Fortran syntax in a TOML
+file. The spec is read under its namelist options: variables only used under options that are
+off (the C13 fields with `use_c13` off) do not appear. A capture checks one regime bit
+for bit; a scenario covers the regimes you describe, including ones no capture reached. Reference
+captures only help to design the scenarios. The tutorial
+[`spel/proptest/examples/canopyfluxes_tutorial.ipynb`](spel/proptest/examples/canopyfluxes_tutorial.ipynb)
+goes through all of it with CanopyFluxes and ends with a checklist for another routine; the file
+format is in [`spel/proptest/SPEC.md`](spel/proptest/SPEC.md).
+
 ## Directory layout
 
 | Path | Purpose |
@@ -221,9 +241,11 @@ All source rewrites go through [`spel transform`](#spel-transform).
 | `spel/scripts/nml/` | Namelist / COMPSET-conditional analysis |
 | `spel/scripts/ml_training/` | Experimental ML emulator tooling |
 | `spel/db/` | Django app for browsing exported analysis |
+| `spel/proptest/` | Property-based tests of unit-test cases (`spel proptest`) |
 | `SourceFiles/` | Fortran support files copied into every generated unit test |
 | `unit-tests/<casename>/` | Generated unit-test cases |
 | `unit-tests/input-data/` | NetCDF input/output data for unit tests |
+| `unit-tests/proptest-data/` | Results of `spel proptest` that outlive a regenerated case (failing examples, rule files) |
 | `script-output/` | Intermediate generated Fortran |
 | `spel/scripts/fut_<casename>.pkl` | Serialized analysis results (see below) |
 
@@ -281,6 +303,7 @@ All commands are subcommands of `spel`. Run `spel <command> --help` for the auth
 | [`spel subset`](#gridcell-subsets) | Write some gridcells of a case's reference data as a new case's |
 | [`spel run`](#spel-run) | Configure, build, and run a generated unit test, then validate it against ELM's data |
 | [`spel profile`](#spel-profile) | Build and run a unit test without outputs under Nsight Systems/Compute |
+| [`spel proptest`](#spel-proptest) | Property-based, metamorphic and differential tests of a unit-test case (Hypothesis scenarios, Fortran-syntax checks in TOML) |
 | [`spel transform`](#spel-transform) | Source-to-source transforms: OpenACC porting, `acc2omp`, compact layout, nutrient refactor, `split`, `prune`, ... (`spel transform list`) |
 | [`spel compact`](#spel-compact) | Inventory flux fields for a compact subgrid layout (the rewrite is `spel transform compact-rewrite`) |
 | [`spel accplan`](#spel-accplan) | Propose an OpenACC loop structure (collapse, column-parallel, interchange, scatter) per loop |
@@ -851,6 +874,70 @@ rsyncs the netCDF interface Fortran files (`FUTConstantsMod.F90`, `nc_allocMod.F
 ```bash
 spel upload <remote_host> <destination_path>
 ```
+
+### `spel proptest`
+
+Property-based, metamorphic and differential testing of an extracted routine. It needs the
+`proptest` extra (`pip install -e '.[proptest]'`: Hypothesis). The routine runs in a worker
+subprocess, so a crash, `endrun` or `stop` counts as a failing example, which Hypothesis then
+shrinks. The spec format, every rule and function, the files written and the limits are in
+[`spel/proptest/SPEC.md`](spel/proptest/SPEC.md). For a guided start, see the CanopyFluxes
+tutorial notebook `spel/proptest/examples/canopyfluxes_tutorial.ipynb` (it needs
+`pip install notebook pandas` and the `canflux` case).
+
+```bash
+spel create -s canopyfluxes -c canflux                      # an ordinary unit-test case
+spel proptest init  canflux --where "frac_veg_nosno(p) > 0" \
+    --namelist soil_stress_method=0                        # starter spec + rule file from the case's capture
+spel proptest show  canflux.proptest.toml [--kind input]    # inventory, scenarios, inputs without a rule
+spel proptest probe canflux.proptest.toml                   # a few examples: outputs never written, aborts
+spel proptest run   canflux.proptest.toml [-s SCENARIO] [-k CHECK] [-n EXAMPLES] [--seed N] [--json F] [--junit F]
+spel proptest replay unit-tests/proptest-data/canflux/failures/<scenario>__<check>   # a saved failure again
+spel proptest coverage canflux.proptest.toml                # if-branches the scenario never enters (gfortran + gcov)
+spel proptest subspace canflux.proptest.toml --scenario S --output "t_veg(p)" [--input NAME ...] [--parameters]
+spel proptest stats canflux --reference canflux [--sites soil crop]   # only the rule file and report
+spel proptest build canflux [--fc nvfortran] [--acc MULTICORE] [--dbg]   # a build; `run` rebuilds when sources changed
+```
+
+- **Inventory.** Every variable comes from SPEL's analysis of the case (`fut.pkl`), never from
+  the source text. Each is classified as topology (subgrid index fields, types), parameter
+  (constants), input, inout or output. The read/write category comes from the static trace the
+  database export uses: a variable whose first write is conditional and that is read later is an
+  inout. Outputs are reset to NaN before every call, so elements the routine skips stay visible.
+- **Domain.** `[domain]` builds a synthetic subgrid domain of sites, each one gridcell and
+  landunit: vegetated sites of the listed `pfts`, urban sites (`urban = ["md", "hd"]`: the five
+  urban columns, one bare patch each) and a lake site (`lake = true`), each `per_pft` times,
+  and `nsets` copies. A reference capture supplies the constants, parameters and level extents.
+  `init` picks the site kinds from the filters the routine takes (UrbanFluxes: urban sites over
+  `p in urbanp`, statistics of urban patches only); `--sites` overrides it.
+- **Scenarios.** `[scenario.<name>]` gives a rule for every input the routine reads; a run refuses
+  when one is missing, and when a parameter the routine reads has no value. The rules are
+  `range`, `log_range`, `values`, `dist`, `scale`, a constant, with per-pft and per-level
+  overrides. `extends` reads a rule file such as the one `stats` writes. `derive` sets dependent
+  inputs from Fortran expressions, `assume` filters elements and `over` picks them
+  (`p in nolakeurbanp`).
+- **Namelist options.** `[namelist]` sets the options of the runs over the reference's, and a
+  scenario or a relation can change them (`namelist = { use_c13 = true }`). The inventory is
+  classified under them from the analysis' namelist ifs: a variable only used in branches that are
+  off needs no rule, and naming it in a check is an error that names the option. Options are
+  run-time constants of the case, so no rebuild is needed.
+- **Checks.** `[[property]]` is a logical Fortran expression per element. `[[relation]]` runs a
+  base and a follow-up on the two halves of the sets in one call and compares them (`base%x`,
+  `follow%x`); without `follow` the halves are copies, and `permute` reorders them. With
+  `namelist` the follow-up is the same example under other options (a second process).
+  `[[differential]]` runs each example on two builds or two cases (`[compare]`), e.g. a refactored
+  routine against the original, or `ACC=MULTICORE` against `OFF`. Unknown names stop loading.
+- **Failures.** A failing check prints the element, the values its expression used and the drawn
+  inputs there. The shrunk example is saved in capture format and `replay` runs it again.
+- **Design aids.** `probe` and `coverage` show what a scenario reaches; `stats` proposes rules
+  from a capture; `subspace` ranks the inputs by their effect on an output (active subspace).
+- **Edits.** After editing the case's Fortran, the next command rebuilds the library (an
+  incremental make). Results that must survive `spel create` are in
+  `unit-tests/proptest-data/<case>/`.
+
+The worked example is `spel/proptest/examples/canopyfluxes.proptest.toml`. It has four
+properties and six relations, three of them between namelist settings, and the relation "more
+absorbed shortwave does not cool the leaf" fails in weak wind.
 
 ### `spel repl`
 

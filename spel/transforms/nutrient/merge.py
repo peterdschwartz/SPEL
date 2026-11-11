@@ -243,6 +243,8 @@ class Merger:
         self.results: list[MergeResult] = []
         self.refused: list[str] = []
         self._lines: dict[Path, list[str]] = {}
+        # dummy names of each binding over all families (`build`); empty for a lone `merge`
+        self.names_used: dict[str, Counter] = {}
 
     def lines(self, path: Path) -> list[str]:
         path = Path(path)
@@ -256,7 +258,7 @@ class Merger:
     def build(self) -> None:
         # dummy names of each binding in all families: breaks ties in a family
         td, sd = self.fut.type_dict, self.fut.subroutine_dict
-        self.names_used: dict[str, Counter] = {}
+        self.names_used = {}
         for fam in self.families:
             for binding in self.bindings:
                 for tname in fam.types.values():
@@ -408,7 +410,7 @@ class Merger:
             ref_e = "c"
         else:
             common = Counter(tuple(d.lower() for d in r.dummies) for r in routines.values())
-            overall = getattr(self, "names_used", {}).get(binding, Counter())
+            overall = self.names_used.get(binding, Counter())
             best = max(common, key=lambda k: (common[k], overall[k]))
             ref_e = next(e for e in ORDER if e in routines and tuple(d.lower() for d in routines[e].dummies) == best)
         ref = routines[ref_e]

@@ -93,8 +93,13 @@ CPU crop-performance runs, which moved here from Perlmutter. Recorded on 2026-10
 
 ## Generated vs. hand-edited files
 
-- `SourceFiles/nc_io.F90` is **generated**. Edit `spel/scripts/io/netcdf_io.py`, then
-  regenerate with `python -m spel.scripts.io.netcdf_io`.
+- `SourceFiles/nc_io.F90` and `SourceFiles/spel_varMod.F90` are **generated**. Edit
+  `spel/scripts/io/netcdf_io.py`, then regenerate with `python -m spel.scripts.io.netcdf_io`.
+- Allocation goes through descriptors: `spel_varMod::spel_var_allocate(var, d)` allocates from
+  `d`'s bounds (`spel_var_desc`); the case's read routines fill `d` from the capture with
+  `nc_allocMod::nc_desc` (attributes, `nsets` scaling), the proptest shim from Python.
+  `spel_varMod` is shared with instrumented ELM (`instrument_elm.SHARED_IO_MODULES`): Fortran 2008
+  only, no netCDF. `elm_init` = read + `elm_setup` (sets, clumps, filters), which the shim calls alone.
 - Other `SourceFiles/*.F90` (`main.F90`, `elm_initializeMod.F90`, `nc_allocMod.F90`, ...) are
   templates/static files copied into each case; `!#...` markers in them are filled in by the generator.
 - `duplicateMod.F90`, `ReadWriteMod.F90` and the case's ELM sources are generated per case.
@@ -420,6 +425,109 @@ feature that needs to know what a statement *is* or which names it uses must get
   (`x(-nlevsno+1:0) = ...`). Private elements a thread never sets are NaN on the GPU but stale
   finite values on the CPU, so a GPU-only NaN often means an uninitialized private or a local that
   is never copied to the device.
+
+## Property-based tests (`spel proptest`, `spel/proptest`)
+
+User documentation: README (`spel proptest`) and `spel/proptest/SPEC.md` (the spec format, files, limits).
+Keep SPEC.md in step with the code: it is the only reference of the format.
+
+- Layout:
+  - `inventory.py`: variables of a case, from `fut.pkl`;
+  - `shim.py`: generates `SpelPyMod.F90`, a bind(C) shim, plus `spel_py_manifest.json` with
+    `core.fortran` emitters. The routine call's actuals come from `ut.driver_bindings`;
+  - `build.py`: builds `<case>/build-py/libspelcase.so` (CMake `SPEL_PYLIB=ON` from
+    `generate_cmake`); other builds (`Variant`: fc, acc, dbg) go to `build-py-<fc>-<acc>[-dbg]`;
+  - `domain.py`: the synthetic domain under `<case>/proptest/domain-<hash>`: the constants file,
+    and either an inputs file (`[domain] init = "files"`) or, by default for cases made with
+    spel_varMod, `Domain.direct` (bounds + non-fill values), which the worker allocates through the
+    shim's descriptors (`spel_py_set_bounds`/`spel_py_allocate`/`spel_py_setup`, runtime.Case.init).
+    Both give bit-identical state and outputs (checked on canflux 2026-11-10; the snow/lake filters
+    `setFilters` doesn't build hold uninitialized memory either way). Saved failures are written
+    as captures (`Session.capture_dir` writes the files domain once when needed);
+  - `runtime.py`/`worker.py`: ctypes, in a spawned subprocess;
+  - `fexpr.py`: Fortran expressions through `spel_parser`, evaluated with numpy;
+  - `spec.py`: loads the TOML; `rules.py` (rule kinds), `checks.py` (check kinds) and
+    `functions.py` have a registry each (`@register`), and the spec reader and runner know only
+    the interfaces. Add a kind there, not as a branch in `spec.py`/`runner.py`;
+  - `strategies.py`, `runner.py`: Hypothesis; `Session` runs the routine through a backend
+    (`get`/`run`/`stop`: a `Worker`, or a test's fake);
+  - `scaffold.py` (`init`), `stats.py`, `subspace.py`, `coverage.py`: design aids; `paths.py`: where files go.
+
+  No module recognises Fortran by text: names, dims, guards and expressions all go through the
+  analysis and the parser (user's rule for this feature).
+- **Nothing is defaulted without a word.** An input without a rule, a parameter the routines read
+  that the reference lacks (`Domain.filled`), a constant they read that nobody gave, a misspelt
+  `[domain.time]`/`[domain.dims]` key, an unknown topology field: each stops the load or the run
+  with the fix in the message. elm_drv's scalar arguments (`fut.driver_args`) are scalar inputs
+  that need a rule. Keep it that way when adding inputs of another sort.
+- **Namelist options.** `Inventory.accesses` keeps every traced access with its *gates*: the
+  namelist conditions of the branches around it and around the calls leading to it
+  (`transforms/core/config.py::gates`, from `flat_ifs`; the same branch logic as
+  `Configuration.dead_branches`). `Inventory.configured(values)` classifies from the accesses
+  whose gates are not decided false (`evaluate_guard`; undecided = live). A `Session` has one
+  configuration (its inventory, its domain's constants file); a scenario with `namelist`, and the
+  follow-up of a relation with `namelist`, run in `Session.sibling(...)`, a second worker on the
+  same library. Rules of variables dead in a configuration are dormant there (`Session.live_inputs`).
+  Liveness of names is checked per scenario at load (`spec._check_configurations`,
+  `Check.check_scenario`). `Inventory.load` alone counts every branch as running.
+  On canflux the reference options leave 51 of 284 variables unused (34 under `use_hydrstress`).
+  Non-namelist switches (`soil_stress_method`) can be set in `[namelist]` but prune nothing.
+- Files: scratch in `<case>/proptest/` (domains, logs of aborted workers, units cache); what must
+  survive `spel create` (which deletes the case directory's contents) in
+  `unit-tests/proptest-data/<case>/` (Hypothesis database, `failures/`, `stats/`, `subspace/`).
+- A library is stale when a case source or `fut.pkl` is newer than `build-py*/.spel-built`, or the
+  generated shim differs; `Session` then rebuilds (incremental). The stamp also records the
+  netcdf-fortran directory of the build, which the worker puts first in `LD_LIBRARY_PATH`, so a
+  gfortran and an nvfortran build of one case run in the same session (differential checks).
+  Without a machine file, build each variant in a shell set up for its compiler (on the laptop:
+  `source ~/.local/nvhpc-libs/env.sh` for nvfortran).
+- Input/output classification uses `db_export.trace.StaticTrace` over the case routines
+  (`inventory.trace_status`), with the root env seeded from `driver_bindings`, and
+  `fieldstate.categorize`: prognostic → inout, input → input, diagnostic/intermediate → output.
+  The access manifest's first access is only the fallback. A first-access-only classification
+  once made `t_veg` (conditional first write, read later) a NaN-poisoned output: every output was
+  NaN.
+- Expressions: whether a value is per element is decided from the expression (`Evaluator.elemental`:
+  it uses the element variable), never from a shape; `FArray.take` puts the element axis first and
+  `Evaluator.aligned` lines operands up on it. A level count can equal the element count.
+  In a check a bare inout name is the value after the run; `input%x` is the value before.
+- Scripts that create a `runner.Session`/worker need an `if __name__ == "__main__":` guard
+  (multiprocessing spawn).
+- One Hypothesis example draws every element: per input a mode (one constant, iid from a drawn
+  seed, edges, or per element with one value down the layers), so shrinking works on a few
+  integers/floats, not on arrays. Adding a mode or a draw changes which examples a seed gives.
+  With `--seed`, Hypothesis does not use its example database.
+- Check and scenario names may contain `[...]`. Selection (`runner._selected`) tries the exact
+  name before the fnmatch glob.
+- CanopyFluxes on master needs `soil_stress_method = 0` in `[namelist]` (the reference
+  constants file lacks it, and its declaration has no default). `firrig` is copied from the reference (known limitation). The derived
+  `rootfr` must sum to 1 over `nlevgrnd`: 15 × 0.0666667 gave `btran` = 1.0000005.
+- `coverage` uses the gcov of the gfortran in use (`gcov-<major>`; the plain `gcov` here is GCC 13's
+  and cannot read GCC 14 files) and takes counts as before/after differences, so nothing in the
+  build directory is deleted.
+- Domains are sites (`domain.Layout`): vegetated (one column, one patch), urban (five columns,
+  one bare patch each) and lake. Gridcell, topounit and landunit counts are per site, column and
+  patch counts per column, so element counts differ by level: take them from `layout.count(level)`,
+  ancestors from `layout.parent`, the rows of another level from `Session.rows_of`/`elements_at`,
+  relation halves from `Session.half_count(level)`; permutations move whole sites
+  (`layout.row_permutation`). ELM type codes are `domain.TYPE_CODES`, checked against the case's
+  parameters. Checked on UrbanFluxes 2026-11-10: urban filters as in ELM, direct and files init
+  bit-identical, and geometry inputs need ELM's derivations (`z_d_town`, `z_0_town`,
+  `forc_hgt_*_patch`), or about 30% of the drawn sites take logs of negative heights (NaN).
+  `init` writes those derivations (`scaffold.URBAN_DERIVE`) and takes the site kinds from the
+  routine's filter arguments (`scaffold.routine_sites`, tables `domain.FILTER_SITES`/
+  `FILTER_COMPLEMENTS`); `stats --sites` restricts the statistics to patches on those landunits.
+  Site kinds and urban densities are enums (`SiteKind`, `UrbanDensity`), not strings.
+- Not done: multi-step runs (the time scalars would have to advance), vegetated columns with
+  several patches, gridcells with several landunits, glacier/wetland sites, type-bound routines
+  in the shim. No local case has
+  `driver_args`, so that path is tested only on a synthetic inventory.
+- Tutorial: `spel/proptest/examples/canopyfluxes_tutorial.ipynb` (executed, with outputs). Change it through
+  its narrative and re-execute it (`nbclient`) after API changes; its text quotes actual results.
+- Tests (`spel/proptest/tests/`): `test_proptest.py` (snippets; the CanopyFluxes end-to-end test is
+  skipped unless the `canflux` case exists and `spel proptest build canflux` has been run), `test_runner_fake.py` (the runner on
+  `fake.py`: a synthetic inventory and a numpy "routine", no build), `test_domain.py`,
+  `test_runtime.py` (ctypes and the worker on a hand-written gfortran library).
 
 ## Comparing E3SM timings
 

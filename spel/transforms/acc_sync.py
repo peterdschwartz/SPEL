@@ -33,9 +33,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 from spel.transforms.acc_apply import DeviceFacts as _Facts
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_parser.spel_ast import ModuleConstruct
+    from spel.scripts.functional_unit_test import FunctionalUnitTest
 from spel.transforms.core.query import abort_calls, call_tree, source_path as _path
 from spel.transforms.acc_directives import find_directives
 from spel.transforms.core.query import construct_end as _end_of, device_spans as _spans
@@ -94,13 +99,13 @@ class SyncPlan:
 class _Types:
     """Resolve a designator path to the type and rank of what it names."""
 
-    def __init__(self, fut):
+    def __init__(self, fut: FunctionalUnitTest):
         self.types = {k.lower(): v for k, v in fut.type_dict.items()}
         # module variables by name, for the accesses callees make on the caller's call
         # lines (the caller need not use those modules itself); ambiguous names left out
         seen: dict[str, list] = {}
         for m in fut.module_dict.values():
-            for n, v in getattr(m, "global_vars", {}).items():
+            for n, v in m.global_vars.items():
                 seen.setdefault(n.lower(), []).append(v)
         self.globals = {n: vs[0] for n, vs in seen.items() if len(vs) == 1}
         self.modules = fut.module_dict
@@ -111,7 +116,7 @@ class _Types:
         from spel.transforms.device.generate import _acc_declared_names
 
         v = self.globals.get(name.lower())
-        mod = str(getattr(v, "declaration", "") or "").lower() if v is not None else ""
+        mod = str(v.declaration or "").lower() if v is not None else ""
         m = self.modules.get(mod)
         if m is None:
             return True
@@ -124,7 +129,7 @@ class _Types:
         names = cache[mod]
         return True if names is None else name.lower() in names
 
-    def expand(self, sub, path: str) -> list[str]:
+    def expand(self, sub: Subroutine, path: str) -> list[str]:
         """
         The variables `path` names: through a pointer component with recorded targets
         (`transport_ptr_list(i)%conc_ptr` -> `col_cs%core%decomp_pools_vr`, ..., from the
@@ -138,14 +143,14 @@ class _Types:
             comp = t.components.get(p) if t is not None else None
             if comp is None:
                 break
-            targets = getattr(comp, "pointer", None) or []
+            targets = comp.pointer or []
             if targets:
                 rest = "%".join(parts[i + 1:])
                 return [x for tgt in targets for x in self.expand(sub, f"{tgt}%{rest}" if rest else tgt)]
             typ = str(comp.type).lower()
         return [path]
 
-    def visible(self, sub, path: str) -> bool:
+    def visible(self, sub: Subroutine, path: str) -> bool:
         """Whether every component of `path` is accessible in `sub` (private components
         only inside their type's module)."""
         from spel.scripts.fortran_parser.module_spec import ModuleSpecError, module_spec
@@ -157,7 +162,7 @@ class _Types:
             t = self.types.get(typ)
             if t is None:
                 return False
-            mod = str(getattr(t, "declaration", "") or "").lower()
+            mod = str(t.declaration or "").lower()
             if mod != str(sub.module).lower():
                 m = self.modules.get(mod)
                 try:
@@ -182,18 +187,18 @@ class _Types:
             return False
         return info is not None and info.access == "public"
 
-    def base(self, sub, name: str):
+    def base(self, sub: Subroutine, name: str):
         """(type, rank, origin kind) of a routine's name: dummy/local declaration or global."""
         rec = sub.record
         d = rec.declarations.get(name)
         if d is not None:
             return d.type.lower(), d.dim, ("dummy" if any(x.name == name for x in rec.dummy_args) else "local")
-        v = {k.lower(): v for k, v in getattr(sub, "active_global_vars", {}).items()}.get(name) or self.globals.get(name)
+        v = {k.lower(): v for k, v in sub.active_global_vars.items()}.get(name) or self.globals.get(name)
         if v is not None:
             return str(v.type).lower(), v.dim, "global"
         return None
 
-    def resolve(self, sub, path: str) -> Optional[tuple[tuple[str, ...], int, str, bool]]:
+    def resolve(self, sub: Subroutine, path: str) -> Optional[tuple[tuple[str, ...], int, str, bool]]:
         """
         (key, rank, origin kind, updatable) for `path`; None when the path names a
         derived-type object or cannot be resolved. key: (owner type, member) for a member,
@@ -235,7 +240,7 @@ def _entries(maps) -> list[tuple[str, str, int, str]]:
     return out
 
 
-def _data_entries(sub, maps) -> list[tuple[str, str, int, str]]:
+def _data_entries(sub: Subroutine, maps) -> list[tuple[str, str, int, str]]:
     """
     `_entries` without the association contexts (`p => x`, nullify, allocate, deallocate):
     they change a descriptor, not data. Counted as writes they made acc-sync pull a pointer
@@ -251,7 +256,7 @@ def _data_entries(sub, maps) -> list[tuple[str, str, int, str]]:
     return [e for e in _entries(maps) if (e[0].lower(), e[2]) not in assoc]
 
 
-def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
+def plan(fut: FunctionalUnitTest, roots: Iterable[str], extra_seq: Iterable[str] = (),
          device_spans: Optional[dict[str, list[tuple[int, int]]]] = None,
          boundary: Optional[dict[str, tuple[list[tuple[str, str]], list[tuple[str, str]]]]] = None,
          off_by_default: Optional[Iterable[str]] = None, config=None) -> SyncPlan:
@@ -270,6 +275,7 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
     and the routines reached only through them, get no syncs (they are not host code of the run).
     """
     from spel.scripts.fortran_parser.module_spec import parse_modules
+    from spel.scripts.fortran_parser.scope_walk import FunctionRef
     from spel.scripts.record_access import AccessMapper
 
     cold_switches = OFF_BY_DEFAULT if off_by_default is None else frozenset(n.lower() for n in off_by_default)
@@ -287,11 +293,11 @@ def plan(fut, roots: Iterable[str], extra_seq: Iterable[str] = (),
     # routines whose call tree runs kernels: calls to them are device work for the caller
     runs_kernels: dict[str, bool] = {}
 
-    def callees(s, ln: Optional[int] = None) -> set[str]:
+    def callees(s: Subroutine, ln: Optional[int] = None) -> set[str]:
         """Routines called by `s` (on line `ln`): the scope's resolution, generic
         interfaces through the call descriptions (AccessMapper.callee), plus acc-apply's."""
         events = [e for e in s.record.calls + s.record.function_calls
-                  if (ln is None or e.ln == ln) and not getattr(e, "intrinsic", False)]
+                  if (ln is None or e.ln == ln) and not (isinstance(e, FunctionRef) and e.intrinsic)]
         ids = {c.id for c in (mapper.callee(s, s.record, e) for e in events) if c is not None}
         lo, hi = (s.startline, s.endline) if ln is None else (ln, ln)
         return ids | facts.callees_in(s, lo, hi)[0]
@@ -392,11 +398,12 @@ def excluded_calls_in(sid: str, path: Path, node) -> list[str]:
     from spel.scripts.fortran_parser.module_spec import callee_name, parse_modules, statements_with_next
 
     name = sid.split("::")[-1].lower()
-    mod = next((m for m in parse_modules(path) if any(p.name.lower() == name for p in m.subprograms)), None)
+    mod: Optional[ModuleConstruct] = next(
+        (m for m in parse_modules(path) if any(p.name.lower() == name for p in m.subprograms)), None)
     if mod is None:
         return []
     names: set[str] = set()
-    for st in list(getattr(mod.spec, "statements", [])) + list(node.body.statements):
+    for st in list(mod.spec.statements) + list(node.body.statements):
         if isinstance(st, A.UseStatement) and st.module.lower() in bad_modules and st.has_only:
             names |= {str(o).split("=>")[0].strip().lower() for o in st.objs}
     names -= {"t_startf", "t_stopf", "endrun", "shr_sys_flush", "shr_sys_abort", "get_curr_date",
@@ -467,7 +474,7 @@ def _header_lines(st) -> list[int]:
     return [st.lineno]
 
 
-def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries, lines: list[str],
+def _segments(rs: RoutineSync, sub: Subroutine, node, device: list[tuple[int, int]], entries, lines: list[str],
               types: _Types, out: SyncPlan, boundary=None, cold_switches=OFF_BY_DEFAULT, config=None) -> None:
     from spel.scripts.fortran_parser import spel_ast as A
     from spel.transforms.core.query import first_executable
@@ -493,7 +500,7 @@ def _segments(rs: RoutineSync, sub, node, device: list[tuple[int, int]], entries
             return sym.origin in (Origin.GLOBAL, Origin.EXTERNAL)
         # unknown here, or only through the external fallback (a whole `use` of a module outside
         # the analysis): an analyzed module's variable is not visible without a use statement
-        mod = str(getattr(v, "declaration", "") or "").lower()
+        mod = str(v.declaration or "").lower() if v is not None else ""
         if v is None or not mod or not types.public(mod, base):
             return False
         rs.uses.setdefault(mod, set()).add(base)
@@ -838,7 +845,7 @@ def sync_texts(plan_: SyncPlan, texts: dict[Path, list[str]]) -> dict[Path, tupl
 
 def text_plan(ctx, plan_: SyncPlan) -> TPlan:
     texts = {rs.path: ctx.lines(rs.path) for rs in plan_.routines}
-    out = TPlan(AccSync.name, notes=list(getattr(plan_, "notes", [])))
+    out = TPlan(AccSync.name, notes=list(plan_.notes))
     for path, (lines, done) in sync_texts(plan_, texts).items():
         out.new_files[path] = "\n".join(lines)
         out.notes.append(f"{path.name}: {done} insertions")

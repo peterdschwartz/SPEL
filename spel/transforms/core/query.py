@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Optional
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_parser.scope_walk import SubroutineRecord
+    from spel.scripts.fortran_parser.spel_ast import SubroutineDefinitionConstruct, Statement
+    from spel.scripts.functional_unit_test import FunctionalUnitTest
 
 
 @dataclass
@@ -81,7 +87,7 @@ def routine_tree(sub):
     return found[0] if found else parse_routine(source_path(sub), sub.startline, sub.endline)
 
 
-def first_executable(tree, rec) -> int:
+def first_executable(tree: SubroutineDefinitionConstruct, rec: Optional[SubroutineRecord]) -> int:
     """
     Line of the routine's first executable statement (its own body, not nested ones).
     Statement-function definitions (`f(x) = ...` with `f` declared scalar) belong to the
@@ -92,9 +98,11 @@ def first_executable(tree, rec) -> int:
     spec_kinds = (A.UseStatement, A.ImplicitNoneStatement, A.VariableDecl, A.TypeDef, A.AccessStatement,
                   A.ProcedureStatement)
 
-    def statement_function(st) -> bool:
-        e = getattr(st, "expression", None)
-        if not (isinstance(st, A.ExpressionStatement) and isinstance(e, A.InfixExpression) and e.operator.strip() == "="):
+    def statement_function(st: Statement) -> bool:
+        if not isinstance(st, A.ExpressionStatement):
+            return False
+        e = st.expression
+        if not (isinstance(e, A.InfixExpression) and e.operator.strip() == "="):
             return False
         lhs = e.left_expr
         if not isinstance(lhs, A.FuncExpression) or not isinstance(lhs.function, A.Identifier):
@@ -108,10 +116,15 @@ def first_executable(tree, rec) -> int:
     return tree.end_ln
 
 
-def construct_end(st, lines: list[str]) -> int:
+def construct_end(st: Statement, lines: list[str]) -> int:
     """Last line of a statement: a construct's end, else the last continuation line."""
-    end = getattr(st, "construct_end_ln", -1)  # an if construct's `end if` (its end_ln ends the first branch)
+    from spel.scripts.fortran_parser.spel_ast import IfConstruct
+
+    # an if construct's `end if` (its end_ln ends the first branch)
+    end = st.construct_end_ln if isinstance(st, IfConstruct) else -1
     if end is None or end < 0:
+        # every construct class sets end_ln; simple statements have none (module_spec tells
+        # constructs apart by its presence, so Statement has no default)
         end = getattr(st, "end_ln", -1)
     if end is not None and end >= 0:
         return end
@@ -126,15 +139,15 @@ def construct_end(st, lines: list[str]) -> int:
 ABORTS = {"endrun", "shr_sys_abort", "abort", "mpi_abort"}
 
 
-def call_tree(fut, roots: Iterable[str],
-              exclude: Optional[Callable[[str], bool]] = None) -> dict[str, object]:
+def call_tree(fut: FunctionalUnitTest, roots: Iterable[str],
+              exclude: Optional[Callable[[str], bool]] = None) -> dict[str, Subroutine]:
     """The routines reachable from `roots` through `child_subroutines`.
 
     `exclude(routine_id)` cuts the tree: an excluded routine is left out together with
     everything reachable only through it. A routine kept on the host keeps its callees on
     the host: a kernel in such a callee finds the host routine's data absent (2026-10-29:
     template_col_from_natveg_array, called only by the host set_old_column_weights)."""
-    out: dict[str, object] = {}
+    out: dict[str, Subroutine] = {}
     stack = [r for r in roots]
     while stack:
         sid = stack.pop()
@@ -144,7 +157,7 @@ def call_tree(fut, roots: Iterable[str],
             continue
         sub = fut.subroutine_dict[sid]
         out[sid] = sub
-        stack.extend(ch.id for ch in getattr(sub, "child_subroutines", {}).values())
+        stack.extend(ch.id for ch in sub.child_subroutines.values())
     return out
 
 

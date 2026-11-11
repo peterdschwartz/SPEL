@@ -74,7 +74,7 @@ def p_acc_apply(fut, srcroot, out):
 def p_acc_sync(fut, srcroot, out):
     from spel.transforms import acc_sync
     sp = acc_sync.plan(fut, ROOTS)
-    return list(getattr(sp, "notes", [])) + acc_sync.apply(fut, sp)
+    return list(sp.notes) + acc_sync.apply(fut, sp)
 
 
 def p_acc_to_omp(fut, srcroot, out):

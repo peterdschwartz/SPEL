@@ -5,7 +5,7 @@ import sys
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Mapping, Optional
 
 import spel.scripts.io.helper as hio
 from spel.scripts import logging_configs
@@ -144,21 +144,18 @@ def create_nc_define_vars(
     return lines
 
 
-def generate_elmtypes_io_netcdf(unit_test: FunctionalUnitTest) -> None:
-    tabs = hio.indent(hio.Tab.reset)
-
-    filename = "ReadWriteMod.F90"
-    mod_name = filename.removesuffix(".F90")
-
-    logger = unit_test.logger
-
+def case_io_variables(
+    unit_test: FunctionalUnitTest, active_instances: Optional[dict[str, Variable]] = None
+) -> tuple[dict[str, Variable], dict[str, ConditionExpectation]]:
+    """
+    The derived-type components ReadWriteMod reads and writes (`inst%field` -> a copy of the
+    component's Variable, named `inst%field`) and the namelist guard of each guarded one.
+    Fills OPTIONAL_READS. Also used by `spel proptest` to address the same variables.
+    """
     type_dict = unit_test.type_dict
-    case_dir = unit_test.case_dir
     instance_to_type = unit_test.instance_to_type_map()
-
-    active_instances, use_statements, elminst_vars = (
-        hio.get_var_usage_and_elm_inst_vars(type_dict)
-    )
+    if active_instances is None:
+        active_instances = hio.get_active_instances(type_dict)
 
     dtype_vars: dict[str, Variable] = {}
     guards: dict[str, ConditionExpectation] = {}
@@ -187,6 +184,24 @@ def generate_elmtypes_io_netcdf(unit_test: FunctionalUnitTest) -> None:
                 unit_test.logger.info(f"{ condition }")
             if condition is not None:
                 guards[new_var.name] = condition
+    return dtype_vars, guards
+
+
+def generate_elmtypes_io_netcdf(unit_test: FunctionalUnitTest) -> None:
+    tabs = hio.indent(hio.Tab.reset)
+
+    filename = "ReadWriteMod.F90"
+    mod_name = filename.removesuffix(".F90")
+
+    logger = unit_test.logger
+
+    type_dict = unit_test.type_dict
+    case_dir = unit_test.case_dir
+
+    active_instances, use_statements, elminst_vars = (
+        hio.get_var_usage_and_elm_inst_vars(type_dict)
+    )
+    dtype_vars, guards = case_io_variables(unit_test, active_instances)
 
     # elm_drv arguments the routines take (nextsw_cday, declinp1): one value per step
     drv_args = getattr(unit_test, "driver_args", {})
@@ -208,6 +223,7 @@ def generate_elmtypes_io_netcdf(unit_test: FunctionalUnitTest) -> None:
         f"{tabs}use netcdf\n",
         f"{tabs}use nc_io\n",
         f"{tabs}use nc_allocMod\n",
+        f"{tabs}use spel_varMod, only: spel_var_desc, spel_var_allocate\n",
     ]
 
     lines.extend(sorted(use_statements))
@@ -313,6 +329,7 @@ def generate_constants_io_netcdf(
         f"{tabs}use netcdf\n",
         f"{tabs}use nc_io\n",
         f"{tabs}use nc_allocMod\n",
+        f"{tabs}use spel_varMod, only: spel_var_desc, spel_var_allocate\n",
     ]
 
     use_stmts, _ = hio.var_use_statements(vars)
@@ -415,6 +432,7 @@ def create_constants_io_routine(
     )
 
     if mode == hio.IOMode.read:
+        lines.insert(-1, f"{tabs}type(spel_var_desc) :: {DESC}\n")
         lines.append(f"{tabs}ncid = nc_create_or_open_file(trim(new_fn), read_file)\n")
 
         lines.extend(
@@ -501,6 +519,7 @@ def create_netcdf_io_routine(
     )
     if mode == hio.IOMode.read:
         lines.append(f"{tabs}integer :: it\n")
+        lines.append(f"{tabs}type(spel_var_desc) :: {DESC}\n")
     lines.append(f"{tabs}new_fn = trim(io_inst%get_fn())\n")
 
     if mode == hio.IOMode.write:
@@ -678,6 +697,17 @@ def create_nc_write(
     return lines
 
 
+DESC = "spel_d"  # the read routines' spel_var_desc local
+
+
+def alloc_lines(tabs: str, varname: str, var: Variable) -> list[str]:
+    """Allocate a deferred-shape variable from the bounds of its file variable."""
+    return [
+        f"{tabs}call nc_desc(ncid, '{varname}', {var.dim}, {DESC})\n",
+        f"{tabs}call spel_var_allocate({var.name}, {DESC})\n",
+    ]
+
+
 def create_nc_read(
     vars: dict[str, Variable],
     time: bool,
@@ -741,9 +771,7 @@ def create_nc_read(
         var_lines: list[str] = []
         # explicit-shape arrays (e.g. elm_varcon::d_con_w(ngases,3)) are already sized
         if is_deferred_shape(var):
-            var_lines.append(
-                f"{tabs}call nc_alloc(" f'ncid, "{varname}", {var.dim}, {var.name})\n'
-            )
+            var_lines.extend(alloc_lines(tabs, varname, var))
         var_lines.append(
             f"{tabs}call nc_read_var("
             f"ncid, '{varname}', {var.dim}, "
@@ -856,9 +884,7 @@ def create_nc_read_buffered(
             var_load.append(f"{t2}if (.not. associated({var.name})) allocate({var.name})\n")
         # explicit-shape arrays (spel_drv_<arg>(1)) are already sized
         if var.dim > 0 and is_deferred_shape(var):
-            var_load.append(
-                f'{t2}call nc_alloc(ncid, "{varname}", {var.dim}, {var.name})\n'
-            )
+            var_load.extend(alloc_lines(t2, varname, var))
         var_load.append(
             f"{t2}call nc_buf_load(ncid, '{varname}', shape({var.name}), ib_{n}, "
             f"inbuf_t0, inbuf_nt, inbuf_chunk, ib_sd({n}), ib_nfile({n}))\n"
@@ -2208,5 +2234,106 @@ def gen_nc_read_timeslices() -> str:
     """)
 
 
+# -- spel_varMod: allocation from a descriptor
+
+SPEL_VAR_MAXRANK = 3  # the ranks nc_io reads (read_dims)
+SPEL_VAR_TYPES = (("r8", "real(8)"), ("int", "integer"), ("lgc", "logical"))
+
+
+def gen_spel_var_module() -> str:
+    """
+    spel_varMod.F90: the descriptor type `spel_var_desc` (bounds, an optional fill value, and
+    the address the variable got) and `spel_var_allocate(var, d)`, which allocates `var` from
+    `d`'s bounds. Where the bounds come from is the caller's business: nc_allocMod::nc_desc
+    reads them from a capture file, the proptest shim (spel/proptest/shim.py) gets them from
+    Python. No netCDF here: the module is shared with instrumented ELM builds
+    (instrument_elm.SHARED_IO_MODULES), so it uses nothing past Fortran 2008.
+
+    One specific per type x rank x {allocatable, pointer} (a generic can tell allocatable and
+    pointer dummies apart, F2008 12.4.3.4.5). A variable that is already allocated (associated)
+    is left as it is; the descriptor then takes its actual bounds.
+    """
+    ranks = range(0, SPEL_VAR_MAXRANK + 1)
+    specifics = [
+        f"{kind}_{sfx}_{r}" for sfx, _ in SPEL_VAR_TYPES for kind in ("alloc", "ptr") for r in ranks
+    ]
+    out = [
+        "module spel_varMod",
+        "   ! generated by spel/scripts/io/netcdf_io.py (gen_spel_var_module): do not edit",
+        "   use iso_c_binding, only: c_ptr, c_null_ptr, c_loc",
+        "   implicit none",
+        "   private",
+        f"   integer, parameter, public :: SPEL_MAXRANK = {SPEL_VAR_MAXRANK}",
+        "   type, public :: spel_var_desc",
+        "      character(len=128) :: name = ''",
+        "      integer :: rank = -1",
+        "      integer :: lb(SPEL_MAXRANK) = 1",
+        "      integer :: ub(SPEL_MAXRANK) = 0",
+        "      logical :: has_bounds = .false.",
+        "      ! every element of a new allocation starts at fill_r8 / fill_int (logicals: fill_int /= 0)",
+        "      logical :: has_fill = .false.",
+        "      real(8) :: fill_r8 = 0.d0",
+        "      integer :: fill_int = 0",
+        "      ! where the data is, once allocated (C address of the first element)",
+        "      type(c_ptr) :: addr = c_null_ptr",
+        "   end type spel_var_desc",
+        "   public :: spel_var_allocate, spel_var_require",
+        "   interface spel_var_allocate",
+    ]
+    for i in range(0, len(specifics), 4):
+        out.append("      module procedure " + ", ".join(specifics[i:i + 4]))
+    out += ["   end interface", "contains", ""]
+    out += [
+        "   subroutine spel_var_require(d, rank)",
+        "      ! stop unless d has bounds for a variable of this rank",
+        "      type(spel_var_desc), intent(in) :: d",
+        "      integer, intent(in) :: rank",
+        "      if (.not. d%has_bounds) then",
+        "         print *, 'spel_var_allocate: no bounds for ', trim(d%name)",
+        "         error stop 'spel_var_allocate: no bounds'",
+        "      end if",
+        "      if (d%rank /= rank) then",
+        "         print *, 'spel_var_allocate: ', trim(d%name), ' has rank', rank, ' but its descriptor', d%rank",
+        "         error stop 'spel_var_allocate: rank mismatch'",
+        "      end if",
+        "   end subroutine spel_var_require",
+        "",
+    ]
+    for sfx, ftype in SPEL_VAR_TYPES:
+        fill = {"r8": "d%fill_r8", "int": "d%fill_int", "lgc": "(d%fill_int /= 0)"}[sfx]
+        for kind in ("alloc", "ptr"):
+            # c_loc needs TARGET or POINTER, and a pointer can't also be a target
+            attr, test = ("allocatable, target", "allocated") if kind == "alloc" else ("pointer", "associated")
+            for r in ranks:
+                shape = "" if r == 0 else "(" + ", ".join(":" * 1 for _ in range(r)) + ")"
+                bounds = "" if r == 0 else "(" + ", ".join(f"d%lb({k}):d%ub({k})" for k in range(1, r + 1)) + ")"
+                out += [
+                    f"   subroutine {kind}_{sfx}_{r}(var, d)",
+                    f"      {ftype}, {attr}, intent(inout) :: var{shape}",
+                    "      type(spel_var_desc), intent(inout) :: d",
+                    f"      if (.not. {test}(var)) then",
+                    f"         call spel_var_require(d, {r})",
+                    f"         allocate (var{bounds})",
+                    # not `source=`: nvfortran 26.5 has an internal error on a scalar pointer
+                    f"         if (d%has_fill) var = {fill}",
+                    "      end if",
+                ]
+                if r:
+                    out += [f"      d%rank = {r}", f"      d%lb(1:{r}) = lbound(var)", f"      d%ub(1:{r}) = ubound(var)"]
+                    out += [f"      if (size(var) > 0) d%addr = c_loc(var{'(' + ', '.join(f'lbound(var, {k})' for k in range(1, r + 1)) + ')'})"]
+                else:
+                    out += ["      d%rank = 0", "      d%addr = c_loc(var)"]
+                out += [f"   end subroutine {kind}_{sfx}_{r}", ""]
+    out += ["end module spel_varMod", ""]
+    return "\n".join(out)
+
+
+def write_spel_var_module() -> Path:
+    path = Path(spel_mods_dir) / "spel_varMod.F90"
+    path.write_text(gen_spel_var_module())
+    return path
+
+
 if __name__ == "__main__":
     generate_nc_io()
+    write_spel_var_module()

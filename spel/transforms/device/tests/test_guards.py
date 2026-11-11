@@ -31,7 +31,7 @@ def test_instance_with_history_sources_is_not_gated(monkeypatch):
     # WATER_FROM_UPHILL is registered only `if (use_IM2_hillslope_hydrology)`, the copy's own condition
     reg_top = SimpleNamespace(kind="hist", field="from_uphill", base="top_ws",
                               guards=(Guard("use_im2_hillslope_hydrology", None),))
-    root = SimpleNamespace(elmtype_access_by_ln=dict.fromkeys(raw, {}))
+    root = SimpleNamespace(elmtype_access_by_ln=dict.fromkeys(raw, {}), registrations=[], arguments={})
     fut = SimpleNamespace(
         subroutine_dict={"elm_driver::elm_drv": root,
                          "subgridweightsmod::init_subgrid_weights_mod": SimpleNamespace(registrations=[reg], arguments={}),

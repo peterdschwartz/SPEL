@@ -202,8 +202,7 @@ class IntegerLiteral(Expression):
         self.boz: Optional[str] = None  # a BOZ literal constant as written (z'7ff4...'), else None
 
     def token_literal(self) -> str:
-        boz = getattr(self, "boz", None)  # absent on nodes built without __init__ (copies, older pickles)
-        return boz if boz is not None else str(self.value)
+        return self.boz if self.boz is not None else str(self.value)
 
     def expression_node(self) -> None:
         pass
@@ -1853,6 +1852,8 @@ class SubroutineDefinitionConstruct(Statement):
     """
 
     args_close: Optional[tuple[int, int, int, int]] = None  # keep_spans: the `)` of the dummies
+    # keep_spans: each dummy name's span in the header, in order (None where the parser has none)
+    arg_spans: Optional[list[Optional[tuple[int, int, int, int]]]] = None
 
     def __init__(
         self,

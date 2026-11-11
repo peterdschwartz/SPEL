@@ -22,7 +22,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from spel.scripts.utilityFunctions import Variable
 
 DRIVER_ID = "elm_driver::elm_drv"
 BINDINGS = ("init", "setvalues", "zerodwt", "init_history", "restart", "summary", "clean")
@@ -94,14 +97,9 @@ def is_data_only(type_dict: dict, type_name: str) -> bool:
     return dtype is not None and not dtype.procedures
 
 
-def embeds(comp) -> bool:
+def embeds(comp: Variable) -> bool:
     """A scalar, non-pointer derived-type component (`type(base) :: core`)."""
-    return (
-        not getattr(comp, "nested", False)
-        and comp.dim == 0
-        and not getattr(comp, "pointer", False)
-        and not getattr(comp, "ptrscalar", False)
-    )
+    return not comp.nested and comp.dim == 0 and not comp.pointer and not comp.ptrscalar
 
 
 def base_routine(sub_dict: dict, type_name: str, binding: str) -> Optional[str]:

@@ -27,14 +27,18 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from spel.scripts.fortran_parser.scope_walk import Access
+from spel.scripts.fortran_parser.spel_ast import BoundsExpression, Expression, SubroutineDefinitionConstruct
 from spel.scripts.fortran_parser.symbols import Origin
 from spel.transforms.compact.index_forms import IndexContext, norm
 from spel.transforms.core.edits import replace_cols
 from spel.transforms.core.source import statement_start
 from spel.transforms.filter_locals import DISQUALIFY, INTRINSIC_TYPES, LEVELS, TextUses
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
 
 Key = tuple[str, str]  # (routine id, variable)
 
@@ -56,12 +60,12 @@ class Member:
     why: str = ""
 
 
-def _clump_dim(b, dummy: bool) -> Optional[tuple[str, bool]]:
+def _clump_dim(b: Optional[Expression], dummy: bool) -> Optional[tuple[str, bool]]:
     """(level, assumed shape) when the declared dimension `b` spans the clump."""
-    if b is None or getattr(b, "start", None) is None:
+    if not isinstance(b, BoundsExpression) or b.start is None:
         return None
     s = norm(b.start).lower()
-    e = norm(b.end).lower() if getattr(b, "end", None) is not None else None
+    e = norm(b.end).lower() if b.end is not None else None
     for x in LEVELS:
         if e is None and dummy and s == f"bounds%beg{x}":
             return x, True
@@ -70,21 +74,22 @@ def _clump_dim(b, dummy: bool) -> Optional[tuple[str, bool]]:
     return None
 
 
-def _clump_section(sub_expr, level: str) -> bool:
+def _clump_section(sub_expr: Expression, level: str) -> bool:
     """`begc:endc` / `bounds%begc:bounds%endc` as an actual's first subscript."""
-    if getattr(sub_expr, "start", None) is None or getattr(sub_expr, "end", None) is None:
+    if not isinstance(sub_expr, BoundsExpression) or sub_expr.start is None or sub_expr.end is None:
         return False
     s, e = norm(sub_expr.start).lower(), norm(sub_expr.end).lower()
     return s in (f"beg{level}", f"bounds%beg{level}") and e in (f"end{level}", f"bounds%end{level}")
 
 
 class Planner:
-    def __init__(self, fut, subs: list, lines_of, tree_of, srcroot: Path):
+    def __init__(self, fut, subs: list, lines_of: Callable[[Subroutine], list[str]],
+                 tree_of: Callable[[Subroutine], Optional[SubroutineDefinitionConstruct]], srcroot: Path):
         self.fut, self.lines_of, self.tree_of = fut, lines_of, tree_of
         self.subs = {s.id: s for s in subs}
         self.members: dict[Key, Member] = {}
         self.uses: dict[str, TextUses] = {}
-        self.trees: dict[str, object] = {}
+        self.trees: dict[str, SubroutineDefinitionConstruct] = {}
         self.refused: dict[str, str] = {}
         self.srcroot = srcroot
         self._text_calls: dict[str, int] = {}
@@ -92,21 +97,21 @@ class Planner:
         self.callee_of: dict[tuple[str, int, str], str] = {}  # (caller, ln, actual) -> callee
         self.incoming: dict[Key, set] = defaultdict(set)  # (callee, dummy) -> {(caller, ln, actual)}
         for s in fut.subroutine_dict.values():
-            ra = getattr(s, "record_access", None)
+            ra = s.record_access
             for b in ra.bindings if ra is not None else []:
                 self.bindings[(b.caller, b.ln, b.callee)][b.dummy.lower()] = (b.actual.lower(), b.origin)
                 self.callee_of[(b.caller, b.ln, b.actual.lower())] = b.callee
                 self.incoming[(b.callee, b.dummy.lower())].add((b.caller, b.ln, b.actual.lower()))
 
     # --- members of one routine ---
-    def collect(self, sub) -> None:
+    def collect(self, sub: Subroutine) -> None:
         from spel.scripts.fortran_parser.spel_ast import VariableDecl
         from spel.scripts.registrations import iter_statements
 
-        tree = self.tree_of(sub)
+        tree: Optional[SubroutineDefinitionConstruct] = self.tree_of(sub)
         if tree is None:
             return
-        if getattr(tree, "contains", None):
+        if tree.contains:
             self.refused[sub.id] = "has internal procedures"
             return
         self.trees[sub.id] = tree
@@ -332,8 +337,7 @@ class Planner:
         node = next((e for e in uses.subscripted.get(name, []) if e.args and e.args[0] is first), None)
         rest = node.args[1:] if node is not None else None
         if (node is not None and node.span is not None and node.span[2] == l0
-                and all(getattr(a, "start", 0) is None and getattr(a, "end", 0) is None
-                        and type(a).__name__ == "BoundsExpression" for a in rest)):
+                and all(isinstance(a, BoundsExpression) and a.start is None and a.end is None for a in rest)):
             return replace_cols(l0, col0, node.span[3], "", why=f"filter-locals {name}")
         return replace_cols(span[0], span[1], span[3], ":", why=f"filter-locals {name}")
 
@@ -349,8 +353,10 @@ class Planner:
         return [replace_cols(b.start.span[0], b.start.span[1], b.end.span[3], m.count, why=f"filter-locals {m.name}")]
 
 
-def _bounds_span(b):
-    s, e = getattr(b, "start", None), getattr(b, "end", None)
+def _bounds_span(b: Optional[Expression]) -> Optional[tuple[int, int, int, int]]:
+    if not isinstance(b, BoundsExpression):
+        return None
+    s, e = b.start, b.end
     if s is None or e is None or s.span is None or e.span is None:
         return None
     return (s.span[0], s.span[1], e.span[2], e.span[3])

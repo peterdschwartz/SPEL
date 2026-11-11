@@ -26,7 +26,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from spel.transforms.core.edits import delete, replace_cols
 from spel.transforms.core.registry import transform
@@ -34,6 +34,10 @@ from spel.transforms.core.source import statement_start
 from spel.transforms.core.transform import Change, Plan, Refusal, Transform
 from spel.transforms.filter_locals import TextUses, _word_in
 from spel.transforms.filter_locals_ip import text_call_count
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_parser.spel_ast import SubroutineDefinitionConstruct
 
 
 def remove_arg(lines: list[str], spans: list, i: int):
@@ -112,9 +116,9 @@ class DropDummies(Transform):
 
         out = Plan(self.name)
         names = {n.lower() for n in opts.names}
-        trees: dict[str, object] = {}
+        trees: dict[str, Optional[SubroutineDefinitionConstruct]] = {}
 
-        def tree_of(sub):
+        def tree_of(sub: Subroutine) -> Optional[SubroutineDefinitionConstruct]:
             if sub.id not in trees:
                 try:
                     trees[sub.id] = parse_routine(ctx.path(sub), sub.startline, sub.endline, keep_spans=True,
@@ -125,7 +129,7 @@ class DropDummies(Transform):
 
         calls: dict[str, dict] = defaultdict(dict)  # callee -> (caller, ln) -> dummy -> argn
         for s in ctx.fut.subroutine_dict.values():
-            ra = getattr(s, "record_access", None)
+            ra = s.record_access
             for b in ra.bindings if ra is not None else []:
                 calls[b.callee].setdefault((b.caller, b.ln), {})[b.dummy.lower()] = b.argn
         all_subs = list(ctx.fut.subroutine_dict.values())
@@ -173,16 +177,16 @@ class DropDummies(Transform):
         return out
 
     @staticmethod
-    def _unused(ctx, sub, tree, d: str) -> str:
+    def _unused(ctx, sub: Subroutine, tree: Optional[SubroutineDefinitionConstruct], d: str) -> str:
         from spel.scripts.fortran_parser.spel_ast import Identifier, VariableDecl
         from spel.scripts.registrations import iter_statements
         from spel.transforms.compact.rewrite import iter_expressions
 
         if tree is None:
             return "does not parse with spans"
-        if getattr(tree, "contains", None):
+        if tree.contains:
             return "has internal procedures"
-        if getattr(tree, "is_function", False):
+        if tree.is_function:
             return "a function"
         if any(a.base.lower() == d for a in sub.record.accesses()):
             return "used (analysis)"
@@ -203,11 +207,12 @@ class DropDummies(Transform):
         return ""
 
     @staticmethod
-    def _header_edits(ctx, sub, tree, d, mine, VariableDecl, iter_statements) -> bool:
+    def _header_edits(ctx, sub: Subroutine, tree: SubroutineDefinitionConstruct, d: str, mine: list,
+                      VariableDecl, iter_statements) -> bool:
         lines = ctx.lines(ctx.path(sub))
         path = ctx.path(sub)
         args = [a.lower() for a in tree.args]
-        spans = getattr(tree, "arg_spans", None)
+        spans = tree.arg_spans
         if d not in args or not spans or len(spans) != len(args):
             return False
         e = remove_arg(lines, spans, args.index(d))
@@ -217,7 +222,7 @@ class DropDummies(Transform):
         for stmt, _ in iter_statements(tree.body):
             if isinstance(stmt, VariableDecl) and any(ent.token.literal.lower() == d for ent in stmt.entities):
                 ent = next(ent for ent in stmt.entities if ent.token.literal.lower() == d)
-                span = getattr(ent, "span", None)
+                span = ent.span
                 if len(stmt.entities) != 1 or span is None:
                     return False
                 ln = span[0]
@@ -228,21 +233,24 @@ class DropDummies(Transform):
         return False
 
     @staticmethod
-    def _call_edit(ctx, caller, ctree, ln, name, d, callee, mine, SubCallStatement, KeywordArgument,
-                   to_actual_arg, iter_statements) -> bool:
+    def _call_edit(ctx, caller: Subroutine, ctree: SubroutineDefinitionConstruct, ln: int, name: str, d: str,
+                   callee: Subroutine, mine: list, SubCallStatement, KeywordArgument, to_actual_arg,
+                   iter_statements) -> bool:
+        from spel.scripts.fortran_parser.spel_ast import Identifier
+
         lines = ctx.lines(ctx.path(caller))
         hits = []
         for stmt, _ in iter_statements(ctree.body):
             if isinstance(stmt, SubCallStatement):
                 fn = stmt.function
-                fname = getattr(getattr(fn, "function", None), "value", "")
+                fname = fn.function.value if isinstance(fn.function, Identifier) else ""
                 if fname.lower() == name.lower() and fn.span is not None and statement_start(lines, fn.span[0]) == ln:
                     hits.append(fn)
         if len(hits) != 1:
             return False
         fn = hits[0]
         actuals = [to_actual_arg(a) for a in fn.args]
-        spans = [getattr(a, "span", None) for a in actuals]
+        spans = [a.span for a in actuals]
         idx = next((i for i, a in enumerate(actuals) if isinstance(a, KeywordArgument) and a.keyword.lower() == d), None)
         if idx is None:
             pos = _dummy_position(ctx, callee, d)

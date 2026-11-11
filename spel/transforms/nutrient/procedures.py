@@ -212,7 +212,7 @@ def compare_procedure(fam: Family, binding: str, sub_dict: dict, type_dict: dict
                 has.setdefault(path, set()).add(e)
     rep = ProcReport(fam.name, binding, routines)
     for e, sid in routines.items():
-        old = moved_names(type_dict, fam.types[e]) if hasattr(type_dict[fam.types[e]], "filepath") else {}
+        old = moved_names(type_dict, fam.types[e])
         rep.trees[e], rep.stmts[e] = routine_statements(sub_dict[sid], e, names[e], old)
     keys = {e: Counter(s.key for s in ss) for e, ss in rep.stmts.items()}
     bodies = {e: Counter(s.body for s in ss) for e, ss in rep.stmts.items()}

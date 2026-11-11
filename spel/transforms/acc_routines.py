@@ -24,16 +24,21 @@ Kernels with calls the analysis cannot resolve are reported, and their callees a
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from spel.transforms.acc_directives import DirectiveError, find_directives, next_code_line
 from spel.transforms.core.edits import delete, insert
 from spel.transforms.core.registry import transform
 from spel.transforms.core.transform import Change, Plan, Refusal, Transform
 
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.functional_unit_test import FunctionalUnitTest
+
 TAG = "! spel acc-routines"
 
 
-def compute_ranges(sub, lines: list[str]) -> list[tuple[int, int]]:
+def compute_ranges(sub: Subroutine, lines: list[str]) -> list[tuple[int, int]]:
     """(first, last) lines of the compute constructs in `sub` (0-based, inclusive)."""
     out = []
     ds = find_directives(lines, sub.startline, min(sub.endline, len(lines) - 1))
@@ -52,7 +57,7 @@ def compute_ranges(sub, lines: list[str]) -> list[tuple[int, int]]:
     return out
 
 
-def device_routines(fut) -> tuple[set[str], list[str]]:
+def device_routines(fut: FunctionalUnitTest) -> tuple[set[str], list[str]]:
     """Ids of the routines a kernel reaches, and the calls on the way that do not resolve."""
     from spel.transforms.acc_apply import DeviceFacts, _closure
 
@@ -86,7 +91,7 @@ def _named_in_unanalyzed_kernels(ctx) -> set[str]:
     tail = re.compile(r"^\s*end\s*(?:subroutine|function)\b", re.I)
     analyzed: dict[str, list[tuple[int, int]]] = {}
     for s in ctx.fut.subroutine_dict.values():
-        if s.record is not None and getattr(s, "filepath", None):
+        if s.record is not None and s.filepath:
             analyzed.setdefault(str(ctx.path(s)), []).append((s.startline, s.endline))
     elm = ctx.srcroot / "components" / "elm" / "src"
     files = ([f for f in sorted(elm.rglob("*.F90")) if "external_models" not in f.parts] if elm.is_dir()
@@ -205,7 +210,7 @@ class AccDeclares(Transform):
         from spel.transforms.acc_apply import _declare_edit, _path
 
         out = Plan(self.name)
-        fut = ctx.fut
+        fut: FunctionalUnitTest = ctx.fut
         device, _ = device_routines(fut)
         specs: dict[Path, object] = {}
 
@@ -237,16 +242,16 @@ class AccDeclares(Transform):
                     continue
             if not ranges:
                 continue
-            agv = {k.lower(): v for k, v in (getattr(sub, "active_global_vars", None) or {}).items()}
+            agv = {k.lower(): v for k, v in (sub.active_global_vars or {}).items()}
             for a in sub.record.accesses(origin=Origin.GLOBAL):
                 if not any(lo <= a.ln <= hi for lo, hi in ranges):
                     continue
                 name = a.base.lower()
                 v = agv.get(name)
                 if v is not None:
-                    if getattr(v, "parameter", False) or str(v.type).lower() in fut.type_dict:
+                    if v.parameter or str(v.type).lower() in fut.type_dict:
                         continue  # constants; derived-type instances (the device-data layer copies them)
-                    m = getattr(fut, "module_dict", {}).get(str(v.declaration).lower())
+                    m = fut.module_dict.get(str(v.declaration).lower())
                     if m is None:
                         continue
                     path = _path(m)
@@ -274,13 +279,13 @@ class AccDeclares(Transform):
         return out
 
     @staticmethod
-    def _stale(ctx, fut, out: Plan, spec_of, only) -> None:
+    def _stale(ctx, fut: FunctionalUnitTest, out: Plan, spec_of, only) -> None:
         """`declare` directives naming variables the module does not have (upstream elm_varctl:
         pf_clmnstep0, use_nitrif_denitrif, which were removed long ago): such a directive does not
         compile under -acc. The stale names go; a directive left without names goes entirely."""
         from spel.transforms.acc_apply import _path
 
-        mods = getattr(fut, "module_dict", {}) or {}
+        mods = fut.module_dict or {}
         paths = sorted({_path(m) for m in mods.values()}) if mods else sorted({ctx.path(s) for s in fut.subroutine_dict.values()})
         for path in paths:
             spec = spec_of(path)

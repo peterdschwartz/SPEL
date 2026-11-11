@@ -30,6 +30,8 @@ mysql = ["mysqlclient"]
 db-test = ["pytest-django"]
 # NN emulator training (`spel sample`, `spel train`)
 ml = ["torch", "scikit-learn"]
+# Property-based tests (`spel proptest`)
+proptest = ["hypothesis>=6"]
 
 [tool.setuptools.packages.find]
 include = ["spel*"]
@@ -37,6 +39,7 @@ include = ["spel*"]
 [tool.setuptools.package-data]
 "spel.transforms.compact" = ["templates/*.F90", "*.md"]
 "spel.machines" = ["*.toml"]
+"spel.proptest" = ["examples/*.toml", "*.md"]
 
 [project.scripts]
 spel = "spel.cli:main"

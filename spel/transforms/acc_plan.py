@@ -37,11 +37,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 from spel.scripts.fortran_parser.scope_walk import AssignEvent, LoopInfo, SubroutineRecord
 from spel.transforms.acc_directives import find_directives, parse_directive
 from spel.transforms.acc_to_omp import LoopPlan, Note, format_directive, plan_compute_loop
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.record_access import AccessMapper
 
 # alias targets that map many fine elements to one coarse one
 COARSER = {"column", "gridcell", "landunit", "topounit"}   # x%column(p): many fine elements -> one coarse
@@ -371,7 +375,7 @@ def _covers(subs: tuple, aliases: dict[str, Alias], indices: set[str]) -> dict[s
     return found
 
 
-def unsafe_lines(sub, source: Optional[list[str]] = None) -> list[tuple[int, str]]:
+def unsafe_lines(sub: Subroutine, source: Optional[list[str]] = None) -> list[tuple[int, str]]:
     """
     (0-based line, statement) of what a device cannot run: I/O statements (parse tree) and
     abort calls (the record's calls).
@@ -382,7 +386,7 @@ def unsafe_lines(sub, source: Optional[list[str]] = None) -> list[tuple[int, str
 
     out: list[tuple[int, str]] = []
     try:
-        if getattr(sub, "filepath", None):
+        if sub.filepath:
             path = Path(sub.filepath)
             path = path if path.is_absolute() else Path(E3SM_SRCROOT) / path
             tree = parse_routine(path, sub.startline, sub.endline)
@@ -390,13 +394,13 @@ def unsafe_lines(sub, source: Optional[list[str]] = None) -> list[tuple[int, str
             from spel.scripts.fortran_parser.spel_parser import Parser
             from spel.scripts.utilityFunctions import LineTuple
 
-            a, b = getattr(sub, "startline", 0), getattr(sub, "endline", len(source or []) - 1)
+            a, b = sub.startline, sub.endline
             lt = [LineTuple(line=source[i], ln=i) for i in range(a, b + 1)]
             tree = Parser(lines=lt).parse_program().statements[0]
         out += [(st.lineno, type(st).__name__) for st, _ in iter_statements(tree.body)
                 if isinstance(st, (A.WriteStatement, A.PrintStatement))]
     except BaseException:  # the parser exits on what it cannot read: every line is suspect
-        out += [(ln, "unparsed") for ln in range(getattr(sub, "startline", 0), getattr(sub, "endline", -1) + 1)]
+        out += [(ln, "unparsed") for ln in range(sub.startline, sub.endline + 1)]
     if sub.record is not None:
         out += [(c.ln, f"call {c.name}") for c in sub.record.calls
                 if str(c.name).split("%")[-1].lower() in ABORTS]
@@ -444,27 +448,27 @@ def _is_local_array(rec: SubroutineRecord, path: str) -> bool:
 _UNSAFE_CACHE: dict[str, tuple[object, list[tuple[int, str]]]] = {}
 
 
-def _unsafe(sub, source: Optional[list[str]] = None) -> list[tuple[int, str]]:
+def _unsafe(sub: Subroutine, source: Optional[list[str]] = None) -> list[tuple[int, str]]:
     # keyed on the routine object too: a pipeline step replaces the routines it re-analyzes
-    key = getattr(sub, "id", None) or sub.name
+    key = sub.id
     if key not in _UNSAFE_CACHE or _UNSAFE_CACHE[key][0] is not sub:
         _UNSAFE_CACHE[key] = (sub, unsafe_lines(sub, source))
     return _UNSAFE_CACHE[key][1]
 
 
-def propose(sub, mapper, source: Optional[list[str]] = None, min_lines: int = 2,
+def propose(sub: Subroutine, mapper: AccessMapper, source: Optional[list[str]] = None, min_lines: int = 2,
             lint: bool = False) -> list[LoopProposal]:
     """Proposals for the outermost loops of `sub`. With `lint`, loops a compute directive already
     covers are analyzed too (`covered`), and `lint` lists what the analysis says about the shape
     the directive gave them (see `lint_findings`)."""
     rec: SubroutineRecord = sub.record
-    nest_roots = getattr(rec, "loop_nest", None)
+    nest_roots = rec.loop_nest
     if not nest_roots:
         return []
     if source is None:
         source = Path(sub.filepath).read_text().splitlines()
     directives = find_directives(source)
-    fname = Path(sub.filepath).name if getattr(sub, "filepath", None) else "<src>"
+    fname = Path(sub.filepath).name if sub.filepath else "<src>"
     return [p for loop in nest_roots
             for p in _propose_loop(sub, rec, mapper, loop, source, directives, fname, min_lines, lint)]
 

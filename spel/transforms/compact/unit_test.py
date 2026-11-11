@@ -27,7 +27,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from spel.scripts.DerivedType import DerivedType
 
 MANIFEST = "components/elm/src/main/.spel-compact.json"
 MODULE = "SpelCompactMod"
@@ -118,7 +121,7 @@ def compact_fields(type_dict: dict, active_instances: dict, manifest: Optional[d
     return out
 
 
-def deactivate_runtime_components(type_dict: dict) -> list[str]:
+def deactivate_runtime_components(type_dict: dict[str, DerivedType]) -> list[str]:
     """
     Mark the rewrite's run-time state inactive, so no IO/alloc/copy code is
     made for it: the `cgrp_id` components, and the instances CompactLayoutMod
@@ -127,11 +130,9 @@ def deactivate_runtime_components(type_dict: dict) -> list[str]:
     """
     dropped = []
     for dtype in type_dict.values():
-        runtime_type = any(
-            str(getattr(inst, "declaration", "")).lower() in RUNTIME_MODULES for inst in getattr(dtype, "instances", {}).values()
-        )
-        for inst in getattr(dtype, "instances", {}).values():
-            if getattr(inst, "active", False) and str(getattr(inst, "declaration", "")).lower() in RUNTIME_MODULES:
+        runtime_type = any(str(inst.declaration).lower() in RUNTIME_MODULES for inst in dtype.instances.values())
+        for inst in dtype.instances.values():
+            if inst.active and str(inst.declaration).lower() in RUNTIME_MODULES:
                 inst.active = False
                 dropped.append(inst.name)
         for name, comp in dtype.components.items():

@@ -75,12 +75,12 @@ def _names(node) -> set[str]:
     return expr_names(node)
 
 
-def _assigned(st) -> Optional[tuple[object, object]]:
+def _assigned(st: A.Statement) -> Optional[tuple[object, object]]:
     """(lhs, rhs) of an assignment statement (two parse forms), else None."""
     if isinstance(st, A.AssignmentStatement):
         return st.left, st.right
-    e = getattr(st, "expression", None)
-    if isinstance(st, A.ExpressionStatement) and isinstance(e, A.InfixExpression) and e.operator.strip() == "=":
+    if (isinstance(st, A.ExpressionStatement) and isinstance(e := st.expression, A.InfixExpression)
+            and e.operator.strip() == "="):
         return e.left_expr, e.right_expr
     return None
 
@@ -99,8 +99,10 @@ def _own_reads(st) -> set[str]:
         return _names(asg[1]) | sub
     if isinstance(st, A.IfConstruct):
         return _names(st.condition)
-    if isinstance(st, (A.DoLoop, A.DoWhile)):
-        return set().union(*[_names(x) for x in (getattr(st, "start", None), getattr(st, "end", None)) if x is not None])
+    if isinstance(st, A.DoLoop):  # the bounds (a do while's condition is not collected)
+        return set().union(*[_names(x) for x in (st.start, st.end) if x is not None])
+    if isinstance(st, A.DoWhile):
+        return set()
     if isinstance(st, (A.AssociateConstruct, A.BlockStatement)):
         return set()
     return _names(st)
@@ -160,8 +162,8 @@ def _preceding(body, target) -> list:
     while True:
         enclosing = None
         for s in stmts:
-            end = getattr(s, "construct_end_ln", -1)
-            if isinstance(s, A.IfConstruct) and s is not target and end >= 0 and s.lineno < target.lineno <= end:
+            if (isinstance(s, A.IfConstruct) and s is not target and s.construct_end_ln >= 0
+                    and s.lineno < target.lineno <= s.construct_end_ln):
                 enclosing = s
                 break
             if s.lineno >= target.lineno:

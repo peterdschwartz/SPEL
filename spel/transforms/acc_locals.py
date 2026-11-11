@@ -23,7 +23,7 @@ from spel.transforms.core.source import statement_end
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from spel.transforms.acc_directives import AccDirective, find_directives
 from spel.transforms.core.edits import Edit, stacked
@@ -33,6 +33,10 @@ from spel.transforms.core.source import indent
 from spel.transforms.core.transform import Change, Plan, Transform
 from spel.transforms.core.query import above_directives as _above_directives  # noqa: F401
 from spel.transforms.core.query import compute_ranges as _compute_ranges, first_executable
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.functional_unit_test import FunctionalUnitTest
 
 # clauses that give a variable device storage for the construct
 DATA_CLAUSES = {
@@ -107,7 +111,7 @@ def _data_regions(directives: list[AccDirective]) -> list[tuple[int, int, set[st
     return out
 
 
-def check_routine(sub, device_routines: set[str], lines: list[str],
+def check_routine(sub: Subroutine, device_routines: set[str], lines: list[str],
                   internal_uses: Optional[dict[str, set[str]]] = None) -> RoutineReport:
     """The local arrays of one analyzed routine that device code uses without storage."""
     rec = sub.record
@@ -156,12 +160,12 @@ def check_routine(sub, device_routines: set[str], lines: list[str],
             report.findings.append(Finding(sub.id, d.start_ln, name, "present" if default_present else "implicit",
                                            f"!$acc {d.construct}"))
             needed[name] = None
-    call_desc = getattr(sub, "sub_call_desc", None) or {}
+    call_desc = sub.sub_call_desc or {}
     for call in rec.calls:
         callee = str(call.name).split("%")[-1].lower()
         # a generic name (`c2g`) runs kernels when the specific procedure it resolves to does
         desc = call_desc.get(call.ln)
-        specific = str(getattr(desc, "fn", "") or "").split("::")[-1].lower()
+        specific = str(desc.fn or "").split("::")[-1].lower() if desc is not None else ""
         if callee not in device_routines and specific not in device_routines:
             continue
         device_lines.append((call.ln, call.ln))
@@ -211,19 +215,19 @@ def check_routine(sub, device_routines: set[str], lines: list[str],
     return report
 
 
-def _internal_uses(fut, sub) -> dict[str, set[str]]:
+def _internal_uses(fut: FunctionalUnitTest, sub: Subroutine) -> dict[str, set[str]]:
     """The host variables each internal subprogram of `sub` uses (from its record)."""
     from spel.scripts.fortran_parser.symbols import Origin
 
     out: dict[str, set[str]] = {}
     for isub in fut.subroutine_dict.values():
-        if getattr(isub, "is_internal", False) and getattr(isub, "host", None) is sub and isub.record is not None:
+        if isub.is_internal and isub.host is sub and isub.record is not None:
             out[isub.name.split("::")[-1].lower()] = {
                 a.base.lower() for a in isub.record.accesses() if a.origin is Origin.HOST}
     return out
 
 
-def check(fut, routines: Optional[set[str]] = None) -> list[RoutineReport]:
+def check(fut: FunctionalUnitTest, routines: Optional[set[str]] = None) -> list[RoutineReport]:
     """Every analyzed routine (or the named ones) with OpenACC directives or device calls."""
     from spel.transforms.device.generate import device_routines
 
@@ -265,7 +269,7 @@ _indent = indent
 _wrap_directive = directive_list  # `!$acc head(a, b, ...)` with `!$acc&` continuations
 
 
-def plan_fix(sub, report: RoutineReport, lines: list[str], structured: bool = False,
+def plan_fix(sub: Subroutine, report: RoutineReport, lines: list[str], structured: bool = False,
              notes: Optional[list[str]] = None) -> list[Insertion]:
     """
     Device storage for the routine's uncovered local arrays:
@@ -329,7 +333,7 @@ def plan_fix(sub, report: RoutineReport, lines: list[str], structured: bool = Fa
     to_delete = device_only + [n for n in report.leaked if n not in device_only]
     if to_delete:
         # the end of the executable part: the routine's `contains` when it has internal subprograms
-        last = tree.contains_ln if getattr(tree, "contains_ln", -1) >= 0 else tree.end_ln
+        last = tree.contains_ln if tree.contains_ln >= 0 else tree.end_ln
         ends = [st.lineno for st, _ in stmts if isinstance(st, A.ReturnStatement)] + [last]
         for ln in ends:
             out.append(Insertion(ln, _wrap_directive(_indent(lines[ln]) if ln != last else ind,
@@ -402,7 +406,7 @@ class AccLocals(Transform):
         for sid, sub in sorted(ctx.fut.subroutine_dict.items()):
             if routines and sid not in routines and sid.split("::")[-1].lower() not in routines:
                 continue
-            if getattr(sub, "record", None) is None or getattr(sub, "library", False):
+            if sub.record is None or sub.library:
                 continue
             lines = ctx.lines(sub)
             co = copy_only_locals(sub, lines)
@@ -432,7 +436,7 @@ def fix_plan(ctx, reports: list[RoutineReport], structured: bool = False) -> Pla
     return plan
 
 
-def apply_fix(fut, reports: list[RoutineReport], dry_run: bool = False) -> list[str]:
+def apply_fix(fut: FunctionalUnitTest, reports: list[RoutineReport], dry_run: bool = False) -> list[str]:
     """Insert the data directives of `reports` into the sources. Returns a report."""
     from spel.transforms.core.driver import InPlace, apply_plan
     from spel.transforms.core.transform import Context
@@ -467,7 +471,7 @@ class CopyOnly:
     updates: list[tuple[int, int]]    # (start, end) of update directives to remove
 
 
-def copy_only_locals(sub, lines: list[str]) -> Optional[CopyOnly]:
+def copy_only_locals(sub: Subroutine, lines: list[str]) -> Optional[CopyOnly]:
     from spel.scripts.fortran_parser import spel_ast as A
     from spel.scripts.registrations import iter_statements
     from spel.transforms.compact.rewrite import iter_expressions
@@ -549,7 +553,7 @@ def copy_only_locals(sub, lines: list[str]) -> Optional[CopyOnly]:
                     {n: deallocs.get(n, []) for n in names}, drop_regions, drop_updates)
 
 
-def copy_only_edits(sub, co: CopyOnly, lines: list[str]) -> list[Edit]:
+def copy_only_edits(sub: Subroutine, co: CopyOnly, lines: list[str]) -> list[Edit]:
     from spel.scripts.fortran_parser import spel_ast as A
     from spel.transforms.core.edits import replace
     from spel.transforms.core.query import routine_tree
@@ -572,7 +576,7 @@ def copy_only_edits(sub, co: CopyOnly, lines: list[str]) -> list[Edit]:
             from spel.scripts.registrations import iter_statements
 
             tree = tree or rt(sub)
-            last = tree.contains_ln if getattr(tree, "contains_ln", -1) >= 0 else tree.end_ln
+            last = tree.contains_ln if tree.contains_ln >= 0 else tree.end_ln
             ends = [st.lineno for st, _ in iter_statements(tree.body) if isinstance(st, A.ReturnStatement)] + [last]
             for ln in ends:
                 ins.append(Insertion(ln, _wrap_directive(_indent(lines[ln]), "exit data delete", [n]), order=-1))

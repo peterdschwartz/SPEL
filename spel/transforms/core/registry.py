@@ -201,6 +201,7 @@ def _run_parser(prog: str, t: Optional[type[Transform]]) -> argparse.ArgumentPar
     p.add_argument("--reanalyze", action="store_true", help="rebuild the cached elm_drv analysis first")
     p.add_argument("--config", help="run configuration: a preset (spel/db presets/NAME.cfg) or a case's lnd_in; "
                                     "only the code that runs in it is transformed")
+    p.set_defaults(reanalyze_steps=False)  # a pipeline-only flag; single transforms read it too
     if t is None:
         p.add_argument("--reanalyze-steps", action="store_true",
                        help="pipeline: write each step in place and reanalyze before the next (no -o)")
@@ -268,7 +269,7 @@ def main(argv: list[str]) -> int:
             print(f"verify: {prob}", file=sys.stderr)
         return 1 if problems else 0
 
-    if len(steps) > 1 and not getattr(args, "reanalyze_steps", False):
+    if len(steps) > 1 and not args.reanalyze_steps:
         from spel.transforms.core.pipeline import Pipeline, PipelineError
 
         ctx0 = driver.context(srcroot=srcroot, reanalyze=args.reanalyze, config=args.config)

@@ -40,6 +40,7 @@ from spel.scripts.fortran_parser.spel_ast import (
     Identifier,
     InfixExpression,
     IntegerLiteral,
+    Statement,
 )
 from spel.scripts.fortran_parser.symbols import Origin
 
@@ -245,7 +246,8 @@ class IndexContext:
     def _pos_at(self, ln: int) -> int:
         """Position of the first event on or after line `ln`."""
         for pos, e in enumerate(self.rec.events):
-            if getattr(e, "ln", getattr(e, "lineno", -1)) >= ln:
+            # the record's events are Access/AssignEvent/CallEvent/... (`ln`) and loop statements (`lineno`)
+            if (e.lineno if isinstance(e, Statement) else e.ln) >= ln:
                 return pos
         return len(self.rec.events)
 
@@ -269,7 +271,7 @@ def callee_context(ctx: IndexContext, bindings: list, event, callee, pos: int) -
         if isinstance(e, Access) and e.ln == event.ln:
             if e.status == "arg":
                 actual_access.setdefault(e.path, (p, e))
-        elif getattr(e, "ln", event.ln) != event.ln:
+        elif not isinstance(e, Statement) and e.ln != event.ln:  # loop statements carry no `ln`
             break
     for b in bindings:
         env.setdefault(b.dummy, set()).update(ctx.resolve(b.actual, b.origin))

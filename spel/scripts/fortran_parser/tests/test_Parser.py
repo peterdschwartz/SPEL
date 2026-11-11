@@ -462,3 +462,24 @@ def test_section_bound_expressions():
     assert [type(a).__name__ for a in args] == ["BoundsExpression", "BoundsExpression", "BoundsExpression", "Identifier"]
     assert str(args[0]).replace(" ", "") == "(n+1):m" and str(args[1]).replace(" ", "") == "a:(b*2)"
     assert args[2].start is None and args[2].end is None
+
+
+def test_eqv_neqv():
+    def parse(text):
+        prog = Parser(lines=[LineTuple(line=text, ln=0)]).parse_program()
+        return str(prog.statements[0].expression)
+
+    assert parse("a .eqv. b .or. c") == "(a.eqv.(b.or.c))"
+    assert parse("a .and. b .neqv. c") == "((a.and.b).neqv.c)"
+
+
+def test_unary_sign_precedence():
+    def parse(text, fortran_unary=True):
+        prog = Parser(lines=[LineTuple(line=text, ln=0)], fortran_unary=fortran_unary).parse_program()
+        return str(prog.statements[0].expression)
+
+    assert parse("-a**2", fortran_unary=False) == "((-a)**2)"  # the default, kept for existing analyses
+
+    assert parse("-a**2") == "(-(a**2))"
+    assert parse("-nlevsno+1") == "((-nlevsno)+1)"
+    assert parse("x(-nlevsno+1:0)") == "x(((-nlevsno)+1):0)"

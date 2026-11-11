@@ -37,7 +37,7 @@ import difflib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from spel.scripts.fortran_modules import use_items
 from spel.scripts.fortran_parser.lexer import Lexer
@@ -47,7 +47,10 @@ from spel.scripts.fortran_parser.spel_ast import (
     ImplicitNoneStatement,
     MacroIf,
     ModuleConstruct,
+    ProcedureStatement,
     SaveStatement,
+    Statement,
+    SubCallStatement,
     SubroutineDefinitionConstruct,
     TypeDef,
     UseStatement,
@@ -63,6 +66,9 @@ from spel.transforms.core.edits import EditSet, changed_lines, diff_edits, repla
 from spel.transforms.core.fortran import wrap_items
 from spel.transforms.core.registry import transform
 from spel.transforms.core.transform import Refusal, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.fortran_modules import FortranModule
 
 INTRINSIC_TYPES = {"integer", "real", "logical", "character", "complex", "double", "doubleprecision"}
 FORTRAN_SUFFIXES = (".F90", ".f90", ".F", ".f")
@@ -218,8 +224,8 @@ def twin_source(sp: "Splitter", home: str, piece: Piece) -> str:
     return next(k for k, q in sp.new_modules[home] if q is piece)
 
 
-def is_parameter(node) -> bool:
-    attrs = getattr(getattr(node, "attrs", None), "attrs", None) or []
+def is_parameter(node: Statement) -> bool:
+    attrs = node.attrs.attrs if isinstance(node, VariableDecl) and node.attrs is not None else []
     return any(str(a).replace(" ", "").lower().startswith("parameter") for a in attrs)
 
 
@@ -289,6 +295,7 @@ class Splitter:
         self.scan_root = Path(scan_root) if scan_root else self.srcroot / "components"
         self.scopes = ModuleScopes(self.md, self.sd)
         self.sources: dict[str, Source] = {}
+        self._client_uses: Optional[list] = None  # client_uses(), computed once
         for m in sources:
             if m not in self.md:
                 raise SplitError(f"module {m} is not in the analysis")
@@ -310,6 +317,7 @@ class Splitter:
         self.where: dict[str, tuple[str, Piece]] = {}  # entity -> (source module, piece)
         self.new_modules: dict[str, list[tuple[str, Piece]]] = {}  # new name -> pieces in order
         self.notes: list[str] = []
+        self.copied: dict[str, set[str]] = {}  # parameter -> modules it is copied into (place_variables)
 
     # ---- placement -------------------------------------------------------
     def assign(self) -> None:
@@ -322,7 +330,7 @@ class Splitter:
                 if p.kind == "type":
                     p.home = self.plan(key, p.node.name.lower())
                     for proc in p.node.methods.statements if p.node.methods else []:
-                        if getattr(proc, "name", None):
+                        if isinstance(proc, ProcedureStatement) and proc.name:
                             bound[str(proc.name).lower()] = p.node.name.lower()
         types = {p.node.name.lower(): p for s in self.sources.values() for p in s.head if p.kind == "type"}
         for key, src in self.sources.items():
@@ -408,7 +416,7 @@ class Splitter:
             for p in src.subs:
                 for n in self.sub_names(key, p) & {d for q in src.head if q.kind == "var" for d in q.defines}:
                     users[n].add(p.home)
-        self.copied: dict[str, set[str]] = {}
+        self.copied = {}
         for key, src in self.sources.items():
             types = {q.node.name.lower() for q in src.head if q.kind == "type"}
             for p in src.head:
@@ -480,7 +488,7 @@ class Splitter:
                     if isinstance(m, VariableDecl):
                         out |= decl_names(m)
                 for proc in p.node.methods.statements if p.node.methods else []:
-                    if getattr(proc, "name", None):
+                    if isinstance(proc, ProcedureStatement) and proc.name:
                         out.add(str(proc.name).lower())
                 return out
             case "var":
@@ -535,7 +543,7 @@ class Splitter:
         need: dict = {}
         for mod, p in pieces:
             for name in sorted(self.piece_names(mod, p)):
-                if here.lower() in getattr(self, "copied", {}).get(name, ()):
+                if here.lower() in self.copied.get(name, ()):
                     continue  # a parameter copied into this module
                 prov = self.provider(mod, name)
                 if prov is None:
@@ -642,7 +650,8 @@ class Splitter:
         def deps(m: str) -> set[str]:
             if m in self.deps:
                 return self.deps[m]
-            out = set(getattr(self.md.get(m), "modules", {}) or {})
+            fmod: Optional[FortranModule] = self.md.get(m)
+            out = set(fmod.modules if fmod is not None else {})
             for s in out & set(self.sources):
                 out |= from_source[s]
             return {x.lower() for x in out}
@@ -788,7 +797,7 @@ class Splitter:
     # ---- clients ---------------------------------------------------------
     def client_uses(self):
         """(path, first line, UseStatement) of every use of a split module under the scan root."""
-        if hasattr(self, "_client_uses"):
+        if self._client_uses is not None:
             return self._client_uses
         out = []
         targets = set(self.sources)
@@ -904,7 +913,7 @@ class Splitter:
             for p in src.head:
                 if p.kind == "type" and p.node.methods:
                     for proc in p.node.methods.statements:
-                        if getattr(proc, "name", None):
+                        if isinstance(proc, ProcedureStatement) and proc.name:
                             alias = str(proc.alias or proc.name).lower()
                             bindings.setdefault(p.node.name.lower(), {})[alias] = str(proc.name).lower()
             for p in src.subs:
@@ -929,8 +938,7 @@ class Splitter:
             except Exception:
                 continue
             for st in stmts:
-                func = getattr(st, "function", None)
-                callee = str(getattr(func, "function", "")).lower()
+                callee = str(st.function.function).lower() if isinstance(st, SubCallStatement) else ""
                 routine = None
                 if "%" in callee:
                     obj, _, binding = callee.rpartition("%")

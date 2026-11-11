@@ -26,13 +26,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from spel.transforms.acc_directives import DirectiveError, find_directives, split_top_level
 from spel.transforms.core.edits import delete, replace
 from spel.transforms.core.fortran import directive_clauses
 from spel.transforms.core.registry import transform
 from spel.transforms.core.transform import Change, Plan, Refusal, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.fortran_parser.spel_ast import ModuleConstruct
 
 JUDGED = {"present", "copy", "copyin", "copyout", "create", "delete", "no_create", "deviceptr", "attach",
           "detach", "link", "device_resident", "private", "firstprivate", "reduction", "device", "self", "host"}
@@ -191,14 +194,14 @@ class AccStale(Transform):
         scopes = Scopes(module_index(roots))
         for path in files:
             try:
-                mods = parse_modules(path)
+                mods: list[ModuleConstruct] = parse_modules(path)
             except ModuleSpecError as err:
                 out.add(Refusal(path.name, str(err)))
                 continue
             lines = ctx.lines(path)
             edits, gone = [], []
             for m in mods:
-                spec_stmts = m.spec.statements if hasattr(m.spec, "statements") else []
+                spec_stmts = m.spec.statements
                 mod_names, mod_opaque = scopes.imports(spec_stmts)
                 mod_names |= _declared(spec_stmts) | {p.name.lower() for p in m.subprograms}
                 first_sub = min((p.lineno for p in m.subprograms), default=len(lines))
@@ -211,7 +214,7 @@ class AccStale(Transform):
                     if opaque or mod_opaque:
                         continue
                     visible = mod_names | sub_names | _declared(p.body.statements) | {a.lower() for a in p.args}
-                    for c in getattr(p, "contains", None) or []:
+                    for c in p.contains:
                         visible |= {c.name.lower()}
                         visible |= _declared(c.body.statements) | {a.lower() for a in c.args}
                     e, g = stale_edits(lines, p.lineno, p.end_ln if p.end_ln > 0 else len(lines) - 1, visible, p.name)

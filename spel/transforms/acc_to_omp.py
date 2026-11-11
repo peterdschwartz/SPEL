@@ -207,7 +207,7 @@ def _is_saved(rec: SubroutineRecord, name: str) -> bool:
     if "save" in decl.attrs:
         return True
     node = decl.node
-    for ent in getattr(node, "entities", []) or []:
+    for ent in (node.entities if node is not None else []):
         if ent.token.literal == name and ent.init is not None:
             return True
     return False
@@ -573,12 +573,6 @@ def translate_file(path: Path, subs: list, mapper: AccessMapper) -> FileTranslat
     Translates every OpenACC directive in `path`. `subs`: the analyzed
     routines of the file (Subroutine objects with record/record_access).
     """
-    for sub in subs:
-        if sub.record is not None and not hasattr(sub.record, "loop_nest"):
-            raise TranslationError(
-                f"{sub.id}: the cached analysis predates loop-nest information; "
-                "rebuild it with `spel analyze` (or --reanalyze)"
-            )
     text = path.read_text()
     lines = text.splitlines(keepends=True)
     plain = [l.rstrip("\n") for l in lines]

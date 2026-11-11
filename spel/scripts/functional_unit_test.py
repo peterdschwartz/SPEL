@@ -1217,6 +1217,7 @@ def generate_cmake(files: list[str], case_dir: Path):
 
     option(DBG "Enable Debug mode" OFF)
     option(NVTX "NVTX ranges for Nsight profiling (nvfortran only)" ON)
+    option(SPEL_PYLIB "Build a shared library without main.F90 for spel proptest (libspelcase)" OFF)
     set(ACC "OFF" CACHE STRING "OpenACC target: OFF, MULTICORE (host threads), GPU, or OPENMP (sources translated by spel transform acc2omp)")
     set_property(CACHE ACC PROPERTY STRINGS OFF MULTICORE GPU OPENMP)
     option(GPU "Same as -DACC=GPU (kept for old check_config.sh scripts)" OFF)
@@ -1300,7 +1301,14 @@ def generate_cmake(files: list[str], case_dir: Path):
     pkg_check_modules(NetCDFF REQUIRED netcdf-fortran)
 
     file(GLOB SOURCES "*.F90")
-    add_executable({exe_name} ${{SOURCES}})
+    if (SPEL_PYLIB)
+        list(REMOVE_ITEM SOURCES "${{CMAKE_CURRENT_SOURCE_DIR}}/main.F90")
+        add_library({exe_name} SHARED ${{SOURCES}})
+        set_target_properties({exe_name} PROPERTIES POSITION_INDEPENDENT_CODE ON OUTPUT_NAME spelcase)
+    else()
+        list(REMOVE_ITEM SOURCES "${{CMAKE_CURRENT_SOURCE_DIR}}/SpelPyMod.F90")
+        add_executable({exe_name} ${{SOURCES}})
+    endif()
     include_directories(${{NetCDFF_INCLUDE_DIRS}})
     target_link_directories({exe_name} PRIVATE ${{NetCDFF_LIBRARY_DIRS}})
     target_link_libraries({exe_name} PRIVATE ${{NetCDFF_LIBRARIES}})
@@ -1323,7 +1331,9 @@ def generate_cmake(files: list[str], case_dir: Path):
     message(STATUS "Final Fortran flags: ${{CMAKE_Fortran_FLAGS}}")
 
     # Add test
-    add_test(NAME run_elmtest COMMAND elmtest)
+    if (NOT SPEL_PYLIB)
+        add_test(NAME run_elmtest COMMAND elmtest)
+    endif()
     # === Coverage Helper Targets ===
     # Object directory
     set(OBJECT_DIR "${{CMAKE_BINARY_DIR}}/CMakeFiles/elmtest.dir")

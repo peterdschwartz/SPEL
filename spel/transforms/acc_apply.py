@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Callable, Iterable, Optional
 
 from spel.transforms.acc_plan import DEVICE_FLAG
 from spel.transforms.acc_directives import find_directives
@@ -47,6 +47,10 @@ from spel.transforms.core.edits import changed_lines, stacked
 from spel.transforms.core.registry import transform
 from spel.transforms.core.source import indent as _indent
 from spel.transforms.core.transform import Change, Plan, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.functional_unit_test import FunctionalUnitTest
 
 AUTO_KINDS = {"elementwise", "column-parallel"}
 TAG = "! spel acc-apply"
@@ -91,7 +95,7 @@ HOST_ONLY_NAMES = {"nan", "inf", "shr_infnan_nan", "shr_infnan_posinf", "shr_inf
 class DeviceFacts:
     """Per-routine facts from the analysis and the parse tree (cached)."""
 
-    def __init__(self, fut):
+    def __init__(self, fut: FunctionalUnitTest):
         self.fut = fut
         self._lines: dict[str, list[str]] = {}
         self._unsafe: dict[str, list[int]] = {}
@@ -99,33 +103,33 @@ class DeviceFacts:
         self._device: dict[str, bool] = {}
         self._trees: dict[str, object] = {}
 
-    def lines(self, sub) -> list[str]:
+    def lines(self, sub: Subroutine) -> list[str]:
         key = str(_path(sub))
         if key not in self._lines:
             self._lines[key] = _path(sub).read_text(errors="replace").split("\n")
         return self._lines[key]
 
-    def tree(self, sub):
+    def tree(self, sub: Subroutine):
         """The routine's parse tree, from the preprocessed file (cpp blocks inside statements,
         e.g. an `#ifdef` in an associate list, parse there), else from the raw lines."""
         if sub.id not in self._trees:
             self._trees[sub.id] = routine_tree(sub)
         return self._trees[sub.id]
 
-    def has_compute(self, sub) -> bool:
+    def has_compute(self, sub: Subroutine) -> bool:
         if sub.id not in self._compute:
             ds = find_directives(self.lines(sub), sub.startline, sub.endline)
             self._compute[sub.id] = any(d.is_compute_region or d.is_compute_loop for d in ds)
         return self._compute[sub.id]
 
-    def is_device_routine(self, sub) -> bool:
+    def is_device_routine(self, sub: Subroutine) -> bool:
         """`!$acc routine ...`: its loops run inside its callers' kernels (gang/vector/seq)."""
         if sub.id not in self._device:
             ds = find_directives(self.lines(sub), sub.startline, sub.endline)
             self._device[sub.id] = any(d.construct == "routine" for d in ds)
         return self._device[sub.id]
 
-    def unsafe_lines(self, sub) -> list[int]:
+    def unsafe_lines(self, sub: Subroutine) -> list[int]:
         """Lines of statements a device cannot run: I/O and aborts (parse tree), aborts (record calls)."""
         if sub.id in self._unsafe:
             return self._unsafe[sub.id]
@@ -149,7 +153,7 @@ class DeviceFacts:
         self._unsafe[sub.id] = sorted(set(out))
         return self._unsafe[sub.id]
 
-    def excluded_lines(self, sub) -> list[int]:
+    def excluded_lines(self, sub: Subroutine) -> list[int]:
         """
         Executable lines the analysis replaced because they use a module it excludes (`!#py`
         statements, `lhs = lhs` stand-ins of edit_files): the source runs code the device has
@@ -159,7 +163,7 @@ class DeviceFacts:
         from spel.scripts.fortran_parser.scope_walk import AssignEvent
         from spel.transforms.core.query import first_executable
 
-        lines = getattr(sub, "sub_lines", None) or []
+        lines = sub.sub_lines or []
         try:
             first = first_executable(self.tree(sub), sub.record)
         except BaseException:
@@ -170,10 +174,10 @@ class DeviceFacts:
         # stream read was ported as a kernel, with its running index as a sum reduction)
         if sub.record is not None:
             out |= {ev.ln for ev in sub.record.events
-                    if isinstance(ev, AssignEvent) and getattr(ev, "stand_in", False)}
+                    if isinstance(ev, AssignEvent) and ev.stand_in}
         return sorted(out)
 
-    def string_intrinsic_lines(self, sub) -> list[int]:
+    def string_intrinsic_lines(self, sub: Subroutine) -> list[int]:
         """
         Lines of statements that call a character intrinsic that allocates its result
         (`trim(isotope) == 'bulk'`): nvfortran has no device version of them (S-1058
@@ -202,7 +206,7 @@ class DeviceFacts:
 
         return sorted({st.lineno for st, _ in iter_statements(tree.body) if calls(st, True)})
 
-    def vector_subscript_lines(self, sub) -> list[int]:
+    def vector_subscript_lines(self, sub: Subroutine) -> list[int]:
         """
         Lines of assignments through a vector subscript (`a(idx) = ` with an array `idx`,
         an associate name of a section, or a section `filter(1:n)` as the subscript):
@@ -252,11 +256,11 @@ class DeviceFacts:
                 out.append(st.lineno)
         return out
 
-    def callees_in(self, sub, lo: int, hi: int) -> tuple[set[str], list[str]]:
+    def callees_in(self, sub: Subroutine, lo: int, hi: int) -> tuple[set[str], list[str]]:
         """Routine ids called on lines lo..hi (calls and non-intrinsic function references), unresolved names."""
         rec = sub.record
         names = [(str(c.name), c.ln) for c in rec.calls] + [(f.name, f.ln) for f in rec.function_calls if not f.intrinsic]
-        children = getattr(sub, "child_subroutines", {})
+        children = sub.child_subroutines
         by_base: dict[str, list[str]] = {}
         for key, ch in children.items():
             for n in {key.split("::")[-1].lower(), ch.name.lower()}:
@@ -272,7 +276,7 @@ class DeviceFacts:
             if not ids and "%" not in name:
                 # module procedures (functions are not in child_subroutines): the scope knows them
                 sym = rec.lookup(base)
-                target = getattr(sym, "target", None) if sym is not None else None
+                target = sym.target if sym is not None else None
                 if target and target in self.fut.subroutine_dict:
                     ids = [target]
             if ids:
@@ -306,7 +310,7 @@ def _closure(facts: DeviceFacts, start: set[str]) -> tuple[set[str], list[str]]:
     return seen, missing
 
 
-def reach_conditions(fut, root: str = "elm_driver::elm_drv") -> dict[str, object]:
+def reach_conditions(fut: FunctionalUnitTest, root: str = "elm_driver::elm_drv") -> dict[str, object]:
     """Routine id -> namelist condition under which `root`'s call tree reaches it: the or over
     its call sites of (the caller's condition and the namelist if enclosing the call), as the
     device data layer's guards are composed (`nml_guards`). Routines the tree does not reach
@@ -325,8 +329,8 @@ def reach_conditions(fut, root: str = "elm_driver::elm_drv") -> dict[str, object
             continue
         seen.add(sid)
         sub = fut.subroutine_dict[sid]
-        for ln, desc in getattr(sub, "sub_call_desc", {}).items():
-            child = getattr(sub, "child_subroutines", {}).get(desc.fn)
+        for ln, desc in sub.sub_call_desc.items():
+            child = sub.child_subroutines.get(desc.fn)
             if child is None or child.id not in fut.subroutine_dict:
                 continue
             callers.setdefault(child.id, []).append((sid, ln))
@@ -369,14 +373,13 @@ def implies(premise, conclusion, max_atoms: int = 14) -> bool:
     return True
 
 
-def kernel_condition(sub, ln: int, reach: dict[str, object]):
+def kernel_condition(sub: Subroutine, ln: int, reach: dict[str, object]):
     """The namelist condition under which the loop at line `ln` (0-based) of `sub` runs: how
     elm_drv's tree reaches the routine, and the namelist if enclosing the loop."""
     from spel.scripts.fortran_parser.boolen_expression import AllOf
 
     always = AllOf(())
-    if_at = getattr(sub, "namelist_if_at", None)
-    if_ = if_at(ln) if if_at is not None else None
+    if_ = sub.namelist_if_at(ln)
     local = if_.condtional_expectation if if_ is not None else always
     return AllOf((reach.get(sub.id, always), local))
 
@@ -435,7 +438,7 @@ def _reorderable(prop) -> bool:
     return all(lp.node.lineno == lp.start_ln for lp in nest)
 
 
-def plan(fut, roots: Iterable[str], exclude: Optional[Callable[[str], bool]] = None, config=None) -> PortPlan:
+def plan(fut: FunctionalUnitTest, roots: Iterable[str], exclude: Optional[Callable[[str], bool]] = None, config=None) -> PortPlan:
     """Compute-loop ports for the call trees of `roots`. `exclude` keeps routines, and
     whatever is reachable only through them, off the device (see `call_tree`). `config` (a
     core.config.Configuration): only the loops that run in it, through the branches that do."""
@@ -489,7 +492,7 @@ def plan(fut, roots: Iterable[str], exclude: Optional[Callable[[str], bool]] = N
             candidates.append(port)
 
     for sid, sub in sorted(tree.items()):
-        if sub.record is None or not getattr(sub.record, "loop_nest", None):
+        if sub.record is None or not sub.record.loop_nest:
             continue
         if facts.is_device_routine(sub):
             continue  # already a device routine (e.g. `routine vector`): no compute constructs inside
@@ -531,15 +534,15 @@ def plan(fut, roots: Iterable[str], exclude: Optional[Callable[[str], bool]] = N
     # module variables read in the new compute loops and the routine-seq routines
     from spel.scripts.fortran_parser.module_spec import ModuleSpecError, module_spec
 
-    def globals_in(sub, lo: int, hi: int) -> set[tuple[str, str]]:
+    def globals_in(sub: Subroutine, lo: int, hi: int) -> set[tuple[str, str]]:
         from spel.scripts.fortran_parser.symbols import Origin
 
         found = set()
-        agv = {k.lower(): v for k, v in getattr(sub, "active_global_vars", {}).items()}
+        agv = {k.lower(): v for k, v in sub.active_global_vars.items()}
         for a in sub.record.accesses(origin=Origin.GLOBAL):
             if lo <= a.ln <= hi:
                 v = agv.get(a.base.lower())
-                if v is not None and not getattr(v, "parameter", False) and str(v.type).lower() not in fut.type_dict:
+                if v is not None and not v.parameter and str(v.type).lower() not in fut.type_dict:
                     found.add((str(v.declaration).lower(), a.base.lower()))
         return found
 

@@ -935,6 +935,11 @@ def main():
 
     add_machine_parser(subparsers)
 
+    # Parser for 'spel proptest'
+    from spel.proptest.cli import add_parser as add_proptest_parser
+
+    add_proptest_parser(subparsers)
+
     # Parser for 'spel restore'
     restore_parser = subparsers.add_parser(
         "restore",

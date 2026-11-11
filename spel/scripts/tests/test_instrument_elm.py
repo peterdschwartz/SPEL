@@ -340,7 +340,7 @@ def test_instrument_elm_end_to_end(fake_tree):
     for f in report.copied:
         assert f.exists()
     assert {f.name for f in report.copied} == {
-        "nc_io.F90", "nc_allocMod.F90", "ReadWriteMod_case.F90",
+        "nc_io.F90", "nc_allocMod.F90", "spel_varMod.F90", "ReadWriteMod_case.F90",
         "FUTConstantsMod_case.F90", "SpelCapture_case.F90",
     }
     assert (main / "ReadWriteMod_case.F90").read_text().startswith("module ReadWriteMod_case\n")
@@ -631,11 +631,11 @@ def test_compact_fields_from_manifest_and_module():
         return SimpleNamespace(name=name, type=type_, active=active)
 
     base = SimpleNamespace(
-        type_name="vegetation_nutrient_flux", declaration="NutrientFluxType",
+        type_name="vegetation_nutrient_flux", declaration="NutrientFluxType", instances={},
         components={"x": comp("x", "real"), "y": comp("y", "real"), "cgrp_id": comp("cgrp_id", "integer")},
     )
     carbon = SimpleNamespace(
-        type_name="vegetation_carbon_flux", declaration="VegetationFluxTypes",
+        type_name="vegetation_carbon_flux", declaration="VegetationFluxTypes", instances={},
         components={"core": comp("core", "vegetation_nutrient_flux"), "core%x": comp("core%x", "real"),
                     "core%y": comp("core%y", "real", active=False), "core%cgrp_id": comp("core%cgrp_id", "integer")},
     )

@@ -111,6 +111,7 @@ class Subroutine(object):
         self.associate_vars: dict[str, str] = {}
         self.ptr_vars: dict[str, list[str]] = {}
 
+        self.last_decl_ln: int = -1  # the last declaration of a local variable (-1: none)
         self.associate_start: int = -1
         self.associate_end: int = -1
 

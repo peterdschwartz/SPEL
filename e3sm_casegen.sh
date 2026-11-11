@@ -47,6 +47,15 @@ case "$(hostname -f)" in
    *) default_cft_dir=/pscratch/sd/g/gbisht/crop_reduced_inputdata ;;
 esac
 compressed_cft_dir=${COMPRESSED_CFT_DIR:-$default_cft_dir}
+# Machine defaults from the SPEL machine file of this host (`spel machine vars`: e3sm_machine,
+# scratch, [casegen] compiler/nthrds/max_mpitasks_per_node), when one matches; options override them.
+machine_vars=$(command -v spel >/dev/null && spel machine vars 2>/dev/null || true)
+if [ -n "$machine_vars" ]; then
+   eval "$machine_vars"
+   mach=${SPEL_E3SM_MACHINE:-$mach}
+   compiler=${SPEL_CASEGEN_COMPILER-$compiler}
+   [ -n "${SPEL_SCRATCH:-}" ] && scratch=$SPEL_SCRATCH
+fi
 
 usage() {
    cat <<USAGE
@@ -87,8 +96,8 @@ Usage: $(basename "$0") [options]
                        input from that directory when \$DIN_LOC_ROOT lacks them
   --finidat FILE       finidat in user_nl_elm (e.g. a spun-up restart)
   --compact            apply the SPEL compact layout at build time (COMPACT_ARGS env = extra
-                       options, e.g. "--roles"): `spel transform compact-rewrite
-                       --srcroot SRC --reanalyze -o CASE/SourceMods/src.elm` (adds .compact
+                       options, e.g. "--roles"): 'spel transform compact-rewrite
+                       --srcroot SRC --reanalyze -o CASE/SourceMods/src.elm' (adds .compact
                        to an --auto-name case name)
   --remove-zero-weight-urban
                        add 'run_zero_weight_urban = .false.' to user_nl_elm
@@ -101,7 +110,7 @@ Usage: $(basename "$0") [options]
                        --no-debug --ntasks 1024 --rest-n 10 --rest-option ndays --stop-n 5
                        --stop-option ndays --queue debug --wallclock 00:20:00 --daily-history
                        --group E3SM_testings --auto-name --share --build, and per machine
-                       (from the SPEL machine file, `spel machine vars`; else by hostname)
+                       (from the SPEL machine file, 'spel machine vars'; else by hostname)
                          Perlmutter: --mach pm-cpu --compiler '' --scratch \$SCRATCH
                          Chrysalis:  --mach chrysalis --compiler intel
                                      --scratch /lcrc/globalscratch/\$USER
@@ -141,10 +150,8 @@ while [ $# -gt 0 ]; do
                auto_name=1; share=1; build=1
                # machine defaults from the SPEL machine file (`spel machine vars`:
                # e3sm_machine, scratch, [casegen] compiler/nthrds/max_mpitasks_per_node),
-               # else by hostname
-               machine_vars=$(command -v spel >/dev/null && spel machine vars 2>/dev/null || true)
+               # else by hostname (machine_vars: read at the top)
                if [ -n "$machine_vars" ]; then
-                  eval "$machine_vars"
                   mach=${SPEL_E3SM_MACHINE:?machine file sets no e3sm_machine}
                   scratch=${SPEL_SCRATCH:?machine file sets no scratch}
                   compiler=${SPEL_CASEGEN_COMPILER-$compiler}

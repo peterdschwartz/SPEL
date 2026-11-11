@@ -24,12 +24,17 @@ import difflib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
 from spel.transforms.core.capture import VirtualFS
 from spel.transforms.core.driver import Result, Sink, apply_plan, verify_parse, write_manifest, InPlace
 from spel.transforms.core.source import Sources, statement_end
 from spel.transforms.core.transform import Context, Transform
+
+if TYPE_CHECKING:
+    from spel.scripts.analyze_subroutines import Subroutine
+    from spel.scripts.fortran_modules import FortranModule
+    from spel.scripts.functional_unit_test import FunctionalUnitTest
 
 log = logging.getLogger("spel.transforms.pipeline")
 
@@ -130,7 +135,7 @@ class OverlayAnalysis:
 class AnalysisOverlay:
     """Keeps the analysis of a srcroot in step with edited, unwritten text (see module doc)."""
 
-    def __init__(self, fut, srcroot: Path):
+    def __init__(self, fut: FunctionalUnitTest, srcroot: Path):
         self.base = fut
         self.srcroot = Path(srcroot)
         self.subs = dict(fut.subroutine_dict)
@@ -139,13 +144,13 @@ class AnalysisOverlay:
         self._head: dict[str, int] = {}  # module -> its `contains` (end of head) line in the current text
         self.refreshed: list[str] = []
 
-    def path(self, obj) -> Path:
+    def path(self, obj: Subroutine | FortranModule) -> Path:
         p = Path(obj.filepath)
         return p if p.is_absolute() else self.srcroot / p
 
-    def _modules_of(self, path: Path) -> list:
+    def _modules_of(self, path: Path) -> list[FortranModule]:
         return [m for m in self.base.module_dict.values()
-                if getattr(m, "filepath", None) and self.path(m) == path]
+                if m.filepath and self.path(m) == path]
 
     def update(self, old_texts: dict[Path, str], new_texts: dict[Path, str], step: str) -> None:
         """Refresh the analysis of the files whose text went from `old_texts` to `new_texts`.
@@ -175,7 +180,8 @@ class AnalysisOverlay:
         find_registrations({c.id: c for c in walked}, log)
         self.refreshed += [c.id for c in walked]
 
-    def _update_file(self, path: Path, old: str, new: str, mods, scopes, step: str) -> list:
+    def _update_file(self, path: Path, old: str, new: str, mods: list[FortranModule], scopes,
+                     step: str) -> list[Subroutine]:
         from spel.scripts.fortran_parser.scope_walk import walk_subroutine
         from spel.scripts.module_resolver import ModuleResolver
 
@@ -183,7 +189,7 @@ class AnalysisOverlay:
         m = line_map(old_l, new_l)
         for mod in mods:
             # comments (directives) may change in the head; declarations and uses may not
-            head = self._head.get(mod.name, getattr(mod, "end_of_head_ln", 0) or 0)
+            head = self._head.get(mod.name, mod.end_of_head_ln or 0)
             new_head = m.strict(head)
             if new_head is None or _code(old_l[: head + 1]) != _code(new_l[: new_head + 1]):
                 raise PipelineError(f"{step} edits the head of module {mod.name} ({path.name}); "
@@ -195,13 +201,14 @@ class AnalysisOverlay:
         new_ll = merge_logical(old_ll, preprocessed_lines(path, len(new_l)), old_l, new_l, m)
         self._logical[path] = new_ll
 
-        copies = {}
+        copies: dict[str, Subroutine] = {}
+        s: Subroutine
         for s in self.subs.values():
-            if getattr(s, "library", False) or not getattr(s, "filepath", None) or self.path(s) != path:
+            if s.library or not s.filepath or self.path(s) != path:
                 continue
             c = copy.copy(s)
             for attr in ("startline", "end_stmt_ln", "contains_ln", "endline"):
-                ln = getattr(s, attr, None)
+                ln = getattr(s, attr)  # contains_ln is None without internal routines
                 if ln is None:
                     continue
                 new_ln = m.strict(ln)
@@ -212,7 +219,7 @@ class AnalysisOverlay:
             c.internal_subs = {}
             copies[s.id] = c
         for c in copies.values():
-            if getattr(c, "is_internal", False) and c.host_id:
+            if c.is_internal and c.host_id:
                 c.host = copies.get(c.host_id) or self.subs[c.host_id]
                 c.host.internal_subs[c.name] = c
         self.subs.update(copies)
@@ -227,7 +234,7 @@ class AnalysisOverlay:
             family, x = [], c
             while x is not None:
                 family.append(self.base.subroutine_dict.get(x.id, x))
-                x = x.host if getattr(x, "is_internal", False) else None
+                x = x.host if x.is_internal else None
             # `use`s of unavailable modules are recovered from the module's (unchanged) use
             # statements by their lines in the analyzed text
             ranges = [(f.startline, f.endline) for f in family]
@@ -235,7 +242,7 @@ class AnalysisOverlay:
                 c.parse(full)
                 resolver = ModuleResolver(c.module, scopes.mod_dict, scopes.sub_dict, line_ranges=ranges,
                                           scopes=scopes)
-                host = c.host.record if getattr(c, "is_internal", False) and c.host is not None else None
+                host = c.host.record if c.is_internal and c.host is not None else None
                 c.record = walk_subroutine(c.syntax_tree, resolver=resolver, host=host)
             except BaseException as err:  # noqa: BLE001 (the parser exits on errors)
                 raise PipelineError(f"after {step}: {c.id} no longer parses or walks: "
@@ -249,34 +256,34 @@ def _code(lines: list[str]) -> list[str]:
     return [l.rstrip() for l in lines if l.strip() and not l.lstrip().startswith("!")]
 
 
-def _depth(sub) -> int:
+def _depth(sub: Subroutine) -> int:
     d = 0
-    while getattr(sub, "is_internal", False) and getattr(sub, "host", None) is not None:
+    while sub.is_internal and sub.host is not None:
         sub, d = sub.host, d + 1
     return d
 
 
-def _remap_lines(c, m: LineMap) -> None:
+def _remap_lines(c: Subroutine, m: LineMap) -> None:
     """Line-keyed analysis data other than the record (which is rebuilt) onto the new text."""
     for attr in ("associate_start", "associate_end", "last_decl_ln"):
-        ln = getattr(c, attr, -1)
+        ln = getattr(c, attr)
         if ln is not None and ln >= 0:
             setattr(c, attr, m.near(ln))
-    if getattr(c, "flat_ifs", None):
+    if c.flat_ifs:
         ifs = []
         for x in c.flat_ifs:
             y = copy.copy(x)
             y.start_ln, y.end_ln = m.near(x.start_ln), m.near(x.end_ln)
             ifs.append(y)
         c.flat_ifs = ifs
-    if getattr(c, "sub_call_desc", None):
+    if c.sub_call_desc:
         c.sub_call_desc = {m.near(ln): d for ln, d in c.sub_call_desc.items()}
-    if getattr(c, "elmtype_access_by_ln", None):
+    if c.elmtype_access_by_ln:
         c.elmtype_access_by_ln = {
             k: [copy.copy(rw) for rw in v] for k, v in c.elmtype_access_by_ln.items()}
         for v in c.elmtype_access_by_ln.values():
             for rw in v:
-                if getattr(rw, "ln", None) is not None and rw.ln >= 0:
+                if rw.ln is not None and rw.ln >= 0:
                     rw.ln = m.near(rw.ln)
 
 

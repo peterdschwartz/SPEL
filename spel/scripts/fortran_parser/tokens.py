@@ -28,6 +28,8 @@ class TokenTypes(Enum):
     NOT_EQUIV = ".ne."
     OR = ".or."
     AND = ".and."
+    EQV = ".eqv."
+    NEQV = ".neqv."
     CONCAT = "//"
     PTR = "=>"
     # delimiters
@@ -111,6 +113,8 @@ keywords: dict[str, TokenTypes] = {
     ".le.": TokenTypes.LTEQ,
     ".and.": TokenTypes.AND,
     ".or.": TokenTypes.OR,
+    ".eqv.": TokenTypes.EQV,
+    ".neqv.": TokenTypes.NEQV,
     "print": TokenTypes.PRINT,
     "write": TokenTypes.WRITE,
     "ifdef": TokenTypes.IFDEF,
@@ -206,6 +210,8 @@ OPERATORS = {
     TokenTypes.NOT_EQUIV,
     TokenTypes.OR,
     TokenTypes.AND,
+    TokenTypes.EQV,
+    TokenTypes.NEQV,
     TokenTypes.CONCAT,
     TokenTypes.PTR,
 }

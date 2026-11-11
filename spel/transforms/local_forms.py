@@ -22,7 +22,10 @@ through pointers disqualify a variable (conservative).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
+
+if TYPE_CHECKING:
+    from spel.scripts.fortran_parser.scope_walk import Declaration
 
 # intrinsics allowed in a constant expression (elemental and inquiry functions of constants)
 CONST_INTRINSICS = {"tiny", "huge", "epsilon", "real", "int", "dble", "sqrt", "exp", "log", "abs",
@@ -75,17 +78,18 @@ def _rounding_note(e) -> str:
             yield str(x.function).lower()
             for a in x.args:
                 yield from calls(a)
-        for k in ("left_expr", "right_expr"):
-            if hasattr(x, k):
-                yield from calls(getattr(x, k))
+        if isinstance(x, A.InfixExpression):
+            yield from calls(x.left_expr)
+        if isinstance(x, (A.InfixExpression, A.PrefixExpression)):
+            yield from calls(x.right_expr)
 
     found = sorted(set(calls(e)) & TRANSCENDENTAL)
     return f"; compile-time {', '.join(found)} may differ in the last bit: check bit-for-bit" if found else ""
 
 
-def _initializer(decl):
+def _initializer(decl: Declaration):
     node = decl.node
-    for ent in getattr(node, "entities", None) or []:
+    for ent in node.entities if node is not None else []:
         if ent.token.literal.lower() == decl.name.lower():
             return ent.init
     return None
@@ -205,7 +209,7 @@ def check(fut, routines: Iterable[str]) -> list[Finding]:
         sub = fut.subroutine_dict.get(sid)
         if sub is None or sub.record is None:
             continue
-        tree = getattr(sub.record, "tree", None)
+        tree = sub.record.tree
         if tree is None:
             try:
                 tree = routine_tree(sub)

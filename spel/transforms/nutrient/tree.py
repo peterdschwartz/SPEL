@@ -257,10 +257,10 @@ def read_routine(sub) -> Routine:
             unsupported.append(f"line {ln + 1}: no source statement for the parsed one")
         return Span(ln, last, text)
 
-    def build(stmts: list, guards: tuple[str, ...], gexprs: tuple = ()) -> list:
+    def build(stmts: list[Statement], guards: tuple[str, ...], gexprs: tuple = ()) -> list:
         out: list = []
         for s in stmts:
-            if getattr(s, "label", None) is not None:
+            if s.label is not None:
                 unsupported.append(f"line {s.lineno + 1}: statement label {s.label}")
             if isinstance(s, IfConstruct):
                 close = s.else_.end_ln if s.else_ else s.else_ifs[-1].end_ln if s.else_ifs else s.end_ln
@@ -394,9 +394,9 @@ def call_keywords(leaf: Leaf) -> Optional[tuple[str, dict[str, object]]]:
     if not isinstance(leaf.node, SubCallStatement):
         return None
     func = leaf.node.function
-    args = getattr(func, "args", None)
-    if args is None:
+    if not isinstance(func, FuncExpression):  # `call x` without arguments
         return None
+    args = func.args
     out = {}
     for a in args:
         if not (isinstance(a, InfixExpression) and a.operator == "="):

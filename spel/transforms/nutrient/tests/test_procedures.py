@@ -46,8 +46,8 @@ def test_compare_procedure(tmp_path):
         "m::n_init": SimpleNamespace(filepath=f, startline=13, endline=19),
     }
     types = {
-        "c_t": SimpleNamespace(procedures={"init": "m::c_init"}, components={}),
-        "n_t": SimpleNamespace(procedures={"init": "m::n_init"}, components={}),
+        "c_t": SimpleNamespace(procedures={"init": "m::c_init"}, components={}, filepath=f),
+        "n_t": SimpleNamespace(procedures={"init": "m::n_init"}, components={}, filepath=f),
     }
     rep = compare_procedure(fam, "init", subs, types)
     kinds = {e: [s.kind for s in ss] for e, ss in rep.stmts.items()}
