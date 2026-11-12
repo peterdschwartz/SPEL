@@ -143,6 +143,20 @@ class FakeBackend:
         }
 
     def run(self, inputs, outputs, trap=False):
+        values = self._compute(inputs)
+        return {n: FArray(values[n], (1,) * values[n].ndim, n) for n in outputs}
+
+    def begin(self, inputs, poison=True):
+        self.current = {k: np.array(v, copy=True) for k, v in inputs.items()}
+
+    def step(self, inputs, outputs, trap=False, poison=True):
+        """One step on the carried state: `a%state` (inout) is what the previous step left."""
+        self.current.update({k: np.array(v, copy=True) for k, v in inputs.items()})
+        values = self._compute(self.current)
+        self.current["a%state"] = values["a%state"]
+        return {n: FArray(values[n], (1,) * values[n].ndim, n) for n in outputs}
+
+    def _compute(self, inputs):
         self.calls += 1
         self.seen.update(inputs)
         x = np.asarray(inputs["a%x"], dtype=float)
@@ -174,7 +188,7 @@ class FakeBackend:
             "b%extra": extra,
             **{k: np.asarray(v) for k, v in inputs.items() if k != "a%state"},
         }
-        return {n: FArray(values[n], (1,) * values[n].ndim, n) for n in outputs}
+        return values
 
     def stop(self):
         self.stopped = True

@@ -151,9 +151,10 @@ def scan_routine(sub_id: str, tree, types: dict[str, DerivedType], module_types:
         if isinstance(st, AllocateStatement) and not st.is_deallocate:
             for obj in st.objects:
                 names, comps = path_of(obj)
-                if names and len(names) == 1 and comps[-1][1] and names[0] in module_types \
-                        and names[0] not in local_names:
-                    # an array of the module itself (`allocate(inhemi(bounds%begp:bounds%endp))`)
+                if names and len(names) == 1 and comps[-1][1] and names[0] not in local_names:
+                    # a module array: the module's own (`allocate(inhemi(bounds%begp:bounds%endp))`)
+                    # or another module's (elm_initializeMod's `allocate(f_surf(begg:endg, ...))`
+                    # of elm_varsur's f_surf: owner "" too; resolve_module_arrays finds its module)
                     bounds = ",".join(text(a) for a in comps[-1][1])
                     allocs.append(Allocation("", names[0], bounds, sub_id, st.lineno))
                     continue
@@ -201,6 +202,36 @@ def scan_module(mod, sub_dict: dict, types: dict[str, DerivedType]):
         if v is not None and getattr(v, "dim", 0) == rank(a.bounds):
             v.alloc_bounds = a.bounds
     return allocs, ptrs
+
+
+def resolve_module_arrays(mod_dict: dict) -> list[tuple[str, str, str]]:
+    """
+    `alloc_bounds` of module arrays allocated in another module than the
+    one declaring them (scan_module handles a module's own). The declaring
+    module is the only one with a global of that name and rank, or, if
+    several have one, the only one of those the allocating module uses.
+    Returns (declaring module, array, bounds) of each array set.
+    """
+    owners_of: dict[str, list[str]] = {}
+    for mname, mod in mod_dict.items():
+        for vname in mod.global_vars:
+            owners_of.setdefault(vname, []).append(mname)
+    done = []
+    for mname, mod in mod_dict.items():
+        for a in getattr(mod, "allocations", None) or []:
+            if a.owner or a.path in mod.global_vars:
+                continue
+            cands = [m for m in owners_of.get(a.path, [])
+                     if getattr(mod_dict[m].global_vars[a.path], "dim", 0) == rank(a.bounds)]
+            if len(cands) > 1:
+                used = set(getattr(mod, "modules", {}) or {})
+                cands = [m for m in cands if m in used]
+            if len(cands) != 1:
+                continue
+            v = mod_dict[cands[0]].global_vars[a.path]
+            v.alloc_bounds = a.bounds
+            done.append((cands[0], a.path, a.bounds))
+    return done
 
 
 def rank(bounds: str) -> int:

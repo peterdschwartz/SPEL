@@ -113,6 +113,7 @@ class Verdict:
     ok: Optional[np.ndarray]  # None when the routine aborted
     values: dict[str, np.ndarray] = field(default_factory=dict)  # what the expression used, per element
     aborted: str = ""
+    step: int = 1  # the step it was judged after (multi-step runs: the first failing one)
 
     @property
     def passed(self) -> bool:
@@ -145,6 +146,21 @@ class Result:
     scenario: "Scenario"
     example: "Example"
     arrays: dict[str, FArray]  # inputs (before) and fetched state (after) by name
+    steps: Optional[list[dict[str, FArray]]] = None  # multi-step runs: the state after each step
+    times: Optional[list[dict[str, Any]]] = None  # ... and its time scalars
+
+    def at(self, step: int) -> "Result":
+        """The result as it was after one step (1-based) of a multi-step run."""
+        if self.steps is None:
+            if step != 1:
+                raise ValueError("a one-call result has step 1 only")
+            return self
+        return Result(self.session, self.scenario, self.example, {**self.arrays, **self.steps[step - 1]})
+
+    def series(self, name: str) -> np.ndarray:
+        """A variable after every step, the step axis first (a one-call result: one step)."""
+        states = self.steps if self.steps is not None else [self.arrays]
+        return np.stack([np.asarray(s[name].data) for s in states])
 
     def frame(self, level: str = "p", names: Optional[list[str]] = None,
               aggregate: Optional[dict[str, str]] = None) -> "pd.DataFrame":

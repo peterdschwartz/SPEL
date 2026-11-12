@@ -291,7 +291,7 @@ LAST_CHILD = {"topf": "t", "lndf": "l", "colf": "c", "pftf": "p"}
 TOPOLOGY_COUNT = {"npfts": "p", "ncolumns": "c", "nlandunits": "l", "ntopounits": "t"}
 # weight fields: the ancestor level the weight is relative to
 TOPOLOGY_WEIGHT = {"wtgcell": "g", "wtgcell_save": "g", "wttopounit": "t", "wtlunit": "l", "wtcol": "c"}
-TOPOLOGY_FALSE = {"glcmecpoi", "is_fates"}
+TOPOLOGY_FALSE = {"glcmecpoi", "is_fates", "ispolygon"}  # ispolygon: no polygonal tundra landunits
 # logical fields that hold for the elements of landunits of these kinds
 TOPOLOGY_KIND = {
     "lakpoi": (_L,), "is_lake": (_L,), "urbpoi": (_U,), "ifspecial": (_U, _L),
@@ -618,7 +618,10 @@ def _pinned(inv: Inventory, layout: Layout) -> dict[str, np.ndarray]:
 
 
 def _is_topology(var: VarInfo, inv: Inventory) -> bool:
-    return var.kind == "topology" or (var.instance in _physical_instances(inv) and var.type in ("integer", "logical"))
+    from spel.proptest.inventory import PHYSICAL_INTEGERS
+
+    return var.kind == "topology" or (var.instance in _physical_instances(inv) and var.type in ("integer", "logical")
+                                      and var.field not in PHYSICAL_INTEGERS)
 
 
 def _complete_constants(inv: Inventory, path: Path) -> list[str]:

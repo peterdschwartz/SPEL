@@ -1,0 +1,113 @@
+[case]
+name = "hs_bug"
+
+[case.build]
+fc = "gfortran"
+
+[settings]
+max_examples = 40
+
+[domain]
+nsets = 2
+reference = "hs_bug"
+
+[[domain.gridcell]]
+name = "lowest first"
+topounits = [
+  { weight = 0.3, elevation = 50, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 150, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.4, elevation = 300, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[[domain.gridcell]]
+name = "lowest last"
+topounits = [
+  { weight = 0.4, elevation = 300, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 150, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 50, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[[domain.gridcell]]
+name = "valley"
+topounits = [
+  { weight = 0.3, elevation = 100, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 50, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.4, elevation = 300, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[[domain.gridcell]]
+name = "cycle"
+topounits = [
+  { weight = 0.25, elevation = 300, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.25, elevation = 200, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.25, elevation = 50, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.25, elevation = 150, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[[domain.gridcell]]
+name = "tie"
+topounits = [
+  { weight = 0.4, elevation = 100, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 50, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 50, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[[domain.gridcell]]
+name = "caspian 184059"
+topounits = [
+  { weight = 0.7, elevation = 1.8, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.15, elevation = -20.7, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.1, elevation = -64.9, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.05, elevation = -110.7, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[[domain.gridcell]]
+name = "salton 177249"
+topounits = [
+  { weight = 0.9, elevation = 14.1, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.05, elevation = -50.7, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.05, elevation = -163.0, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[[domain.gridcell]]
+name = "inactive low"
+topounits = [
+  { weight = 0.5, elevation = 300, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.5, elevation = 150, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.0, elevation = 50, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[namelist]
+use_IM2_hillslope_hydrology = true
+
+# heavy surface runoff on ELM's soil grid; the rest from the hs_bug capture
+[scenario.wet]
+over = "c in nolakec"
+extends = """/lcrc/globalscratch/ac.schwartzpd/spel-unit-tests/proptest-data/hs_bug/stats/hs_bug.inputs.toml"""
+
+[scenario.wet.inputs]
+"col_wf%qflx_surf" = { log_range = [1e-06, 0.002] }
+"col_wf%qflx_h2osfc_surf" = { log_range = [1e-08, 0.0001] }
+"top_af%rain" = { range = [0.0, 0.005] }
+"top_ws%from_uphill" = { range = [0.0, 5.0] }
+"col_pp%dz" = { value = 0.0, levels = { -4 = 0.0, -3 = 0.0, -2 = 0.0, -1 = 0.0, 0 = 0.0, 1 = 0.017512817916255204, 2 = 0.02757896925967625, 3 = 0.0454700332424132, 4 = 0.07496741098620856, 5 = 0.12360036510228053, 6 = 0.20378255101043175, 7 = 0.33598062644843263, 8 = 0.5539384053686849, 9 = 0.9132900315890611, 10 = 1.5057607013992766, 11 = 2.482579696981332, 12 = 4.0930819526214, 13 = 6.7483512780057175, 14 = 11.12615029420442, 15 = 13.851152141963599 } }
+"col_pp%z" = { value = 0.0, levels = { -4 = 0.0, -3 = 0.0, -2 = 0.0, -1 = 0.0, 0 = 0.0, 1 = 0.007100635417193535, 2 = 0.02792500041531687, 3 = 0.06225857393654604, 4 = 0.11886506690014327, 5 = 0.21219339590896316, 6 = 0.3660657971047043, 7 = 0.6197584979298266, 8 = 1.0380270500015696, 9 = 1.7276353086671965, 10 = 2.8646071131796917, 11 = 4.73915671146575, 12 = 7.829766507142356, 13 = 12.92532061670855, 14 = 21.32646906315379, 15 = 35.17762120511739 } }
+"col_pp%zi" = { value = 0.0, levels = { -5 = 0.0, -4 = 0.0, -3 = 0.0, -2 = 0.0, -1 = 0.0, 0 = 0.0, 1 = 0.017512817916255204, 2 = 0.04509178717593146, 3 = 0.09056182041834465, 4 = 0.16552923140455322, 5 = 0.28912959650683373, 6 = 0.4929121475172655, 7 = 0.8288927739656982, 8 = 1.382831179334383, 9 = 2.2961212109234443, 10 = 3.8018819123227208, 11 = 6.284461609304053, 12 = 10.377543561925453, 13 = 17.12589483993117, 14 = 28.252045134135592, 15 = 42.10319727609919 } }
+
+[[property]]
+name = "topounits with a downhill neighbour keep no positive surface water"
+expr = """implies(top_pp%downhill_ti(t) /= -1, col_wf%qflx_surf(c) <= 0.0 .and. col_wf%qflx_h2osfc_surf(c) <= 0.0)"""
+
+[[property]]
+name = "no topounit sends water to itself"
+expr = "implies(col_wf%qflx_to_downhill(c) > 0.0, top_pp%downhill_ti(t) /= t)"
+
+[[property]]
+name = "the downhill store stays finite"
+expr = "finite(top_ws%from_uphill(t))"
+over = "t"
+
+[[relation]]
+name = "IM2 off: the runoff a column sent downhill stays in its own runoff"
+expect = """close(follow%col_wf%qflx_runoff(c), base%col_wf%qflx_runoff(c) + base%col_wf%qflx_to_downhill(c), rtol=1.0e-12, atol=1.0e-25)"""
+namelist = { use_IM2_hillslope_hydrology = false }

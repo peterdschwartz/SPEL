@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 import numpy as np
 
 from spel.proptest import strategies as strat
-from spel.proptest.checks import INPUT, Check, Expr
+from spel.proptest.checks import INPUT, PREV, Check, Expr
 from spel.proptest.domain import CONSTANTS_FILE, INPUTS_FILE, Domain, build_domain
 from spel.proptest.errors import SpecError
 from spel.proptest.fexpr import (ExprError, Evaluator, FArray, FuncExpression, Namespace, children, designator,
@@ -50,8 +50,8 @@ from spel.proptest.inventory import LEVELS, Inventory
 from spel.proptest.paths import data_dir, slug, work_dir
 from spel.proptest.rules import KINDS as RULE_KINDS
 from spel.proptest.rules import Rule
-from spel.proptest.spec import (ELEMENT_VARS, INPUT_KINDS, Property, Relation, Scenario, Spec,  # noqa: F401
-                                dormant_rules, missing_rules)
+from spel.proptest.spec import (ELEMENT_VARS, INPUT_KINDS, STEP_NAME, Property, Relation, Scenario,  # noqa: F401
+                                Spec, dormant_rules, missing_rules)
 from spel.proptest.worker import FortranAbort, Worker
 
 if TYPE_CHECKING:
@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 STATE_KINDS = ("input", "inout", "output")
 FAILURES_DIR = "failures"
 EXAMPLE_FILE = "example.json"
+FORCING_FILE = "forcing.npz"  # a multi-step example's forcing values (step axis first)
 
 
 class PropertyFailure(AssertionError):
@@ -74,6 +75,18 @@ class Example:
     seed: int = 0
     extra: dict[str, Any] = field(default_factory=dict)  # what a check kind adds (JSON values)
     follow: Optional["Example"] = None  # the follow-up of a relation that runs it under other namelist options
+    forcing: dict[str, np.ndarray] = field(default_factory=dict)  # multi-step: inst%field -> (step, *shape)
+
+
+@dataclass
+class StepRun:
+    """A multi-step run of an example: after each step, every value it set or fetched (the state the
+    checks see), and the time scalars of the step."""
+
+    example: Example
+    scenario: str
+    states: list[dict[str, FArray]]
+    times: list[dict[str, Any]]
 
 
 @dataclass
@@ -173,6 +186,10 @@ class Session:
         self.backend = backend
         self._other = other
         self._siblings: dict[tuple, "Session"] = {}
+        self._step: dict[str, Any] = {"k": None}  # the step judged now (shared with siblings and `other`)
+        self._run: Optional[StepRun] = None  # the last multi-step run (one example at a time)
+        self._time_now: Optional[dict[str, Any]] = None  # time scalars of the step evaluated now
+        self._boundary_ok: set[str] = set()
         self.exprs: dict[tuple, Expr] = {}  # expressions a check builds for this configuration
         self._static: dict[str, Optional[FArray]] = {}
         self._built = None  # results.BuiltDomain, on first use
@@ -201,6 +218,7 @@ class Session:
             inv = self.base_inv if cmp.case_dir == self.case_dir else Inventory.load(cmp.case_dir, units=False)
             spec = dataclasses.replace(self.spec, case_dir=cmp.case_dir, build=cmp.build, compare=None, checks=[])
             self._other = Session(spec, inv, namelist=self.namelist, **self._build_args)
+            self._other._step = self._step
         return self._other
 
     def sibling(self, namelist: dict[str, Any]) -> "Session":
@@ -214,6 +232,7 @@ class Session:
             self._siblings[key] = Session(self.spec, self.base_inv, fc=self.variant.fc or None, acc=self.variant.acc,
                                           dbg=self.variant.dbg, backend=self._backend_arg,
                                           namelist={**self.namelist, **namelist}, **args)
+            self._siblings[key]._step = self._step
         return self._siblings[key]
 
     def for_scenario(self, scenario: Scenario) -> "Session":
@@ -281,6 +300,8 @@ class Session:
                     v = np.asarray(constants[head])
                     return FArray(v, (1,) * v.ndim, head) if v.ndim else v[()]
                 if head in time_names:
+                    if self._time_now is not None and head in self._time_now:
+                        return self._time_now[head]
                     return self._as_value(self.static(head), head)
             if len(path) == 2 and path[0] == "filter":
                 return self._as_value(self.static(f"filter%{path[1]}"), f"filter%{path[1]}")
@@ -294,8 +315,62 @@ class Session:
             raise ExprError(f"{name} is not allocated in the case")
         return fa.data[()] if fa.data.ndim == 0 else fa
 
-    def evaluator(self, arrays: dict[str, Any], functions: Optional[dict[str, Callable]] = None) -> Evaluator:
-        return Evaluator(self.resolver(arrays), {**self.spec.functions, **(functions or {})})
+    def evaluator(self, arrays: dict[str, Any], functions: Optional[dict[str, Callable]] = None,
+                  prev: Any = None, history: Optional[list] = None) -> Evaluator:
+        """prev: the state before the step (`tend(x)`): its arrays, or (arrays, namespaces);
+        default: none. history: the states after steps 1..k as (arrays, namespaces), for `acc(x)`."""
+        def env(e):
+            if not isinstance(e, tuple):
+                return self.resolver(e), {}
+            if len(e) == 3:  # (arrays, namespaces, prev): a step of the history with its own prev
+                return self.resolver(e[0]), e[1], env(e[2])
+            return self.resolver(e[0]), e[1]
+
+        return Evaluator(self.resolver(arrays), {**self.spec.functions, **self.domain_functions(), **(functions or {})},
+                         prev=env(prev) if prev is not None else None, aggregate=self._aggregate,
+                         history=[env(h) for h in history] if history else None)
+
+    def domain_functions(self) -> dict[str, Callable]:
+        """Topounit facts from the domain declaration: `elevation(t)` (declared elevation, NaN where
+        none), `lowest(t)` (the lowest topounit of its gridcell, ties included), `uphill_count(t)`
+        (other topounits whose top_pp%downhill_ti, as ELM computes it, is t)."""
+        if getattr(self, "_domain_fns", None) is None:
+            lay = self.layout
+            elev = np.array([np.nan if e is None else float(e) for e in lay.elevation])
+            g = lay.ancestor_of("t", "g")
+            lowest = np.zeros(elev.size, dtype=bool)
+            for gi in np.unique(g):
+                ts = np.flatnonzero(g == gi)
+                if np.isfinite(elev[ts]).all():
+                    lowest[ts] = elev[ts] == elev[ts].min()
+            try:
+                dn = np.asarray(lay.downhill())
+            except Exception:  # elevations not declared: no neighbours
+                dn = np.full(elev.size, -1)
+            ups = np.zeros(elev.size, dtype=np.int64)
+            for t, d in enumerate(dn):
+                if 0 < d <= elev.size and d - 1 != t:
+                    ups[d - 1] += 1
+
+            def at(values):
+                return lambda t: values[np.asarray(t, dtype=np.int64) - 1]
+
+            self._domain_fns = {"elevation": at(elev), "lowest": at(lowest), "uphill_count": at(ups)}
+        return self._domain_fns
+
+    def _aggregate(self, how: str, x: FArray, level: str) -> np.ndarray:
+        """`child_<how>(x, level)`: x (a variable of a finer level) reduced over each element of level."""
+        from spel.proptest.results import _aggregate
+
+        var = self.inv.vars.get(x.name) if x.name else None
+        if var is None or var.level is None:
+            raise ExprError(f"child_{how}: {x.name or 'the argument'} is not a variable with a subgrid dimension")
+        if LEVELS.index(var.level) <= LEVELS.index(level):
+            raise ExprError(f"child_{how}: {x.name} is of level {var.level!r}, not finer than {level!r}")
+        data = np.asarray(x.data, dtype=float)
+        if data.ndim != 1:
+            raise ExprError(f"child_{how}: {x.name} has more than one value per element")
+        return _aggregate(self.layout, data, var.level, level, how)
 
     def elements(self, over: tuple[str, Optional[str]]) -> np.ndarray:
         """Fortran indices of the elements `over` selects."""
@@ -387,7 +462,33 @@ class Session:
             ex.inputs[name] = strat.values_of(rule, uu, self._pft(var), var.subgrid_axis, var.type, base,
                                               self.level_rules(name, rule))
         self.derive(scenario, ex, skip=set())
+        self._forcing_at(scenario, ex, u)
         return ex
+
+    def _forcing_at(self, scenario: Scenario, ex: Example, u: Any) -> None:
+        """The values of every forcing rule for each step (step axis first), from u as inputs_at."""
+        if scenario.steps <= 1:
+            return
+        for name in sorted(scenario.forcing):
+            rule = scenario.forcing[name]
+            var = self.inv.vars[name]
+            if name not in self.domain.extents:
+                continue
+            shape, base = self.rule_shape(name, rule)
+            ext = (scenario.steps, *shape)
+            key = f"forcing:{name}"
+            if isinstance(u, dict):
+                uu = np.broadcast_to(np.asarray(u.get(key, 0.5), dtype=float), ext)
+            elif callable(u):
+                uu = np.asarray(u(ext), dtype=float)
+            else:
+                uu = np.full(ext, float(u))
+            ex.u[key] = uu
+            if base is None and RULE_KINDS[rule.kind].relative:
+                continue
+            ex.forcing[name] = np.stack([
+                strat.values_of(rule, uu[k], self._pft(var), var.subgrid_axis, var.type, base,
+                                self.level_rules(name, rule)) for k in range(scenario.steps)])
 
     def fill_missing(self, scenario: Scenario, ex: Example) -> None:
         """Ruled inputs this session reads that the example does not hold yet (a relative rule
@@ -424,6 +525,15 @@ class Session:
                 continue
             shape, _ = self.rule_shape(name, rule)
             u[name], modes[name] = strat.draw_u(choose, name, rule, shape, rng, self.inv.vars[name].subgrid_axis)
+        for name in sorted(scenario.forcing) if scenario.steps > 1 else ():
+            rule = scenario.forcing[name]
+            if name not in self.domain.extents:
+                continue
+            shape, _ = self.rule_shape(name, rule)
+            axis = self.inv.vars[name].subgrid_axis
+            key = f"forcing:{name}"  # a mode over (step, *shape): constant, i.i.d., edges, per element
+            u[key], modes[key] = strat.draw_u(choose, key, rule, (scenario.steps, *shape), rng,
+                                              None if axis is None else axis + 1)
         ex = self.inputs_at(scenario, u)
         ex.modes, ex.seed = modes, seed
         return ex
@@ -486,11 +596,18 @@ class Session:
     def follow_up(self, scenario: Scenario, rel: Relation, ex: Example) -> Example:
         """Sets nsets/2.. become a copy of the base sets, then the relation's transforms."""
         out = Example({k: v.copy() for k, v in ex.inputs.items()}, ex.u, ex.modes, ex.seed, dict(ex.extra))
+        out.forcing = {k: v.copy() for k, v in ex.forcing.items()}
         for name, arr in out.inputs.items():
             var = self.inv.vars[name]
             if var.subgrid_axis is not None:
                 half = self.half_count(var.level)
                 t = np.moveaxis(arr, var.subgrid_axis, 0)
+                t[half:2 * half] = t[:half]
+        for name, arr in out.forcing.items():  # (step, *shape): the subgrid axis is one further
+            var = self.inv.vars[name]
+            if var.subgrid_axis is not None:
+                half = self.half_count(var.level)
+                t = np.moveaxis(arr, var.subgrid_axis + 1, 0)
                 t[half:2 * half] = t[:half]
         values = []
         for name, expr in rel.follow:
@@ -596,11 +713,162 @@ class Session:
         return {n: a for n, a in ex.inputs.items() if self.inv.vars[n].kind in INPUT_KINDS}
 
     def compute(self, scenario: Scenario, ex: Example, outputs: list[str]) -> dict[str, FArray]:
+        if scenario.steps > 1:  # the state after the step judged now (default: the last)
+            run = self.run_steps(scenario, ex)
+            k = self._step["k"] or scenario.steps
+            state = run.states[k - 1]
+            missing = [n for n in outputs if n not in state]
+            if missing:
+                raise SpecError(f"not fetched in the multi-step run: {missing}")
+            return dict(state)
         res = self.backend.run(self.live_inputs(ex), outputs, trap=scenario.trap_fpe)
         missing = [n for n, v in res.items() if v is None]
         if missing:
             raise SpecError(f"not allocated in the case: {missing}")
         return res
+
+    # -- multi-step runs
+    def start_time(self, scenario: Scenario) -> dict[str, Any]:
+        """The time scalars of step 1: the domain's ([domain.time], defaults), then the scenario's."""
+        from spel.proptest.domain import time_values
+
+        values, _ = time_values(self.inv, self.domain_spec, self.domain.constants)
+        values.update(scenario.time)
+        return values
+
+    def check_boundary(self, scenario: Scenario) -> None:
+        """Every variable other elm_drv routines write within a step (coupling.boundary) that the
+        routines read must be declared in the scenario: forcing, between or keep."""
+        if scenario.name in self._boundary_ok or scenario.steps <= 1:
+            return
+        if (self.variant.acc or "OFF").upper() != "OFF":
+            raise SpecError(f"[scenario.{scenario.name}]: multi-step runs need an ACC=OFF build for now "
+                            "(the time scalars are not updated on the device between steps)")
+        if getattr(self.base_inv, "unit_test", None) is not None:  # a synthetic inventory (tests) has none
+            from spel.proptest import coupling
+            from spel.proptest import spec as specmod
+
+            values = specmod.constants(self.spec, self.base_inv, scenario)
+            found = coupling.boundary(self.base_inv, values)
+            undeclared = {n: w for n, w in found.items()
+                          if self.inv.vars[n].kind in ("input", "inout") and not scenario.boundary_declared(n)}
+            if undeclared:
+                lines = [f"  {n}: {coupling.describe(w)}" for n, w in sorted(undeclared.items())]
+                raise SpecError(
+                    f"[scenario.{scenario.name}]: {len(undeclared)} variables the routines read are also written "
+                    "by other elm_drv routines within a step; say what stands in for them between steps in "
+                    "`forcing`, `between` or `keep` (SPEC.md, Multi-step runs):\n" + "\n".join(lines))
+        self._boundary_ok.add(scenario.name)
+
+    def step_names(self) -> list[str]:
+        """What a multi-step run fetches after every step: every output and inout live here."""
+        return list(self.live_outputs())
+
+    def run_steps(self, scenario: Scenario, ex: Example) -> StepRun:
+        """Run the example's steps (once per example: the run is kept for the checks of every step).
+        Before step 1 the state after init with the example's inputs; before every step its time
+        scalars and forcing values, after it the `between` assignments."""
+        from spel.proptest.timestep import advance
+
+        if self._run is not None and self._run.example is ex and self._run.scenario == scenario.name:
+            return self._run
+        self.check_boundary(scenario)
+        names = self.step_names()
+        # the outputs under this configuration, NaN before every step (not the manifest's, which
+        # counts every branch: an input here can be an output there and must keep its value)
+        poison = sorted(n for n, v in self.inv.vars.items() if v.kind == "output" and v.type == "real")
+        tnames = {e.lower() for e in (self.inv.time_names() or ())}
+        time = self.start_time(scenario)
+        before = self._farrays(ex.inputs)  # the state before step 1
+        self.backend.begin(self.live_inputs(ex))
+        states: list[dict[str, FArray]] = []
+        times: list[dict[str, Any]] = []
+        pending: dict[str, np.ndarray] = {}  # `between` values for the next step
+        for k in range(1, scenario.steps + 1):
+            if k > 1:
+                time = advance(time)
+            sets: dict[str, Any] = dict(pending)
+            sets.update({n: np.asarray(v) for n, v in time.items() if n in tnames})
+            self._time_now = time
+            try:
+                for name, values in ex.forcing.items():
+                    if self.inv.vars[name].kind in INPUT_KINDS:
+                        sets[name] = np.asarray(values[k - 1])
+                for name, expr in scenario.forcing_exprs:  # dormant where nothing reads the target
+                    if self.inv.vars[name].kind in INPUT_KINDS:
+                        sets[name] = self._step_assign(scenario, name, expr, before, before, k, "forcing")
+                try:
+                    state = self.backend.step(sets, names, trap=scenario.trap_fpe, poison=poison)
+                except FortranAbort as exc:
+                    raise FortranAbort(f"step {k} of {scenario.steps}: {exc}") from None
+                after = dict(before)
+                after.update({n: FArray(np.asarray(v), self.lbounds(n), n) for n, v in sets.items()
+                              if n not in tnames and n in self.domain.extents})
+                after.update({n: v for n, v in state.items() if v is not None})
+                pending = {}
+                for name, expr in scenario.between:
+                    if self.inv.vars[name].kind not in INPUT_KINDS:
+                        continue  # dormant under these options (ELM's own code is gated the same way)
+                    value = self._step_assign(scenario, name, expr, after, before, k, "between")
+                    after[name] = FArray(value, self.lbounds(name), name)
+                    pending[name] = value
+            finally:
+                self._time_now = None
+            states.append(after)
+            times.append(dict(time))
+            before = after
+        self._run = StepRun(ex, scenario.name, states, times)
+        return self._run
+
+    def _step_assign(self, scenario: Scenario, name: str, expr: Expr, arrays: dict[str, FArray],
+                     prev: dict[str, FArray], k: int, table: str) -> np.ndarray:
+        """A `forcing` or `between` expression for every element of the target's level: bare names
+        are `arrays`, `prev%x` is `prev`, `step` is k."""
+        var = self.inv.vars[name]
+        target = (np.array(arrays[name].data, copy=True) if name in arrays
+                  else np.zeros(self.shape(name), dtype=float if var.type == "real" else np.int32))
+        ev = self.evaluator(arrays, prev=prev)
+        n = self.layout.count(var.level) if var.level else None
+        local = self.locals_for(np.arange(1, n + 1), var.level) if var.level else {}
+        local[STEP_NAME] = np.int64(k)
+        local[PREV] = self._state_namespace(PREV, prev)
+        where = f"[scenario.{scenario.name}].{table}.{name} (step {k})"
+        try:
+            value = ev(expr.node, local, n)
+        except ExprError as exc:
+            raise SpecError(f"{where}: {exc}") from None
+        self._assign(name, target, value, None, ev.elemental(expr.node), where)
+        return target
+
+    def _spaces_at(self, scenario: Scenario, check: Check, ex: Example, j: int) -> dict[str, Namespace]:
+        """The check's namespaces (base%, follow%, ...) after step j."""
+        k = self._step["k"]
+        self._step["k"] = j
+        try:
+            return check.namespaces(self, scenario, ex, self.arrays(ex, self.compute(scenario, ex, [])))
+        finally:
+            self._step["k"] = k
+
+    def _history_at(self, scenario: Scenario, check: Check, ex: Example, j: int) -> tuple:
+        """(arrays, namespaces, (arrays, namespaces) before it) of step j, for acc(x)."""
+        run = self.run_steps(scenario, ex)
+        before = run.states[j - 2] if j > 1 else self._farrays(ex.inputs)
+        spaces = self._spaces_at(scenario, check, ex, j)
+        spaces[INPUT] = self._inputs_namespace(ex)
+        spaces[PREV] = self._state_namespace(PREV, before)
+        prev_spaces = self._spaces_at(scenario, check, ex, j - 1) if j > 1 else {}
+        prev_spaces[INPUT] = spaces[INPUT]
+        prev_spaces[PREV] = spaces[PREV]
+        return run.states[j - 1], spaces, (before, prev_spaces)
+
+    def _state_namespace(self, label: str, arrays: dict[str, FArray]) -> Namespace:
+        def get(path: list[str]) -> Any:
+            name = self.canonical(tuple(path))
+            if name is None or name not in arrays:
+                raise ExprError(f"{label}%{'%'.join(path)}: not available")
+            return arrays[name]
+
+        return Namespace(label, get)
 
     def check_example(self, scenario: Scenario, check: Check, draw: Callable) -> None:
         ex = check.prepare(self, scenario, self.draw_example(scenario, strat.HypothesisChooser(draw)))
@@ -629,6 +897,9 @@ class Session:
         if bad.size:
             text, node, ev, local = ctx
             msg = self.report(check, text, node, ev, local, elems, bad, ex, mask, over[0])
+            if scenario.steps > 1:
+                head, _, rest = msg.partition("\n")
+                msg = f"{head}\n  after step {verdict.step} of {scenario.steps}\n{rest}"
             self.last_failure = Failure(scenario.name, check.name, ex, msg, int(elems[bad[0]]))
             raise PropertyFailure(msg)
 
@@ -656,25 +927,61 @@ class Session:
 
     def _evaluate(self, scenario: Scenario, check: Check, ex: Example, elems: np.ndarray, mask: np.ndarray,
                   level: str) -> tuple["Verdict", Optional[tuple]]:
+        """The check after every step it judges (one step: after the call); the first failing step's verdict."""
+        if scenario.steps <= 1:
+            return self._evaluate_at(scenario, check, ex, elems, mask, level, 1)
+        out = None
+        for k in check.judged_steps(scenario.steps):
+            self._step["k"] = k
+            try:
+                out = self._evaluate_at(scenario, check, ex, elems, mask, level, k)
+            finally:
+                self._step["k"] = None
+                self._time_now = None
+            if not out[0].passed:
+                return out
+        if out is None:
+            raise SpecError(f"{check.name!r}: steps = {check.steps!r} selects no step of {scenario.steps}")
+        return out
+
+    def _evaluate_at(self, scenario: Scenario, check: Check, ex: Example, elems: np.ndarray, mask: np.ndarray,
+                     level: str, k: int) -> tuple["Verdict", Optional[tuple]]:
         from spel.proptest.results import Verdict
 
         judged = check.expr_for(self, scenario)
         text, node = judged.text, judged.node
-        outputs = self.needed([judged, *scenario.assume], (*check.names, INPUT))
+        outputs = self.needed([judged, *scenario.assume], (*check.names, INPUT, PREV))
         try:
             arrays = self.arrays(ex, self.compute(scenario, ex, outputs))
             spaces = check.namespaces(self, scenario, ex, arrays)
             spaces[INPUT] = self._inputs_namespace(ex)
+            prev_spaces: dict[str, Namespace] = {INPUT: spaces[INPUT]}
+            history = None
+            if scenario.steps > 1:
+                run = self.run_steps(scenario, ex)
+                prev = run.states[k - 2] if k > 1 else self._farrays(ex.inputs)
+                if k > 1 and any(u.path[0] in check.names for u in uses(node)):
+                    prev_spaces.update(self._spaces_at(scenario, check, ex, k - 1))
+                if any(u.applied and u.path == ("acc",) for u in uses(node)):
+                    history = [self._history_at(scenario, check, ex, j) for j in range(1, k + 1)]
+                self._step["k"] = k
+                self._time_now = run.times[k - 1]
+            else:
+                prev = self._farrays(ex.inputs)
+            spaces[PREV] = self._state_namespace(PREV, prev)
+            prev_spaces[PREV] = self._state_namespace(PREV, prev)
         except FortranAbort as exc:
-            return Verdict(check.name, level, elems, mask, None, aborted=str(exc)), None
-        ev = self.evaluator(arrays, self.context_functions(scenario, ex, level))
+            return Verdict(check.name, level, elems, mask, None, aborted=str(exc), step=k), None
+        ev = self.evaluator(arrays, self.context_functions(scenario, ex, level), prev=(prev, prev_spaces),
+                            history=history)
         local = self.locals_for(elems, level)
         local.update(spaces)
+        local[STEP_NAME] = np.int64(k)
         try:
             ok = _per_element(ev(node, local, len(elems)), elems.shape, f"{check.name!r}: {text!r}")
         except ExprError as exc:
             raise SpecError(f"{check.name!r}: {text!r}: {exc}") from None
-        return Verdict(check.name, level, elems, mask, ok), (text, node, ev, local)
+        return Verdict(check.name, level, elems, mask, ok, step=k), (text, node, ev, local)
 
     def execute(self, scenario: Scenario | str, ex: Example, outputs: str | list[str] = "all") -> "Result":
         """Run an example and keep its inputs and the state after it (results.Result). outputs:
@@ -684,6 +991,9 @@ class Session:
         scen = self.spec.scenarios[scenario] if isinstance(scenario, str) else scenario
         names = self.live_outputs() if outputs == "all" else [self.inv.canonical(tuple(n.split("%"))) or n
                                                               for n in outputs]
+        if scen.steps > 1:
+            run = self.run_steps(scen, ex)
+            return Result(self, scen, ex, self.arrays(ex, run.states[-1]), steps=run.states, times=run.times)
         state = self.compute(scen, ex, list(names))
         return Result(self, scen, ex, self.arrays(ex, state))
 
@@ -843,6 +1153,9 @@ class Session:
             "modes": {k: strat.MODES[v] for k, v in sorted(f.example.modes.items())},
             "extra": f.example.extra, "inputs": sorted(f.example.inputs), "namelist": self.options,
         }
+        if f.example.forcing:
+            np.savez(out / FORCING_FILE, **{k.replace("%", "__"): v for k, v in f.example.forcing.items()})
+            meta["forcing"] = sorted(f.example.forcing)
         if f.example.follow is not None:
             self.sibling(f.example.extra.get("namelist", {}))._write_example(out / "follow", f.example.follow)
             meta["follow_inputs"] = sorted(f.example.follow.inputs)
@@ -903,6 +1216,9 @@ class Session:
             raise SpecError(f"{directory / EXAMPLE_FILE}: {exc.strerror}") from None
         ex = Example(self._read_example(directory, meta["inputs"]), seed=int(meta.get("seed", 0)),
                      extra=dict(meta.get("extra", {})))
+        if meta.get("forcing"):
+            with np.load(directory / FORCING_FILE) as z:
+                ex.forcing = {k: np.asarray(z[k.replace("%", "__")]) for k in meta["forcing"]}
         if meta.get("follow_inputs"):
             sibling = self.sibling(ex.extra.get("namelist", {}))
             ex.follow = Example(sibling._read_example(directory / "follow", meta["follow_inputs"]), seed=ex.seed)

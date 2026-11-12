@@ -193,3 +193,26 @@ def disjoint_pairs(rows) -> set[tuple[str, str]]:
             out.add((r["filter_a"], r["filter_b"]))
             out.add((r["filter_b"], r["filter_a"]))
     return out
+
+
+def filter_members(filt: str) -> str:
+    """`filter%lakec|filter_inactive_and_active%lakec` -> 'lakec'; '' (any element) -> '*'; several -> joined."""
+    if not filt:
+        return "*"
+    members = sorted({f.rsplit("%", 1)[-1] for f in filt.split("|")})
+    return "|".join(members)
+
+
+def filters_overlap(wkeys: set[str], rkeys: set[str], disjoint: set[tuple[str, str]]) -> bool:
+    """
+    Whether some write and some read may touch the same element: only known
+    filters that are all pairwise disjoint rule it out ('*' = any element, and a
+    multi-filter key counts as overlapping unless each of its members is disjoint).
+    """
+    for w in wkeys:
+        for r in rkeys:
+            if w == "*" or r == "*":
+                return True
+            if any((a, b) not in disjoint for a in w.split("|") for b in r.split("|")):
+                return True
+    return False

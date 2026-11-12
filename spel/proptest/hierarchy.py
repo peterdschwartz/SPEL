@@ -614,10 +614,11 @@ class Layout:
 
     def downhill(self) -> np.ndarray:
         """top_pp%downhill_ti (Fortran topounit indices, -1: none) as set_topounit computes it
-        under use_IM2_hillslope_hydrology from the topounits' elevations, ispval where a gridcell
-        has one topounit. ELM's loop keeps `dn_index` from the previous topounit when a topounit
-        has no lower neighbour; so does this (bit-for-bit with ELM, quirk included)."""
-        out = np.full(self.count("t"), ISPVAL, dtype=np.int64)
+        under use_IM2_hillslope_hydrology from the topounits' elevations; -1 where a gridcell has
+        one topounit (initSubgridMod's add_topounit sets -1 for every topounit, set_topounit only
+        overwrites it for several). ELM's loop keeps `dn_index` from the previous topounit when a
+        topounit has no lower neighbour; so does this (bit-for-bit with ELM, quirk included)."""
+        out = np.full(self.count("t"), -1, dtype=np.int64)
         for g in range(self.count("g")):
             ts = list(range(self._first["g"][g], self._last["g"][g] + 1))
             if len(ts) < 2:

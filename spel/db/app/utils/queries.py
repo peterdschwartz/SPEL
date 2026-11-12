@@ -14,6 +14,8 @@ from typing import Iterable, Optional
 from django.core.cache import cache
 from django.db.models import Q
 
+from spel.scripts.db_export.filters import filter_members, filters_overlap  # noqa: F401
+
 from ..models import (
     FieldState,
     UserTypes,
@@ -296,14 +298,6 @@ def dependency_graph(
     return {"root": root_node, "nodes": kids, "edges": out_edges, "excluded": only_excluded}
 
 
-def filter_members(filt: str) -> str:
-    """`filter%lakec|filter_inactive_and_active%lakec` -> 'lakec'; '' (any element) -> '*'; several -> joined."""
-    if not filt:
-        return "*"
-    members = sorted({f.rsplit("%", 1)[-1] for f in filt.split("|")})
-    return "|".join(members)
-
-
 def disjoint_filters(snapshot_id: int) -> set[tuple[str, str]]:
     """Unordered pairs of filter members that cannot share an element (FilterRelation, both orders)."""
     key = f"disjoint:{snapshot_id}"
@@ -315,21 +309,6 @@ def disjoint_filters(snapshot_id: int) -> set[tuple[str, str]]:
             out.add((b, a))
         cache.set(key, out, CACHE_SECONDS)
     return out
-
-
-def filters_overlap(wkeys: set[str], rkeys: set[str], disjoint: set[tuple[str, str]]) -> bool:
-    """
-    Whether some write and some read may touch the same element: only known
-    filters that are all pairwise disjoint rule it out ('*' = any element, and a
-    multi-filter key counts as overlapping unless each of its members is disjoint).
-    """
-    for w in wkeys:
-        for r in rkeys:
-            if w == "*" or r == "*":
-                return True
-            if any((a, b) not in disjoint for a in w.split("|") for b in r.split("|")):
-                return True
-    return False
 
 
 def fuzzy_score(needle: str, text: str) -> Optional[int]:

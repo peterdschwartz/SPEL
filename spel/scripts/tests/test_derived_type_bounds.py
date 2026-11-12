@@ -128,3 +128,43 @@ end subroutine cropphenologyinit
     assert mod.global_vars["inhemi"].alloc_bounds == "bounds%begp:bounds%endp"
     assert mod.global_vars["inhemi"].bounds == "(:)"  # still deferred-shape: allocated at read time
     assert not hasattr(mod.global_vars["work"], "alloc_bounds")  # a local of the same name is not the module's
+
+
+def test_module_array_allocated_in_another_module():
+    """elm_varsur's `f_surf(:,:)`, allocated in elm_initializeMod: gridcell-sized, so subsets cut it."""
+    from spel.scripts.allocations import resolve_module_arrays
+
+    varsur, _ = module("elm_varsur", {}, gvars=[("f_surf", "real"), ("wt_lunit", "real")])
+    init, sd = module("elm_initializemod", {
+        "initialize1": """
+subroutine initialize1()
+  integer :: begg, endg
+  allocate (f_surf  (begg:endg,1:max_topounits  ))
+  allocate (wt_lunit(begg:endg))
+end subroutine initialize1
+"""})
+    other, _ = module("othermod", {}, gvars=[("wt_lunit", "real")])
+    for m in (varsur, other):
+        for v in m.global_vars.values():
+            v.dim, v.bounds = 2, "(:,:)"
+    varsur.global_vars["wt_lunit"].dim = 1
+    other.global_vars["wt_lunit"].dim = 1
+    init.allocations = scan_module(init, sd, {})[0]
+    mods = {"elm_varsur": varsur, "elm_initializemod": init, "othermod": other}
+    assert resolve_module_arrays(mods) == [("elm_varsur", "f_surf", "begg:endg,1:max_topounits")]
+    assert varsur.global_vars["f_surf"].alloc_bounds == "begg:endg,1:max_topounits"
+    # declared in two modules the allocating one doesn't use: left alone
+    assert not hasattr(varsur.global_vars["wt_lunit"], "alloc_bounds")
+    init.modules = {"elm_varsur": None}
+    resolve_module_arrays(mods)
+    assert varsur.global_vars["wt_lunit"].alloc_bounds == "begg:endg"
+    assert not hasattr(other.global_vars["wt_lunit"], "alloc_bounds")
+
+
+def test_domain_bounds_are_gridcells():
+    """domainMod allocates ldomain arrays as x(nb:ne), nb/ne = begg/endg of every caller."""
+    from spel.scripts.io.helper import get_subgrid
+
+    assert get_subgrid("nb:ne") == get_subgrid(" nb : ne ") == "gridcell"
+    assert get_subgrid("bounds%begg:bounds%endg") == "gridcell"
+    assert get_subgrid("1:nv") == "_1_nv"

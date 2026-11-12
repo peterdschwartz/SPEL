@@ -1574,6 +1574,9 @@ def process_for_unit_test(
     all_types = {name: dtype for m in mod_dict.values() for name, dtype in m.defined_types.items()}
     for fort_mod in mod_dict.values():
         fort_mod.find_allocations(sub_dict, all_types)
+    from spel.scripts.allocations import resolve_module_arrays
+
+    resolve_module_arrays(mod_dict)
 
     return ordered_mods
 

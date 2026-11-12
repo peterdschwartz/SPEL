@@ -95,6 +95,18 @@ class Case:
     def trap(self, on: bool) -> None:
         self.lib.spel_py_trap(1 if on else 0)
 
+    def poison(self, names=None) -> None:
+        """Real outputs set to NaN (before each step of a multi-step run: an output a step reads
+        before writing shows up as NaN, as with one call). names: the outputs of the run's namelist
+        configuration (the manifest's kinds count every branch: an input under these options may
+        be an output there); default: the manifest's outputs."""
+        for name in (self._initial if names is None else names):
+            e = self.entries.get(name)
+            if e is None or name not in self._initial:
+                continue
+            if (names is not None or e["kind"] == "output") and e["type"] == "real":
+                self.view(name).data[...] = np.nan
+
     def reset(self, poison_outputs: bool = True) -> None:
         """Every variable back to its state after init; written-only real outputs set to NaN."""
         for name, data in self._initial.items():

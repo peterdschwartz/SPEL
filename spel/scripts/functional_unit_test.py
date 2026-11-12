@@ -1299,6 +1299,10 @@ def generate_cmake(files: list[str], case_dir: Path):
 
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(NetCDFF REQUIRED netcdf-fortran)
+    # pkg-config drops -I of directories on CPATH (spack modules set it), but
+    # Fortran compilers look for netcdf.mod only in -I directories
+    pkg_get_variable(NetCDFF_FMODDIR netcdf-fortran fmoddir)
+    pkg_get_variable(NetCDFF_INCDIR netcdf-fortran includedir)
 
     file(GLOB SOURCES "*.F90")
     if (SPEL_PYLIB)
@@ -1309,7 +1313,7 @@ def generate_cmake(files: list[str], case_dir: Path):
         list(REMOVE_ITEM SOURCES "${{CMAKE_CURRENT_SOURCE_DIR}}/SpelPyMod.F90")
         add_executable({exe_name} ${{SOURCES}})
     endif()
-    include_directories(${{NetCDFF_INCLUDE_DIRS}})
+    include_directories(${{NetCDFF_INCLUDE_DIRS}} ${{NetCDFF_FMODDIR}} ${{NetCDFF_INCDIR}})
     target_link_directories({exe_name} PRIVATE ${{NetCDFF_LIBRARY_DIRS}})
     target_link_libraries({exe_name} PRIVATE ${{NetCDFF_LIBRARIES}})
 

@@ -62,7 +62,11 @@ CPU crop-performance runs, which moved here from Perlmutter. Recorded on 2026-10
   entry; written from `config_machines.xml`, not yet run there: check with `spel machine check` and fix the
   machine file if `pkg-config netcdf-fortran` is not found). The older manual route is
   `source ~/spel-intel-env.sh` (the ELM case's `.env_mach_specific.sh`, `SPEL_FC=ifx`), also usable as
-  `spel validate --test-env` or as the toolchain's `env_file`. There is no gfortran netcdf build here.
+  `spel validate --test-env` or as the toolchain's `env_file`. The `gfortran` toolchain (E3SM's
+  chrysalis_gnu modules: gcc 11.2, netcdf-fortran 4.5.3) works for the Fortran round-trip tests
+  (`test_subset.py`, 2026-11-11): `SPEL_E3SM_SRCROOT=~/integration/E3SM spel machine env --fc gfortran
+  > env.sh; source env.sh` (the default srcroot `../dev_E3SM` doesn't exist here). Its pkg-config
+  omits `-I` (the directory is on `CPATH`); tests add `fmoddir` themselves.
 - E3SM checkouts: `~/integration/E3SM` (upstream bishtgautam/lnd/add-t-meshes-v3 @ e5aa4e3094,
   the baseline) and its worktree `~/E3SM-gpu-refactor` (peterdschwartz/lnd/gpu-refactor-nutrient-types,
   which contains the crop-perf branch). Only these two are compared.
@@ -529,9 +533,19 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   `init` takes the landunit kinds from the routine's filter arguments
   (`scaffold.routine_landunits`, `domain.FILTER_KINDS`/`FILTER_COMPLEMENTS`); `stats --landunits`
   restricts the statistics. Kinds and urban densities are enums (`LandunitKind`, `UrbanDensity`).
-- Not done: multi-step runs (the time scalars would have to advance), glacier/wetland landunits,
+- Not done: glacier/wetland landunits,
   ELM's activity special cases (`all_active`, zero-weight urban), type-bound routines in the shim. No local case has
   `driver_args`, so that path is tested only on a synthetic inventory.
+- Multi-step runs (SPEC.md "Multi-step runs"): worker ops `begin`/`step` (no reset between steps;
+  `run` = one call, unchanged), `Session.run_steps` (cached per example; `compute` returns the
+  state of the step being judged, `_step` is shared with siblings and `other`, so relations and
+  differentials compare the same step), `timestep.advance` (ELM's no-leap calendar). The boundary
+  (`coupling.py`: elm_drv's StaticTrace over the full analysis, writers of case variables outside
+  the case's subtrees, gates and filters as `inventory.trace_accesses`/`db_export.filters`) must be
+  declared per scenario (`forcing`/`between`/`keep`). Design choice (2026-11-11, with the user):
+  proptest tests a process; what the rest of the step does is stated in the spec, not pulled in as
+  more routines (that closes over elm_drv and becomes an end-to-end test). The shim calls the case's
+  filter builders before the routines, as main.F90 does, so dynamic filters follow the state.
 - Tutorial: `spel/proptest/examples/canopyfluxes_tutorial.ipynb` (executed, with outputs). Change it through
   its narrative and re-execute it (`nbclient`) after API changes; its text quotes actual results.
 - Tests (`spel/proptest/tests/`): `test_proptest.py` (snippets; the CanopyFluxes end-to-end test is
@@ -585,8 +599,15 @@ Design (keep these properties when changing it):
   subsets and `nsets` copies point at the wrong entries. A variable whose subgrid extent isn't the
   process's stops the run (`nc_subset_n`).
 - Without `--subset` the capture module is byte-identical to before; keep it that way.
-- MPI: the rank with the most matches writes, the others write nothing. Merging ranks into one
-  subset is not implemented.
+- MPI: every rank with matches writes its share of `--subset-max` (proportional to its matches,
+  at least one; one clump per rank) to `<tag>.rankNNNNN.spel-*.nc`, and the master rank lists the
+  writing ranks in `<tag>.spel-subset-ranks.txt`. `subset.merge_rank_files` (run by `spel validate`,
+  `spel instrument --run-case`, and `spel merge-subset RUNDIR CASE`) reads exactly the listed ranks,
+  orders gridcells by global index, cuts to the max evenly, concatenates every subgrid dimension and
+  renumbers the index fields per rank. Variables without a subgrid dimension must be bit-identical
+  across ranks (else it refuses; `--allow-differ NAME` keeps the lowest writing rank's). `spel_subset_rank` records
+  each gridcell's rank. Tested in `test_subset.py` (merge of a partition = the whole capture; the
+  generated `spel_select_subset` compiled against stub ELM modules).
 - Provenance: global attributes `spel_subset_mask/gindex/latdeg/londeg` in every file, `subset` in
   `spel_reference.json` (printed by `spel run`), and `SPEL subset` lines in the run's `e3sm.log`.
 

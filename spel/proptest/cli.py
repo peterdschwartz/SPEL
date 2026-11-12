@@ -523,6 +523,8 @@ def _show(args) -> None:
         missing = spec.missing_rules(sc, live, consts)
         if missing:
             print("  inputs without a rule: " + ", ".join(missing))
+        if sc.steps > 1:
+            _show_steps(sc, inv, live, consts)
     consts = spec.constants(sp, inv)
     defaulted = time_values(inv, sp.domain, consts)[1]
     if defaulted:
@@ -538,6 +540,31 @@ def _show(args) -> None:
     for c in sp.checks:
         extra = f" [namelist {c.namelist}]" if getattr(c, "namelist", None) else ""
         print(f"{c.table} {c.name!r}{extra}: {c.judged.text}")
+
+
+def _show_steps(sc, inv, live, consts) -> None:
+    """A multi-step scenario: its step tables and the boundary variables (coupling.boundary) with
+    their writers and how the scenario declares them."""
+    from spel.proptest import coupling
+    from spel.proptest.errors import ProptestError
+
+    print(f"  {sc.steps} steps; forcing: {len(sc.forcing) + len(sc.forcing_exprs)}, between: {len(sc.between)}, "
+          f"keep: {', '.join(sc.keep) or '-'}" + (f"; time: {sc.time}" if sc.time else ""))
+    try:
+        found = coupling.boundary(inv, consts)
+    except ProptestError as exc:
+        print(f"  boundary variables: unknown ({exc})")
+        return
+    rows = [(n, w) for n, w in sorted(found.items()) if live.vars[n].kind in ("input", "inout")]
+    if not rows:
+        print("  boundary variables: none (no other elm_drv routine writes what the routines read)")
+        return
+    print(f"  boundary variables (read by the routines, written by other elm_drv routines within a step): {len(rows)}")
+    for n, w in rows:
+        how = ("forcing" if n in sc.forcing or any(v == n for v, _ in sc.forcing_exprs)
+               else "between" if any(v == n for v, _ in sc.between)
+               else "keep" if sc.boundary_declared(n) else "UNDECLARED")
+        print(f"    {how:10s} {n} ({live.vars[n].kind}): {coupling.describe(w, 2)}")
 
 
 def _options(sp, inv, scenario, consts, reference) -> str:

@@ -152,3 +152,26 @@ def test_sample_execute_frame_and_verdict(tmp_path):
         assert not bad.passed and len(bad.failing) == int((df["b%y"] >= 0.5).sum())
         g = res.frame("g", aggregate={"b%y": "sum"})
         assert np.allclose(g["sum(b%y)"], df["b%y"].to_numpy())  # one patch per gridcell here
+
+
+def test_multi_step_scenario_round_trips_and_runs(tmp_path):
+    spec, inv = _spec(tmp_path)
+    spec.scenario("season", inputs={"x": pt.Range(0.0, 1.0), "prof": pt.Range(0.0, 2.0),
+                                    "a%state": pt.Range(-1.0, 1.0)},
+                  steps=3, forcing={"a%x": pt.Range(0.0, 1.0), "prof": "0.5 * step"},
+                  between={"a%state": "0.5 * state(p)"}, keep=["b%*"])
+    spec.property("halved", "close(state(p), 0.5 * (prev%state(p) + 1.0))", steps="all")
+    spec.property("last only", "close(tend(state(p)), 0.5 * (1.0 - prev%state(p)))", steps="last")
+    text = spec.to_toml(tmp_path / "t.proptest.toml")
+    data = tomllib.loads(text)
+    assert data["scenario"]["season"]["steps"] == 3 and data["scenario"]["season"]["keep"] == ["b%*"]
+    assert data["scenario"]["season"]["forcing"]["a%prof"] == "0.5 * step"
+    assert data["property"][1]["steps"] == "last"
+    again = pt.Spec.from_toml(tmp_path / "t.proptest.toml", inv=inv)
+    assert tomllib.loads(again.to_toml()) == data
+    parsed = again.validate()
+    assert parsed.scenarios["season"].steps == 3 and [c.steps for c in parsed.checks] == ["all", "last"]
+    with runner.Session(parsed, inv, backend=fake.FakeBackend()) as s:
+        res = runner.run(parsed, inv, scenarios=["season"], settings={"seed": 0, "max_examples": 5}, session=s,
+                         out=__import__("io").StringIO())
+    assert all(o.passed for o in res), [o.message for o in res]

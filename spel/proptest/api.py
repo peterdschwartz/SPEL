@@ -458,7 +458,14 @@ class Scenario:
 
     def __init__(self, spec: "Spec", name: str, over: str = "p", extends: Sequence[str | Path] = (),
                  inputs: Optional[dict[str, Rule | Any]] = None, derive: Optional[dict[str, str]] = None,
-                 assume: Sequence[str] = (), namelist: Optional[dict[str, Any]] = None, trap_fpe: bool = False):
+                 assume: Sequence[str] = (), namelist: Optional[dict[str, Any]] = None, trap_fpe: bool = False,
+                 steps: int = 1, time: Optional[dict[str, Any]] = None,
+                 forcing: Optional[dict[str, Rule | Any | str]] = None, between: Optional[dict[str, str]] = None,
+                 keep: Sequence[str] = ()):
+        """Multi-step runs (SPEC.md "Multi-step runs"): `steps` calls per example; `time` of step 1;
+        `forcing`: a rule (drawn for every step) or an expression (str) per boundary input;
+        `between`: expressions applied after every step; `keep`: boundary variables left to the
+        process (fnmatch patterns)."""
         self.spec = spec
         self.name = name
         self.over = over
@@ -468,6 +475,11 @@ class Scenario:
         self.assume_: list[str] = []
         self.namelist = dict(namelist or {})
         self.trap_fpe = trap_fpe
+        self.steps = steps
+        self.time = dict(time or {})
+        self.forcing: dict[str, Rule | Any | str] = {spec.case.canonical(k): v for k, v in (forcing or {}).items()}
+        self.between: dict[str, str] = {spec.case.canonical(k): v for k, v in (between or {}).items()}
+        self.keep = list(keep)
         for k, r in (inputs or {}).items():
             self.inputs[spec.case.canonical(k)] = r
         for k, e in (derive or {}).items():
@@ -505,6 +517,16 @@ class Scenario:
             out["inputs"] = {k: _rule_table(r) for k, r in self.inputs.items()}
         if self.derive_:
             out["derive"] = dict(self.derive_)
+        if self.steps != 1:
+            out["steps"] = self.steps
+        if self.time:
+            out["time"] = dict(self.time)
+        if self.forcing:
+            out["forcing"] = {k: (v if isinstance(v, str) else _rule_table(v)) for k, v in self.forcing.items()}
+        if self.between:
+            out["between"] = dict(self.between)
+        if self.keep:
+            out["keep"] = list(self.keep)
         return out
 
     def check(self) -> sp.Scenario:
@@ -548,22 +570,26 @@ class Spec:
     def scenario(self, name: str, *, over: str = "p", extends: Sequence[str | Path] | str | Path = (),
                  inputs: Optional[dict[str, Rule | Any]] = None, derive: Optional[dict[str, str]] = None,
                  assume: Sequence[str] = (), namelist: Optional[dict[str, Any]] = None,
-                 trap_fpe: bool = False, comment: str = "") -> Scenario:
+                 trap_fpe: bool = False, comment: str = "", steps: int = 1, time: Optional[dict[str, Any]] = None,
+                 forcing: Optional[dict[str, Rule | Any | str]] = None, between: Optional[dict[str, str]] = None,
+                 keep: Sequence[str] = ()) -> Scenario:
         if name in self.scenarios:
             raise SpecError(f"scenario {name!r} exists")
-        s = Scenario(self, name, over, extends, inputs, derive, assume, namelist, trap_fpe)
+        s = Scenario(self, name, over, extends, inputs, derive, assume, namelist, trap_fpe, steps, time, forcing,
+                     between, keep)
         self.scenarios[name] = s
         if comment:
             self.comments[("scenario", name)] = comment
         return s
 
     def property(self, name: str, expr: str, *, scenarios: Sequence[str | Scenario] = ("*",),
-                 over: Optional[str] = None, comment: str = "") -> None:
-        self._check("property", {"name": name, "expr": expr}, scenarios, over, comment)
+                 over: Optional[str] = None, comment: str = "", steps: Any = "all") -> None:
+        """steps (multi-step scenarios): "all", "last", a step, or [first, last]."""
+        self._check("property", {"name": name, "expr": expr}, scenarios, over, comment, steps)
 
     def relation(self, name: str, expect: str, *, follow: Optional[dict[str, str]] = None, permute: bool = False,
                  namelist: Optional[dict[str, Any]] = None, scenarios: Sequence[str | Scenario] = ("*",),
-                 over: Optional[str] = None, comment: str = "") -> None:
+                 over: Optional[str] = None, comment: str = "", steps: Any = "all") -> None:
         t: dict[str, Any] = {"name": name}
         if follow:
             t["follow"] = {self.case.canonical(k): v for k, v in follow.items()}
@@ -572,12 +598,12 @@ class Spec:
             t["permute"] = True
         if namelist:
             t["namelist"] = dict(namelist)
-        self._check("relation", t, scenarios, over, comment)
+        self._check("relation", t, scenarios, over, comment, steps)
 
     def differential(self, name: str, *, outputs: str | Sequence[str] = "all", rtol: Optional[float] = None,
                      atol: Optional[float] = None, expect: Optional[str] = None,
                      scenarios: Sequence[str | Scenario] = ("*",), over: Optional[str] = None,
-                     comment: str = "") -> None:
+                     comment: str = "", steps: Any = "all") -> None:
         """Needs `compare` on the Spec (another case or build)."""
         t: dict[str, Any] = {"name": name}
         if expect is not None:
@@ -585,10 +611,13 @@ class Spec:
         else:
             t["outputs"] = outputs if isinstance(outputs, str) else [self.case.canonical(o) for o in outputs]
             t.update({k: v for k, v in (("rtol", rtol), ("atol", atol)) if v is not None})
-        self._check("differential", t, scenarios, over, comment)
+        self._check("differential", t, scenarios, over, comment, steps)
 
-    def _check(self, key: str, t: dict, scenarios: Sequence[str | Scenario], over: Optional[str], comment: str):
+    def _check(self, key: str, t: dict, scenarios: Sequence[str | Scenario], over: Optional[str], comment: str,
+               steps: Any = "all"):
         t = dict(t)
+        if steps != "all":
+            t["steps"] = list(steps) if isinstance(steps, tuple) else steps
         names = [str(s) for s in scenarios]
         if names != ["*"]:
             t["scenarios"] = names
@@ -669,20 +698,26 @@ class Spec:
             out.scenario(name, over=t.get("over", "p"), extends=[_absolute(e, path.parent) for e in ext],
                          inputs={k: Rule.from_table(v) for k, v in t.get("inputs", {}).items()},
                          derive=t.get("derive", {}), assume=[assume] if isinstance(assume, str) else assume,
-                         namelist=t.get("namelist"), trap_fpe=t.get("trap_fpe", False))
+                         namelist=t.get("namelist"), trap_fpe=t.get("trap_fpe", False),
+                         steps=t.get("steps", 1), time=t.get("time"),
+                         forcing={k: (v if isinstance(v, str) else Rule.from_table(v))
+                                  for k, v in t.get("forcing", {}).items()},
+                         between=t.get("between"), keep=t.get("keep", []))
         for key in chk.KINDS:
             for t in data.get(key, []):
                 t = dict(t)
                 scen = t.pop("scenarios", ["*"])
                 over = t.pop("over", None)
+                steps = t.pop("steps", "all")
                 if key == "property":
-                    out.property(t["name"], t["expr"], scenarios=scen, over=over)
+                    out.property(t["name"], t["expr"], scenarios=scen, over=over, steps=steps)
                 elif key == "relation":
                     out.relation(t["name"], t["expect"], follow=t.get("follow"), permute=t.get("permute", False),
-                                 namelist=t.get("namelist"), scenarios=scen, over=over)
+                                 namelist=t.get("namelist"), scenarios=scen, over=over, steps=steps)
                 else:
                     out.differential(t["name"], outputs=t.get("outputs", "all"), rtol=t.get("rtol"),
-                                     atol=t.get("atol"), expect=t.get("expect"), scenarios=scen, over=over)
+                                     atol=t.get("atol"), expect=t.get("expect"), scenarios=scen, over=over,
+                                     steps=steps)
         return out
 
 

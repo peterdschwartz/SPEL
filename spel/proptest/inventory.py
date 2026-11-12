@@ -59,6 +59,10 @@ TOPOLOGY_REALS = {
     "wtgcell", "wtlunit", "wtcol", "wttopounit", "wt_ed", "wtgcell_save",
 }
 
+# integer fields of the subgrid types that are physical data, not structure: ruled inputs
+# (col_pp%nlevbed, the depth to bedrock as a layer index, comes from the surface data)
+PHYSICAL_INTEGERS = {"nlevbed"}
+
 KINDS = ("topology", "parameter", "input", "inout", "output", "unused")
 UNITS_FILE = "units.json"
 
@@ -488,7 +492,8 @@ def classify(info: VarInfo, type_name: str, physical_types: set[str]) -> str:
     """topology | parameter | input | inout | output | unused (see module doc)."""
     if info.status is None:
         return "unused"
-    if type_name in physical_types and (info.type in ("integer", "logical") or info.field in TOPOLOGY_REALS):
+    if type_name in physical_types and (info.type in ("integer", "logical") or info.field in TOPOLOGY_REALS) \
+            and info.field not in PHYSICAL_INTEGERS:
         return "topology"
     if info.level is None:
         return "parameter" if "r" in info.status or info.status != "w" else "output"

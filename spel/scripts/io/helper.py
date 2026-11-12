@@ -27,10 +27,19 @@ def sanitize_netcdf_name(name: str):
 SUBGRID_DIMS = ("patch", "column", "landunit", "topo", "gridcell")  # get_subgrid names
 
 
+# Allocation bounds that are a subgrid range under other names. domainMod's
+# domain_init allocates every ldomain array as x(nb:ne), with nb/ne = its
+# nbeg/nend arguments, which every caller passes as begg/endg (surfrdMod).
+SUBGRID_ALIASES = {"nb:ne": "gridcell"}
+
+
 def get_subgrid(dim_str: str) -> str:
     """
     Function to return generic name for subgrid names
     """
+    alias = SUBGRID_ALIASES.get(re.sub(r"\s+", "", dim_str).lower())
+    if alias:
+        return alias
     subgrids = re.findall(r"(?<=beg|end)(g|c|p|t|l)", dim_str)
     if not subgrids:
         # dim_str = re.search(r"(\w+)(?::\w+)?", dim_str).group()

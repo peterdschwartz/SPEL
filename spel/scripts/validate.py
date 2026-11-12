@@ -35,7 +35,7 @@ from spel.scripts.instrument_elm import (
     CaptureNames,
     CaseRunError,
     InstrumentError,
-    collect_outputs,
+    collect_case_outputs,
     instrument_cases,
     load_case,
     resubmit_case,
@@ -266,6 +266,7 @@ def validate(
     dry_run: bool = False,
     subsets: Optional[dict[str, SubsetSpec]] = None,
     test_env: Optional[str] = None,
+    allow_differ: tuple[str, ...] = (),
 ) -> ValidateReport:
     from spel.scripts.analysis_cache import ANALYSIS_PICKLE, build_analysis, cache_dir
     from spel.scripts.config import (
@@ -355,7 +356,11 @@ def validate(
             dest = Path(input_data_dir) / case
             for old in dest.glob("spel-*.nc"):
                 old.unlink()
-            copied = collect_outputs(rundir, dest, CaptureNames(rep.tag).file_prefix)
+            try:
+                copied = collect_case_outputs(rundir, dest, CaptureNames(rep.tag).file_prefix, allow_differ)
+            except InstrumentError as err:
+                report.cases[case].status, report.cases[case].detail = CASE_RUN_FAILED, str(err)
+                continue
             if copied:
                 write_reference_meta(dest, case, subsets.get(case))
             r = report.cases[case]

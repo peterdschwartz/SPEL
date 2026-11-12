@@ -1,0 +1,6 @@
+# IM2 hillslope hydrology (HILLSLOPE_IM2.md, Phase 2): topounit_im2 testmod, r05_r05 IELM
+# H1 self-loops (the outlet topounit points at itself)
+hs_bug[topounit: top_pp%downhill_ti(t) == t]: hydrologydrainage
+hs_bug_nodrain[topounit: top_pp%downhill_ti(t) == t]: hydrologynodrainage
+# control: gridcells with 3+ topounits (lowest first)
+hs_ok[gridcell: grc_pp%ntopounits(g) > 2; max=20]: hydrologydrainage

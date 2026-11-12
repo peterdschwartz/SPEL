@@ -339,6 +339,18 @@ ARITHMETIC = {
 }
 
 
+def _unavailable(name: str, when: str) -> "Namespace":
+    def get(path):
+        raise ExprError(f"{name}%{'%'.join(path)} {when} is not available")
+
+    return Namespace(name, get)
+
+
+# child_<how>(x, level): the reductions of results._aggregate
+CHILD_AGGREGATES = {"child_sum": "sum", "child_wsum": "wsum", "child_mean": "mean", "child_min": "min",
+                    "child_max": "max"}
+
+
 class Evaluator:
     """
     resolve(path) -> value of a designator that is not a local (FArray, Namespace, scalar or
@@ -351,9 +363,21 @@ class Evaluator:
         self,
         resolve: Callable[[list[str]], Any],
         functions: Optional[dict[str, Callable]] = None,
+        prev: Any = None,
+        aggregate: Optional[Callable[[str, "FArray", str], np.ndarray]] = None,
+        history: Optional[list] = None,
     ):
+        """prev: the state before the step, for `tend(x)`: a resolve() or (resolve, namespaces);
+        history: the states after steps 1..k as (resolve, namespaces), for `acc(x)`;
+        aggregate(how, x, level): a finer-level array reduced over each element of `level` (one
+        value per element of the level, 0-based), for the `child_*` functions. A namespace the
+        current evaluation has and an environment lacks (`follow%` before step 1) is unavailable
+        there."""
         self.resolve = resolve
         self.functions = functions or {}
+        self.prev = prev if prev is None or isinstance(prev, tuple) else (prev, {})
+        self.aggregate = aggregate
+        self.history = history
 
     def __call__(
         self,
@@ -492,6 +516,12 @@ class Evaluator:
             raise ExprError(f"unsupported call/subscript {node}")
         target = None
         name = path[0] if len(path) == 1 else ""
+        if name == "tend" and name not in self.local and name not in self.functions:
+            return self.tendency(node)
+        if name == "acc" and name not in self.local and name not in self.functions:
+            return self.accumulate(node)
+        if name in CHILD_AGGREGATES and name not in self.local and name not in self.functions:
+            return self.child(name, node)
         if (
             not (
                 name
@@ -534,6 +564,71 @@ class Evaluator:
                 per_elem=first is not None and self.elemental(first),
                 **kwargs,
             )
+
+    def tendency(self, node: FuncExpression) -> Any:
+        """`tend(x)`: x after the step minus x before it (the expression evaluated again with every
+        bare name resolved in the state before the step; element variables and namespaces as they
+        are)."""
+        if len(node.args) != 1 or keyword_of(node.args[0]) is not None:
+            raise ExprError("tend takes one expression: tend(x)")
+        if self.prev is None:
+            raise ExprError("tend: the state before the step is not available here")
+        after = self.value(node.args[0])
+        before = self.within(self.prev, node.args[0], "before the step")
+        with np.errstate(all="ignore"):
+            return np.subtract(after, before)
+
+    def accumulate(self, node: FuncExpression) -> Any:
+        """`acc(x)`: x summed over the steps so far (1..k: x after each step, each in its own state);
+        one call: x."""
+        if len(node.args) != 1 or keyword_of(node.args[0]) is not None:
+            raise ExprError("acc takes one expression: acc(x)")
+        if not self.history:
+            return self.value(node.args[0])
+        total = None
+        with np.errstate(all="ignore"):
+            for k, env in enumerate(self.history, 1):
+                v = self.within(env, node.args[0], f"after step {k}")
+                total = v if total is None else np.add(total, v)
+        return total
+
+    def within(self, env: tuple, node: Expression, when: str) -> Any:
+        """node evaluated in another state: env = (resolve, namespaces). Namespaces of the current
+        evaluation that env lacks are unavailable there (not silently the current ones)."""
+        resolve, spaces = env[0], env[1]
+        saved_resolve, saved, saved_prev = self.resolve, dict(self.local), self.prev
+        self.resolve = resolve
+        if len(env) > 2:  # (resolve, namespaces, prev): that state's own state before its step
+            self.prev = env[2]
+        for name, v in saved.items():
+            if isinstance(v, Namespace):
+                self.local[name] = spaces[name] if name in spaces else _unavailable(name, when)
+        try:
+            return self.value(node)
+        finally:
+            self.resolve, self.local, self.prev = saved_resolve, saved, saved_prev
+
+    def child(self, name: str, node: FuncExpression) -> Any:
+        """`child_sum(x, 't')` (and wsum, mean, min, max): the variable x of a finer level reduced
+        over the descendants of each element of level 't', for the current elements of that level
+        (its element variable must be bound: the check runs over that level or a finer one)."""
+        if self.aggregate is None:
+            raise ExprError(f"{name}: not available here")
+        if len(node.args) != 2:
+            raise ExprError(f"{name} takes a variable and a level: {name}(x, 't')")
+        x = self.eval(node.args[0])
+        level = self.eval(node.args[1])
+        if not isinstance(x, FArray):
+            raise ExprError(f"{name}: the first argument is a whole variable (unsubscripted), e.g. "
+                            f"{name}(col_wf%qflx_surf, 't')")
+        if not isinstance(level, str) or level not in ("g", "t", "l", "c"):
+            raise ExprError(f"{name}: the level is one of 'g', 't', 'l', 'c' (got {level!r})")
+        full = np.asarray(self.aggregate(CHILD_AGGREGATES[name], x, level))
+        elems = self.local.get(level)
+        if not isinstance(elems, np.ndarray):
+            raise ExprError(f"{name}(..., {level!r}): no element variable {level} here (run the check "
+                            f"over {level!r} or a finer level)")
+        return full[np.asarray(elems, dtype=np.int64) - 1]
 
     def _plain(self, name: str, v: Any) -> Any:
         if isinstance(v, (FArray, Namespace)):

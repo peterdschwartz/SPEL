@@ -301,6 +301,7 @@ All commands are subcommands of `spel`. Run `spel <command> --help` for the auth
 | [`spel instrument`](#spel-instrument) | Instrument ELM to capture reference data; optionally build/run a CIME case |
 | [`spel validate`](#spel-validate) | Create, capture (one ELM run) and validate many unit tests in parallel |
 | [`spel subset`](#gridcell-subsets) | Write some gridcells of a case's reference data as a new case's |
+| [`spel merge-subset`](#gridcell-subsets) | Merge the per-rank files of a subset capture into a case's reference data |
 | [`spel run`](#spel-run) | Configure, build, and run a generated unit test, then validate it against ELM's data |
 | [`spel profile`](#spel-profile) | Build and run a unit test without outputs under Nsight Systems/Compute |
 | [`spel proptest`](#spel-proptest) | Property-based, metamorphic and differential tests of a unit-test case (Hypothesis scenarios, Fortran-syntax checks in TOML) |
@@ -502,10 +503,20 @@ spel validate -s canopyfluxes --subset "gridcell: grc_pp%latdeg(g) > 60._r8" --s
 
 The selection runs in ELM at the first capture (`spel_select_subset` in `SpelCapture_<tag>`), so
 masks can use fields the unit test never reads. Matches are taken evenly spaced when there are more
-than `N`. With several MPI ranks, the rank with the most matches writes the capture and the others
-write nothing, so the subset holds at most that rank's matches. The run's `e3sm.log` has a
-`SPEL subset` line with the counts, and each file records the mask and the kept gridcells'
-global index, latitude and longitude as global attributes (`spel_subset_*`).
+than `N`. With several MPI ranks, every rank with matches writes its share of `N` (in proportion to
+its matches) to its own files, `<tag>.rankNNNNN.spel-*.nc` in the run directory, and the master
+rank lists those ranks in `<tag>.spel-subset-ranks.txt`. `spel validate` and `spel instrument
+--run-case` merge them into one capture: gridcells ordered by global index, cut to `N`, with all
+subgrid index fields renumbered. To merge by hand (e.g. after a run you submitted yourself):
+
+```bash
+spel merge-subset /path/to/run hs_drain     # -> unit-tests/input-data/hs_drain/spel-*.nc
+```
+
+Variables without a subgrid dimension must be identical on every rank; the merge stops and names
+any that are not (`--allow-differ NAME` keeps the first rank's values). The run's `e3sm.log` has
+`SPEL subset` lines with the counts, and each file records the mask and the kept gridcells' global
+index, latitude, longitude and rank as global attributes (`spel_subset_*`).
 `spel_reference.json` records the mask and `spel run` prints it.
 
 `spel subset SRC DST --gridcells 3,5,7` does the same offline: it writes those gridcells (1-based

@@ -325,6 +325,20 @@ def _helpers() -> list[str]:
     return out
 
 
+def _filter_builders(ut) -> tuple[list[str], dict[str, set[str]]]:
+    """main.F90's filter builder calls (FunctionalUnitTest._filter_builder_calls) and the
+    module -> names they use, then the device update of the filters, as main.F90 has them."""
+    if ut is None or not (getattr(ut, "filter_builder_calls", None) or getattr(ut, "nested_filter_builders", None)):
+        return [], {}
+    texts, use_lines = ut._filter_builder_calls(ut.instance_to_type_map())
+    uses: dict[str, set[str]] = {}
+    for u in use_lines:  # generated text: `use <module>, only : <name>`
+        mod, _, names = u.strip()[len("use "):].partition(", only :")
+        uses.setdefault(mod.strip().lower(), set()).update(n.strip() for n in names.split(",") if n.strip())
+    uses.setdefault("spelaccdatamod", set()).add("spel_acc_update_filters")
+    return [t.rstrip("\n") for t in texts] + ["call spel_acc_update_filters()"], uses
+
+
 def generate(inv: Inventory) -> tuple[str, dict]:
     """(SpelPyMod.F90 text, manifest)."""
     from spel.scripts.io.time_scalars import sync_lines
@@ -336,6 +350,13 @@ def generate(inv: Inventory) -> tuple[str, dict]:
     for e in entries:
         uses.setdefault(e.module.lower(), set()).add(e.use_name)
     calls: list[str] = []
+    # the filter builders main.F90 calls before the routines (analysis_cache.filter_builders,
+    # nested_filter_builders): filters that follow the state are rebuilt every call (every step
+    # of a multi-step run), as in the unit test
+    builders, builder_uses = _filter_builders(ut)
+    calls += builders
+    for m, names in builder_uses.items():
+        uses.setdefault(m, set()).update(names)
     for sub_id in inv.routines:
         lines, u = routine_call(inv, sub_id, "bounds_clump", "nc")
         calls += lines

@@ -51,6 +51,21 @@ def _serve(conn, lib: str, manifest: str, path_arg: str, log: str, direct: Optio
                 case.compute()
                 case.trap(False)
                 conn.send(("ok", {n: _pack(case.get(n)) for n in req["outputs"]}))
+            elif op == "begin":  # a multi-step run: the state after init, then step 1's inputs
+                case.reset(poison_outputs=req.get("poison", True))
+                for name, value in req["inputs"].items():
+                    case.set(name, value)
+                conn.send(("ok", None))
+            elif op == "step":  # one step on the state the previous one left: no reset
+                case.trap(bool(req.get("trap", False)))
+                poison = req.get("poison", True)
+                if poison:
+                    case.poison(None if poison is True else poison)
+                for name, value in req["inputs"].items():
+                    case.set(name, value)
+                case.compute()
+                case.trap(False)
+                conn.send(("ok", {n: _pack(case.get(n)) for n in req["outputs"]}))
             else:
                 conn.send(("error", f"unknown op {op!r}"))
         except Exception as exc:  # Python-side errors (bad names, shapes): report, keep serving
@@ -171,6 +186,33 @@ class Worker:
             self._ensure()
             self.conn.send({"op": "run", "inputs": inputs, "outputs": list(outputs), "trap": trap, "poison": poison})
         return _unpack(self._receive("compute"))
+
+
+    def begin(self, inputs: dict[str, np.ndarray], poison: bool = True) -> None:
+        """Start a multi-step run: the state after init with these inputs (step 1's)."""
+        self._ensure()
+        try:
+            self.conn.send({"op": "begin", "inputs": inputs, "poison": poison})
+        except (BrokenPipeError, OSError):
+            self.proc = None
+            self._ensure()
+            self.conn.send({"op": "begin", "inputs": inputs, "poison": poison})
+        self._receive("begin")
+        self._stepping = True
+
+    def step(self, inputs: dict[str, np.ndarray], outputs: list[str], trap: bool = False,
+             poison=True) -> dict[str, Optional[FArray]]:
+        """One step of the run `begin` started, on the state the previous step left. poison: the
+        outputs set to NaN before it (True: the manifest's outputs)."""
+        if self.proc is None or not self.proc.is_alive() or not getattr(self, "_stepping", False):
+            self._stepping = False
+            raise FortranAbort("step: no multi-step run in progress (the process ended or begin was not called)")
+        self.conn.send({"op": "step", "inputs": inputs, "outputs": list(outputs), "trap": trap, "poison": poison})
+        try:
+            return _unpack(self._receive("compute"))
+        except FortranAbort:
+            self._stepping = False
+            raise
 
 
 def _unpack(payload: dict) -> dict[str, Optional[FArray]]:

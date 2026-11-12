@@ -33,6 +33,14 @@ _rule = rules.parse  # the former name
 BUILD_KEYS = {"fc", "acc", "dbg"}
 
 
+# Multi-step runs (SPEC.md "Multi-step runs"): `prev%x` is x before the step being judged or
+# evaluated, `step` its number (1-based), and these functions are built in.
+PREV = "prev"
+STEP_NAME = "step"
+STEP_FUNCTIONS = {"tend", "acc", "child_sum", "child_wsum", "child_mean", "child_min", "child_max",
+                  "elevation", "lowest", "uphill_count"}  # built in (runner.Session.context_functions, fexpr)
+
+
 @dataclass
 class Scenario:
     name: str
@@ -43,6 +51,19 @@ class Scenario:
     assume: list[Expr]
     trap_fpe: bool = False
     namelist: dict[str, Any] = field(default_factory=dict)  # options of this scenario, over [namelist]
+    steps: int = 1  # calls of the routines per example, carrying their state
+    time: dict[str, Any] = field(default_factory=dict)  # time scalars of step 1 (over [domain.time])
+    forcing: dict[str, Rule] = field(default_factory=dict)  # boundary inputs drawn for every step
+    forcing_exprs: list[tuple[str, Expr]] = field(default_factory=list)  # ... or computed before every step
+    between: list[tuple[str, Expr]] = field(default_factory=list)  # after every step, in this order
+    keep: list[str] = field(default_factory=list)  # boundary variables left to the process (fnmatch patterns)
+
+    def boundary_declared(self, name: str) -> bool:
+        """Whether a boundary variable has its stand-in for the other routines of the step."""
+        from fnmatch import fnmatchcase
+
+        return (name in self.forcing or any(v == name for v, _ in self.forcing_exprs)
+                or any(v == name for v, _ in self.between) or any(fnmatchcase(name, k) for k in self.keep))
 
 
 @dataclass
@@ -276,9 +297,10 @@ class Names:
                     raise SpecError(f"{where}: {'%'.join(u.path)!r}: {'%'.join(u.path[1:])!r} is not a variable "
                                     f"of the case, in {text!r}")
                 continue
-            if len(u.path) == 1 and head in ELEMENT_VARS:
+            if len(u.path) == 1 and (head in ELEMENT_VARS or head == STEP_NAME):
                 continue
-            if u.applied and len(u.path) == 1 and (head in self.functions or head in ELEMENTAL or head in REDUCTIONS):
+            if u.applied and len(u.path) == 1 and (head in self.functions or head in ELEMENTAL or head in REDUCTIONS
+                                                   or head in STEP_FUNCTIONS):
                 continue
             if self.known(list(u.path)):
                 continue
@@ -335,7 +357,8 @@ def _over(text: Optional[str], inv: Inventory, where: str) -> Optional[tuple[str
 
 def _scenario(name: str, table: dict, base: Path, inv: Inventory, names: Names) -> Scenario:
     where = f"[scenario.{name}]"
-    known = {"over", "extends", "trap_fpe", "inputs", "derive", "assume", "namelist"}
+    known = {"over", "extends", "trap_fpe", "inputs", "derive", "assume", "namelist",
+             "steps", "time", "forcing", "between", "keep"}
     extra = set(table) - known
     if extra:
         raise SpecError(f"{where}: unknown keys {sorted(extra)}")
@@ -382,9 +405,61 @@ def _scenario(name: str, table: dict, base: Path, inv: Inventory, names: Names) 
     if isinstance(listed, str):
         listed = [listed]
     assume = [names.expr(t, f"{where}.assume") for t in listed]
+    steps, time, forcing, forcing_exprs, between, keep = _steps_tables(table, inv, names, where)
     return Scenario(name=name, level=over[0], filter=over[1], inputs=inputs, derive=derive, assume=assume,
                     trap_fpe=bool(table.get("trap_fpe", False)),
-                    namelist=names.namelist(table.get("namelist", {}), f"{where}.namelist"))
+                    namelist=names.namelist(table.get("namelist", {}), f"{where}.namelist"),
+                    steps=steps, time=time, forcing=forcing, forcing_exprs=forcing_exprs, between=between,
+                    keep=keep)
+
+
+def _steps_tables(table: dict, inv: Inventory, names: Names, where: str):
+    """`steps`, `time`, `forcing`, `between` and `keep` of a scenario (SPEC.md "Multi-step runs")."""
+    from fnmatch import fnmatchcase
+
+    steps = table.get("steps", 1)
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+        raise SpecError(f"{where}.steps: a whole number >= 1 (got {steps!r})")
+    time = {}
+    for key, value in table.get("time", {}).items():
+        if key.lower() not in (inv.time_names() or ()):
+            raise SpecError(f"{where}.time: {key!r} is not a per-step scalar of the case "
+                            f"(it has {', '.join(sorted(inv.time_names() or ())) or 'none'})")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SpecError(f"{where}.time.{key}: a number (got {value!r})")
+        time[key.lower()] = value
+    spaces = (PREV, "input")
+
+    def target(key: str, sub: str, kinds: tuple[str, ...]) -> str:
+        v = names.var(key, f"{where}.{sub}")
+        if inv.vars[v].kind not in kinds:
+            raise SpecError(f"{where}.{sub}.{key}: {v} is {inv.vars[v].kind}; {sub} sets "
+                            f"{' or '.join(kinds)} variables")
+        return v
+
+    forcing: dict[str, Rule] = {}
+    forcing_exprs: list[tuple[str, Expr]] = []
+    for key, value in table.get("forcing", {}).items():
+        v = target(key, "forcing", ("input", "inout"))
+        if isinstance(value, str):
+            forcing_exprs.append((v, names.expr(value, f"{where}.forcing.{key}", spaces)))
+        else:
+            forcing[v] = rules.parse(v, value, f"{where}.forcing.{key}")
+    between = [(target(key, "between", ("input", "inout")),
+                names.expr(str(text), f"{where}.between.{key}", spaces))
+               for key, text in table.get("between", {}).items()]
+    keep = table.get("keep", [])
+    if isinstance(keep, str):
+        keep = [keep]
+    if not isinstance(keep, list) or not all(isinstance(k, str) for k in keep):
+        raise SpecError(f"{where}.keep: a list of variable names (fnmatch patterns allowed)")
+    keep = [k.lower() for k in keep]
+    for k in keep:
+        if not any(fnmatchcase(n, k) for n in inv.vars):
+            raise SpecError(f"{where}.keep: {k!r} matches no variable of the case")
+    if steps == 1 and (between or forcing or forcing_exprs):
+        raise SpecError(f"{where}: `forcing` and `between` need `steps` > 1 (one call: give the inputs rules)")
+    return steps, time, forcing, forcing_exprs, between, keep
 
 
 def _section(text: str, names: Names, where: str) -> None:
@@ -433,7 +508,8 @@ def missing_rules(scenario: Scenario, inv: Inventory, constants: dict[str, Any])
     """Inputs read by the routines (guards on) that the scenario neither rules nor derives.
     inv: the inventory under the scenario's configuration (`Inventory.configured`), so an input
     only read under options that are off needs no rule."""
-    have = set(scenario.inputs) | {v for v, _ in scenario.derive}
+    have = (set(scenario.inputs) | {v for v, _ in scenario.derive} | set(scenario.forcing)
+            | {v for v, _ in scenario.forcing_exprs})
     out = []
     for v in inv.of_kind("input", "inout"):
         if v.name in have or v.instance == "bounds" or not inv.guard_active(v, constants):

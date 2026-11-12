@@ -219,6 +219,7 @@ def validate(args):
         dry_run=args.dry_run,
         subsets=subsets,
         test_env=args.test_env,
+        allow_differ=tuple(args.allow_differ),
     )
     if not report.ok and not args.dry_run:
         raise SystemExit(1)
@@ -246,6 +247,31 @@ def subset(args):
         meta["subset"] = {"gridcells": gridcells, "from": args.src}
         (dst / REFERENCE_META_FILENAME).write_text(json.dumps(meta, indent=2) + "\n")
     print(f"Wrote {len(files)} files with gridcells {gridcells} of {src} to {dst}")
+
+
+def merge_subset(args):
+    """Merge the per-rank files of a subset capture into the case's reference data."""
+    from spel.scripts.config import input_data_dir
+    from spel.scripts.instrument_elm import CaptureNames, InstrumentError
+    from spel.scripts.subset import MANIFEST_SUFFIX, SubsetError, merge_rank_files
+
+    rundir = Path(args.rundir)
+    try:
+        prefix = CaptureNames.for_case(args.case).file_prefix
+    except InstrumentError as err:
+        raise SystemExit(f"spel merge-subset: {err}")
+    dest = Path(input_data_dir) / args.case
+    if not (rundir / f"{prefix}{MANIFEST_SUFFIX}").is_file():
+        raise SystemExit(f"spel merge-subset: no {prefix}{MANIFEST_SUFFIX} in {rundir}")
+    for old in dest.glob("spel-*.nc"):
+        old.unlink()
+    try:
+        files = merge_rank_files(rundir, dest, prefix, allow_differ=args.allow_differ)
+    except SubsetError as err:
+        raise SystemExit(f"spel merge-subset: {err}")
+    if not files:
+        raise SystemExit(f"spel merge-subset: no gridcell matched ({rundir / (prefix + MANIFEST_SUFFIX)})")
+    print(f"Wrote {len(files)} files to {dest}")
 
 
 def export(args):
@@ -758,6 +784,11 @@ def main():
         help="Extra casegen script options, e.g. \"--stop-n 10 --stop-option ndays\"",
     )
     add_subset_args(validate_parser)
+    validate_parser.add_argument(
+        "--allow-differ", nargs="+", default=[], metavar="NAME",
+        help="subset captures: variables without a subgrid dimension that may differ between ranks "
+             "when merging (the first rank's values are kept; see `spel merge-subset`)",
+    )
     validate_parser.set_defaults(func=validate)
 
     subset_parser = subparsers.add_parser(
@@ -770,6 +801,18 @@ def main():
         "--gridcells", required=True, help="1-based gridcells to keep, e.g. 3,5,7"
     )
     subset_parser.set_defaults(func=subset)
+
+    merge_parser = subparsers.add_parser(
+        "merge-subset",
+        help="Merge the per-rank files of a subset capture (<tag>.rankNNNNN.spel-*.nc) into a case's reference data",
+    )
+    merge_parser.add_argument("rundir", help="ELM run directory with the rank files and <tag>.spel-subset-ranks.txt")
+    merge_parser.add_argument("case", help="case name (its files go to unit-tests/input-data/<case>)")
+    merge_parser.add_argument(
+        "--allow-differ", nargs="+", default=[], metavar="NAME",
+        help="variables without a subgrid dimension that may differ between ranks (the first rank's values are kept)",
+    )
+    merge_parser.set_defaults(func=merge_subset)
 
     # Parser for 'spel export'
     export_parser = subparsers.add_parser(

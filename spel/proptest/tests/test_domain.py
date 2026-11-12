@@ -188,7 +188,7 @@ def test_topounits_numbers_activity_and_downhill():
     assert lay.parent("t", "g").tolist() == [1, 2, 2, 2]
     assert lay.first_child("g", "t").tolist() == [1, 2] and lay.last_child("g", "t").tolist() == [1, 4]
     # set_topounit: the nearest lower topounit; the lowest keeps the previous dn_index (ELM's loop)
-    assert lay.downhill().tolist() == [-9999, 3, 4, 4]
+    assert lay.downhill().tolist() == [-1, 3, 4, 4]  # one topounit: add_topounit's -1, not ispval
     assert lay.max_topounits == 3
     li = lay.landunit_indices("t")
     assert li.shape == (12, 4) and li[0].tolist() == [-9999, 2, 3, 4] and li[4].tolist() == [1, -9999, -9999, -9999]

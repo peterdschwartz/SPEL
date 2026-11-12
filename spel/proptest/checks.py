@@ -27,6 +27,7 @@ Over = Optional[tuple[str, Optional[str]]]  # (element variable, filter member o
 # In every check `input%x` is the value x had before the run (a bare `x` is what the routine left:
 # for a variable it both reads and writes, the new value).
 INPUT = "input"
+PREV = "prev"  # in a multi-step run: x before the step being judged (spec.PREV)
 
 
 @dataclass
@@ -64,16 +65,28 @@ class Check:
     name: str
     scenarios: list[str]
     over: Over
+    steps: Any = "all"  # in a multi-step run: "all", "last", a step, or [first, last] (1-based)
 
     @classmethod
     def from_table(cls, t: dict, names) -> "Check":
         raise NotImplementedError
 
+    def judged_steps(self, n: int) -> list[int]:
+        """The steps (1-based) of an n-step run the check is judged after."""
+        s = self.steps
+        if s == "all":
+            return list(range(1, n + 1))
+        if s == "last":
+            return [n]
+        if isinstance(s, int):
+            return [s] if 1 <= s <= n else []
+        return list(range(max(1, s[0]), min(n, s[1]) + 1))
+
     @classmethod
     def _common(cls, t: dict, names) -> tuple[str, dict]:
         """Checks of the table's keys; (where, the name/scenarios/over arguments)."""
         where = f"[[{cls.table}]] {t.get('name', '?')!r}"
-        extra = set(t) - cls.keys - {"name", "scenarios", "over"}
+        extra = set(t) - cls.keys - {"name", "scenarios", "over", "steps"}
         if extra:
             raise SpecError(f"{where}: unknown keys {sorted(extra)}")
         if "name" not in t:
@@ -96,7 +109,7 @@ class Check:
         """The names the check uses have a value in a scenario it runs in. inv: the inventory
         under the scenario's configuration; configured(extra): the one under further options."""
         where = f"[[{self.table}]] {self.name!r}"
-        live_names(self.judged, inv, {INPUT: inv, **{n: inv for n in self.names}}, where, scenario.name)
+        live_names(self.judged, inv, {INPUT: inv, PREV: inv, **{n: inv for n in self.names}}, where, scenario.name)
 
     def expr_for(self, session, scenario) -> Expr:
         """The expression to judge in a session (default: `judged`; a kind may build it from
@@ -123,9 +136,30 @@ class Check:
 KINDS: dict[str, type[Check]] = {}
 
 
+def parse_steps(value: Any, where: str) -> Any:
+    """A check's `steps`: "all", "last", a step number, or [first, last] (1-based, inclusive)."""
+    if value in ("all", "last"):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    if (isinstance(value, list) and len(value) == 2 and all(isinstance(v, int) and not isinstance(v, bool)
+                                                             for v in value) and 1 <= value[0] <= value[1]):
+        return (value[0], value[1])
+    raise SpecError(f"{where}: steps = {value!r}: \"all\", \"last\", a step number or [first, last]")
+
+
 def register(cls: type[Check]) -> type[Check]:
     if not cls.table:
         raise ValueError(f"{cls.__name__}: a check kind needs a table name")
+    read = cls.from_table.__func__
+
+    def from_table(klass, t: dict, names) -> Check:  # every kind takes `steps` (multi-step runs)
+        obj = read(klass, t, names)
+        if "steps" in t:
+            obj.steps = parse_steps(t["steps"], f"[[{klass.table}]] {t.get('name', '?')!r}")
+        return obj
+
+    cls.from_table = classmethod(from_table)
     KINDS[cls.table] = cls
     return cls
 
@@ -148,7 +182,7 @@ class Property(Check):
         where, common = cls._common(t, names)
         if "expr" not in t:
             raise SpecError(f"{where}: `expr` is required")
-        return cls(expr=names.expr(t["expr"], where, (INPUT,)), **common)
+        return cls(expr=names.expr(t["expr"], where, (INPUT, PREV)), **common)
 
     @property
     def judged(self) -> Expr:
@@ -198,7 +232,7 @@ class Relation(Check):
         namelist = names.namelist(t.get("namelist", {}), f"{where}.namelist")
         if namelist and t.get("permute"):
             raise SpecError(f"{where}: `permute` reorders the halves of one run; it cannot be combined with `namelist`")
-        return cls(follow=follow, expect=names.expr(t["expect"], where, (*cls.names, INPUT)),
+        return cls(follow=follow, expect=names.expr(t["expect"], where, (*cls.names, INPUT, PREV)),
                    permute=bool(t.get("permute", False)), namelist=namelist, **common)
 
     @property
@@ -217,7 +251,7 @@ class Relation(Check):
                 raise SpecError(f"{where}.follow: {v} is not an input of the follow-up in scenario {scenario.name}"
                                 + (f": {after.why_unused(v)}" if after.vars[v].kind == "unused" else ""))
             live_names(e, inv, {}, f"{where}.follow", scenario.name, before=True)
-        live_names(self.expect, inv, {INPUT: inv, "base": inv, "follow": after}, where, scenario.name)
+        live_names(self.expect, inv, {INPUT: inv, PREV: inv, "base": inv, "follow": after}, where, scenario.name)
 
     def preflight(self, session, scenario) -> None:
         if self.namelist:
@@ -302,7 +336,7 @@ class Differential(Check):
                 raise SpecError(f'{where}: outputs is "all" or a list of variables')
             outputs = [names.var(k, f"{where}.outputs") for k in listed]
             text = " .and. ".join(_agree(names.inv.vars[v], tol) for v in outputs)
-        return cls(expect=names.expr(text, where, (*cls.names, INPUT)), outputs=outputs, tolerance=tol, **common)
+        return cls(expect=names.expr(text, where, (*cls.names, INPUT, PREV)), outputs=outputs, tolerance=tol, **common)
 
     @property
     def judged(self) -> Expr:
@@ -310,7 +344,7 @@ class Differential(Check):
 
     def check_scenario(self, scenario, inv, configured) -> None:
         if not self.all_outputs:  # the other side is another case: its names are checked when it runs
-            live_names(self.expect, inv, {INPUT: inv, "ref": inv, "dev": None},
+            live_names(self.expect, inv, {INPUT: inv, PREV: inv, "ref": inv, "dev": None},
                        f"[[{self.table}]] {self.name!r}", scenario.name)
 
     def expr_for(self, session, scenario) -> Expr:

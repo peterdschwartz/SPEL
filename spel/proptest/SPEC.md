@@ -13,6 +13,7 @@ rule stops loading or the run: nothing is defaulted without a word.
 - [`[case]`](#case), [`[settings]`](#settings), [`[domain]`](#domain), [`[namelist]`](#namelist), [`[units]`](#units), [`[functions]`](#functions)
 - [`[scenario.<name>]`](#scenarioname): [rules](#rules), [`derive`](#derive), [`assume`](#assume)
 - Checks: [`[[property]]`](#property), [`[[relation]]`](#relation), [`[compare]` and `[[differential]]`](#compare-and-differential)
+- [Multi-step runs](#multi-step-runs): `steps`, `time`, `forcing`, `between`, `keep`; `prev%`, `step`, `tend`, `child_*`
 - [Commands, files and exit codes](#commands-files-and-exit-codes)
 - [Limits](#limits), [Extending](#extending)
 
@@ -38,7 +39,7 @@ with dimensions and units. The kinds are:
 | `inout` | read before its first unconditional write | needs a rule |
 | `output` | written before any read | reset to NaN before every call |
 | `parameter` | read, no subgrid dimension (pftcon arrays) | from the reference capture; may take a rule |
-| `topology` | subgrid indices, types, weights | set by the domain |
+| `topology` | subgrid indices, types, weights (integer and logical fields of the `_pp` types, except physical data such as `col_pp%nlevbed`, which is an input: `inventory.PHYSICAL_INTEGERS`) | set by the domain |
 | `unused` | captured but not touched, or only used under namelist options that are off | not available |
 
 The kinds depend on the [namelist options](#namelist) of the run: `show CASE` counts every
@@ -74,6 +75,10 @@ Functions besides the intrinsics:
 | `integral(x, dz)` | `sum(x * dz)` over the last dimension |
 | `cumsum(x)` | running sum along the last dimension |
 | `rel_change(new, old)` | `(new - old) / max(abs(old), 1e-30)` |
+| `tend(x)` | x after the step minus x before it (`x - prev%x`; one call: `x - input%x`); any expression of the state, e.g. `tend(child_sum(col_ws%h2osfc, 't'))` |
+| `acc(x)` | x summed over the steps so far (each step's value in its own state; one call: x), e.g. `acc(child_wsum(col_wf%qflx_runoff, 'g'))` |
+| `elevation(t)`, `lowest(t)`, `uphill_count(t)` | from the domain declaration: a topounit's declared elevation (NaN without one), whether it is the lowest of its gridcell (ties included), how many other topounits point to it with ELM's `top_pp%downhill_ti` |
+| `child_sum(x, 't')`, `child_wsum`, `child_mean`, `child_min`, `child_max` | the whole variable x of a finer level reduced over the descendants of each element of level `'g'`, `'t'`, `'l'` or `'c'` (`wsum`: weighted by their weights relative to that level, as ELM's p2c/c2l); the level's element variable must be bound (a check over that level or a finer one) |
 | `active_dir(p, "<output>", k=1)` | coordinate of the element's drawn inputs along direction `k` of the saved active subspace of that output (run `spel proptest subspace` first) |
 
 ## `[case]`
@@ -384,6 +389,75 @@ input of its own left without a rule.
 Uses: a refactored copy of a routine against the original over a whole scenario, not only the
 regime one capture covers; `ACC = "MULTICORE"` against `OFF` as a race test; two compilers.
 
+## Multi-step runs
+
+A scenario with `steps = N` calls the routines N times per example, carrying their state: the
+state after step k is what step k+1 starts from, and the time scalars advance by `dtime_mod` on
+ELM's no-leap calendar (`timestep.py`: what elm_drv sets each step, `nstep_mod`, the date and
+`jday_mod`, and the others consistent with that date). The checks are judged after every step.
+
+```toml
+[scenario.season]
+over = "c in hydrologyc"
+extends = "hs_season.inputs.toml"
+steps = 96                                   # default 1: one call
+time = { mon_curr = 7, day_curr = 1, secs_curr = 1800, jday_mod = 182, thiscalday_mod = 182.02 }  # step 1
+keep = ["col_es%t_soisno", "col_ws%*"]       # boundary variables left to the process
+
+[scenario.season.inputs]                     # drawn once: the state before step 1
+"top_ws%from_uphill" = 0.0
+
+[scenario.season.forcing]                    # set before every step
+"top_af%rain" = { range = [0.0, 5e-3] }      # a rule: drawn for every step (modes below)
+"top_af%snow" = "0.0"                        # or an expression of the state before the step
+
+[scenario.season.between]                    # after every step, in this order, on the state after it
+"top_ws%from_uphill" = "max(0.0, top_ws%from_uphill(t) - dtime_mod * child_sum(col_wf%qflx_from_uphill, 't'))"
+
+```
+
+**The boundary.** Between two calls ELM runs the rest of its step, and some of those routines
+write variables the case's routines read: CanopyHydrology writes `h2osoi_liq`, ColWaterBalanceCheck
+drains `top_ws%from_uphill`, and so on. SPEL finds them in the static trace of the whole step
+(`coupling.py`: elm_drv's trace on the full analysis, as the database's call-tree view uses; the
+writes outside the case's routines that run under the scenario's namelist options, on filters that
+can share an element with the case's own accesses). Every such variable the routines read (an
+input or inout) must be declared, in one of:
+
+| Table | Meaning |
+|---|---|
+| `forcing` | set before every step: a rule (drawn per step) or an expression (bare names and `prev%x`: the state before the step; `step`; time scalars) |
+| `between` | assigned after every step from the state after it (bare names; `prev%x` is the state before the step); the checks of the step see the assigned value, the next step starts from it |
+| (all three) | a `forcing` or `between` entry whose target is not read under a run's namelist options is dormant there, like a rule (the follow-up of a relation with IM2 off skips the IM2 store's drain) |
+| `keep` | left as the process leaves it: an inout is carried, an input keeps its value (fnmatch patterns, e.g. `"col_ws%*"`); the missing writers are assumed absent |
+
+A run with an undeclared boundary variable stops before its first example, with the variable and
+its writers (routine, file:line, before/after the case, conditional). `spel proptest show SPEC`
+lists the boundary variables of every multi-step scenario and how they are declared. This is the
+point of a multi-step scenario: it states what the rest of ELM does between the steps instead of
+leaving it to chance. Variables nothing else writes are carried (inouts) or keep their drawn
+value (inputs); outputs are set to NaN before every step, as before one call. The analysis needs
+the case's E3SM checkout analyzed (`spel analyze --srcroot`); the boundary is cached per case.
+
+**Forcing draws.** A forcing rule draws over `(step, element, ...)` with the input modes: one value
+for every step and element, independent values per step and element, edges, or one value per
+element (and layer) held over the steps.
+
+**Checks.** A check is judged after every step (`steps = "all"`, the default), `"last"`, one step
+(`steps = 3`) or a range (`[2, 10]`); the first failing step is reported (`after step 3 of 96`).
+`prev%x` is x before the judged step, `input%x` before step 1, `step` the step number, `tend(x)`
+`x - prev%x`, `acc(x)` its sum over steps 1..k. Inside `tend` and `acc`, `base%`/`follow%` are the
+halves (or runs) of the step concerned; before step 1 they are not available (`tend(follow%x)` needs
+`steps = [2, N]`). A relation compares its two halves (or its two runs, under `namelist`) step by step;
+a differential runs the same steps in both cases.
+
+**Python.** `Session.execute` keeps every step: `res.series("top_ws%from_uphill")` (step axis
+first), `res.at(k)` (the result after step k, e.g. `res.at(k).frame("t")`), `res.times[k - 1]`.
+A saved failure keeps the forcing values (`forcing.npz`), and `replay` runs the steps again.
+
+Multi-step runs need an `ACC = "OFF"` build for now (the time scalars are not copied to the device
+between steps).
+
 ## Commands, files and exit codes
 
 | Command | Does |
@@ -456,7 +530,8 @@ process).
 - Per-pft rule overrides (`pft = {...}`) apply to patch variables only (a column holds several
   pfts); there are no overrides per urban column type yet (use `derive` with
   `merge(..., col_pp%itype(c) == 71)`).
-- One call per example: no multi-step runs.
+- Multi-step runs: CPU builds only (`ACC = "OFF"`); `between`/`forcing` are expressions of the
+  state, not ELM code (a scenario states what the rest of the step does).
 - Type-bound routines cannot be called by the shim yet.
 - `coverage` needs gfortran and its gcov.
 - Without a machine file (`spel machine`), build each compiler's library in a shell set up for

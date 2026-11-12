@@ -637,7 +637,8 @@ def generate_capture_module(
 
     With a `subset`, the first capture selects the gridcells (see
     spel.scripts.subset) and every write runs with that subset active in
-    nc_io and with the subset's bounds; ranks without the subset write nothing.
+    nc_io and with the subset's bounds; every rank with matches writes its
+    own files, which `spel.scripts.subset.merge_rank_files` joins.
 
     `compact` lists the (instance, subgrid, declaring module) of the types a
     `spel transform compact-rewrite` gave compact storage (see compact_capture_instances):
@@ -769,7 +770,7 @@ def _subset_capture_module(
     compact_decl: str = "",
     compact_procs: str = "",
 ) -> str:
-    from spel.scripts.subset import capture_select_routine
+    from spel.scripts.subset import RANK_WIDTH, capture_select_routine
 
     inst_use, inst_args, rw, fc, pre, drv_dummies, drv_use, drv_decl, drv_copy = parts
     mask_uses = "".join(f"  use {u}\n" for u in subset.uses())
@@ -780,7 +781,7 @@ def _subset_capture_module(
   use shr_kind_mod, only : r8 => shr_kind_r8
   use decompMod, only : bounds_type, get_proc_bounds, get_proc_clumps, get_clump_bounds
   use elm_time_manager, only : get_nstep
-  use spmdMod, only : masterproc, iam, npes, mpicom, MPI_INTEGER, MPI_MAX, MPI_MIN
+  use spmdMod, only : masterproc, iam, npes, mpicom, MPI_INTEGER, MPI_SUM
   use nc_io, only : spel_io_type, spel_subset_type, nc_subset_set_level, nc_subset_count, &
        nc_subset_activate, nc_subset_deactivate
   use {rw}, only : write_elmtypes{drv_use}
@@ -797,14 +798,20 @@ def _subset_capture_module(
   integer :: spel_clump_begg = -1
   logical :: spel_writer = .false.
   logical :: capturing = .false.
+  character(len=32) :: spel_rank_pre = ''
 {compact_decl}contains
   subroutine {names.inputs}(bounds{drv_dummies})
     type(bounds_type), intent(in) :: bounds
 {drv_decl}{drv_copy}    if (.not. io_constants%created) then
       call spel_select_subset(bounds)
-      call io_constants%init(base_fn='{pre}spel-constants', max_tpf=max_tpf, read_io=.false.)
-      call io_inputs%init(base_fn='{pre}spel-inputs', max_tpf=max_tpf, read_io=.false.)
-      call io_outputs%init(base_fn='{pre}spel-outputs', max_tpf=max_tpf, read_io=.false.)
+      ! every rank writes its own files: {pre}rankNNNNN.spel-*.nc
+      write (spel_rank_pre, '(a,i0.{RANK_WIDTH},a)') 'rank', iam, '.'
+      call io_constants%init(base_fn='{pre}'//trim(spel_rank_pre)//'spel-constants', &
+        max_tpf=max_tpf, read_io=.false.)
+      call io_inputs%init(base_fn='{pre}'//trim(spel_rank_pre)//'spel-inputs', &
+        max_tpf=max_tpf, read_io=.false.)
+      call io_outputs%init(base_fn='{pre}'//trim(spel_rank_pre)//'spel-outputs', &
+        max_tpf=max_tpf, read_io=.false.)
       if (spel_writer) then
         call nc_subset_activate(spel_sub)
         call write_constants(io_constants)
@@ -827,7 +834,7 @@ def _subset_capture_module(
       call nc_subset_deactivate()
 {compact_post}    end if
   end subroutine {names.outputs}
-{capture_select_routine(subset, names.tag)}
+{capture_select_routine(subset, names.tag, names.file_prefix)}
 {compact_procs}end module {names.module}
 """
 
@@ -1304,6 +1311,21 @@ def collect_outputs(rundir: Path, dest: Path, prefix: str = "") -> list[Path]:
     return copied
 
 
+def collect_case_outputs(rundir: Path, dest: Path, prefix: str, allow_differ=()) -> list[Path]:
+    """
+    A case's capture files in dest: merged from the ranks' files of a subset
+    capture (spel.scripts.subset.merge_rank_files; `allow_differ`: variables
+    without a subgrid dimension that may differ between ranks), else copied.
+    """
+    from spel.scripts.subset import SubsetError, merge_rank_files
+
+    try:
+        merged = merge_rank_files(rundir, dest, prefix, allow_differ)
+    except SubsetError as err:
+        raise InstrumentError(f"merging the subset capture in {rundir}: {err}") from err
+    return collect_outputs(rundir, dest, prefix) if merged is None else merged
+
+
 def write_reference_meta(dest: Path, case_name: str, subset: Optional[SubsetSpec] = None) -> Path:
     """Record which E3SM checkout (and gridcell subset) produced the reference data in dest."""
     from spel.scripts.analysis_cache import current_meta
@@ -1355,7 +1377,7 @@ def instrument_case(
         raise InstrumentError(f"casegen script {CASEGEN_SCRIPT} not found (set SPEL_CASEGEN)")
     rundir = run_case(CASEGEN_SCRIPT, fut.case_name, E3SM_SRCROOT, case_args)
     prefix = CaptureNames.for_case(fut.case_name).file_prefix
-    copied = collect_outputs(rundir, Path(input_data_dir) / fut.case_name, prefix)
+    copied = collect_case_outputs(rundir, Path(input_data_dir) / fut.case_name, prefix)
     if not copied:
         raise InstrumentError(f"No {prefix}spel-*.nc files were written to {rundir}")
     write_reference_meta(copied[0].parent, fut.case_name, subset)
