@@ -6,11 +6,13 @@ identical copies). What needs a decision is left as `# TODO` lines: inputs the r
 rule for, and constants it lacks.
 
 The domain's landunit kinds follow the filters elm_drv passes the routines (`routine_landunits`):
-urban filters (`urbanl`, ...) give urban landunits, lake filters a lake, any other filter (or
-none) vegetation; the complement of a filter the routine also takes (`nourbanl` next to `urbanl`)
-adds nothing. Each kind gets a gridcell (`[[domain.gridcell]]`, two copies): vegetation one soil
-column with the pfts the reference has most of, a town the urban densities of the reference's
-active urban landunits, a lake. The statistics cover the same landunit kinds. Without vegetation
+urban filters (`urbanl`, ...) give urban landunits, lake filters a lake, `icemecc` glacier-mec,
+any other filter (or none) vegetation; the complement of a filter the routine also takes
+(`nourbanl` next to `urbanl`) adds nothing. `--landunits` names the kinds instead. Each kind gets
+a gridcell (`[[domain.gridcell]]`, two copies): vegetation one soil column with the pfts the
+reference has most of, a town the urban densities of the reference's active urban landunits, a
+lake, a wetland, a glacier, an ice sheet (two glacier-mec classes in the glcmask), a tundra (soil
+and two polygons). The statistics cover the same landunit kinds. Without vegetation
 the scenario runs over the kind's patch filter (`p in urbanp`), and an urban domain derives the
 canyon geometry the way ELM does (`URBAN_DERIVE`).
 """
@@ -34,7 +36,8 @@ from spel.proptest.domain import (
     density_of,
     read_constants,
 )
-from spel.proptest.hierarchy import Gridcell, Lake, LandunitKind, Soil, Urban, UrbanDensity
+from spel.proptest.hierarchy import (Glacier, GlacierMec, Gridcell, Lake, LandunitKind, Polygon, Soil, Urban,
+                                     UrbanDensity, Wetland)
 from spel.proptest.errors import SpecError
 from spel.proptest.fexpr import ExprError, designator, parse_expr
 from spel.proptest.inventory import Inventory
@@ -245,6 +248,18 @@ def write(
         notes.append("town: the densities of the reference's active urban landunits, five columns each")
     if LandunitKind.LAKE in kinds:
         gridcells.append(Gridcell.of(Lake(), copies=COPIES, name="lake"))
+    if LandunitKind.WETLAND in kinds:
+        gridcells.append(Gridcell.of(Wetland(), copies=COPIES, name="wetland"))
+    if LandunitKind.GLACIER in kinds:
+        gridcells.append(Gridcell.of(Glacier(), copies=COPIES, name="glacier"))
+    if LandunitKind.GLACIER_MEC in kinds:
+        gridcells.append(Gridcell.of(GlacierMec({1: 0.5, 2: 0.5}), copies=COPIES, name="ice sheet", glcmask=True))
+        notes.append("ice sheet: glacier-mec with two elevation classes in the glcmask (give each a `topo` if the "
+                     "routines read glc_topo)")
+    if LandunitKind.POLYGON in kinds:
+        tundra = sorted(pfts) if pfts else [1]
+        gridcells.append(Gridcell.of(Soil(*tundra, weight=0.4), Polygon("low", *tundra, weight=0.3),
+                                     Polygon("high", *tundra, weight=0.3), copies=COPIES, name="tundra"))
     dom = DomainSpec(gridcells, nsets=2, reference=reference)
     head = [f"landunit kinds: {takes} ({'--landunits' if landunits else 'from the filters the routines take'})",
             "nsets = 2: relations use the two halves of the sets", *notes]
@@ -293,6 +308,7 @@ def write(
     if (
         not vegetated
         and len(kinds) == 1
+        and next(iter(kinds)) in KIND_PATCH_FILTER
         and inv.filters.get(KIND_PATCH_FILTER[next(iter(kinds))]) == 1
     ):
         over = f"p in {KIND_PATCH_FILTER[next(iter(kinds))]}"

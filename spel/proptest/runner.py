@@ -1,6 +1,7 @@
 """Run the checks of a `<name>.proptest.toml` with Hypothesis.
 
-One Hypothesis example = one call of the routine on the whole synthetic domain:
+One Hypothesis example = one call of the routine on the whole synthetic domain (`steps` > 1: a
+run of that many calls, `Session.run_steps`):
 
 1. draw a value for every element of every ruled input (strategies.py), parameters fixed unless
    ruled;
@@ -22,14 +23,19 @@ coarser levels are its ancestors (the layout's, which the subgrid index fields `
 equal: one child each). The halves of a relation are the first and second half of the sets at
 every level; `permute` exchanges whole gridcells of the same declaration.
 
+With drawn domains (`[domain.draw]`, domains.py) `run` repeats all this on each drawn domain,
+one Session each, and shrinks a failing domain (`_shrink`).
+
 `Session` talks to the routine through a backend: `get(names)`, `run(inputs, outputs, trap)`,
-`stop()`. The default is a `worker.Worker` on the case's library; tests pass their own.
+`begin`/`step` (multi-step runs), `stop()`. The default is a `worker.Worker` on the case's
+library; tests pass their own.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import io
 import json
 import shutil
 import sys
@@ -60,6 +66,7 @@ if TYPE_CHECKING:
 STATE_KINDS = ("input", "inout", "output")
 FAILURES_DIR = "failures"
 EXAMPLE_FILE = "example.json"
+DOMAIN_FILE = "domain.toml"  # the gridcells of a failure on a drawn domain
 FORCING_FILE = "forcing.npz"  # a multi-step example's forcing values (step axis first)
 
 
@@ -197,6 +204,8 @@ class Session:
         self._levels: dict[tuple[str, str], tuple] = {}
         self._subspaces: dict[tuple[str, str], dict] = {}
         self.last_failure: Optional[Failure] = None
+        self.failure_suffix = ""  # drawn domains: failures/<scenario>__<check><suffix>
+        self.drawn = ""  # drawn domains: which one this session runs (saved with its failures)
         self._capture_dir: Optional[Path] = None
 
     @property
@@ -1154,8 +1163,14 @@ class Session:
         f = failure or self.last_failure
         if f is None:
             return None
-        out = self.data / FAILURES_DIR / slug(f"{f.scenario}__{f.check}")
+        out = self.data / FAILURES_DIR / (slug(f"{f.scenario}__{f.check}") + self.failure_suffix)
         self._write_example(out, f.example)
+        if self.drawn:  # replay needs this domain, not the spec's sample
+            from spel.proptest import tomlw
+
+            (out / DOMAIN_FILE).write_text(tomlw.dumps(
+                {"gridcell": [g.to_table() for g in self.domain_spec.gridcells]},
+                {(): f"the drawn domain of this failure: {self.drawn}"}))
         meta = {
             "spec": str(self.spec.path), "case": self.case_dir.name, "scenario": f.scenario, "check": f.check,
             "element": f.element, "message": f.message, "seed": f.example.seed,
@@ -1415,16 +1430,142 @@ class Outcome:
     kind: str = ""  # property | relation | differential
     seconds: float = 0.0
     failure: str = ""  # directory of the saved failing example
+    domain: str = ""  # drawn domains: which one
 
 
 def run(spec: Spec, inv: Inventory, scenarios: Optional[list[str]] = None, checks: Optional[list[str]] = None,
         settings: Optional[dict] = None, fc: Optional[str] = None, rebuild: bool = False,
         out=sys.stdout, no_build: bool = False, acc: Optional[str] = None, session: Optional[Session] = None,
-        ) -> list[Outcome]:
+        backend: Any = None) -> list[Outcome]:
     """Every selected check of every selected scenario as a Hypothesis test; one Outcome each.
-    session: use this one (it stays open) instead of making one from the spec."""
+    session: use this one (it stays open) instead of making one from the spec.
+    With drawn domains (`[domain.draw]`), every check runs on each of the draw's domains (from
+    the run's seed), one session each; a failure is shrunk to a smaller domain (`shrink` setting:
+    the most candidate domains to try, default 40; 0: no shrinking) and saved with it.
+    backend: Session's (tests: a fake routine per drawn domain)."""
+    if spec.domain.draw is None or session is not None:
+        return _run_domain(spec, inv, scenarios, checks, settings, fc, rebuild, out, no_build, acc, session,
+                           backend=backend)
+    from spel.proptest import domains as dmod
+
+    cfg = {**spec.settings, **(settings or {})}
+    seed = int(cfg.get("seed") or 0)
+    budget = int(cfg.get("shrink", 40))
+    settings = {k: v for k, v in (settings or {}).items() if k != "shrink"}
+    spec = dataclasses.replace(spec, settings={k: v for k, v in spec.settings.items() if k != "shrink"})
+    draw = spec.domain.draw
+    kw = dict(fc=fc, no_build=no_build, acc=acc, backend=backend)
+    outcomes: list[Outcome] = []
+    for k, cells in enumerate(draw.domains(seed)):
+        tag = f"domain {k + 1}/{draw.count} (seed {seed})"
+        print(f"== {tag}: {_domain_summary(cells)}", file=out, flush=True)
+        # with shrinking, inputs are shrunk only on the final domain (_shrink's full run): not here
+        first = {**settings, "phases": _NO_INPUT_SHRINK()} if budget else settings
+        res = _run_domain(_drawn(spec, cells), inv, scenarios, checks, first, rebuild=rebuild and k == 0, out=out,
+                          tag=(tag, f"__d{k + 1}"), **kw)
+        for o in res:
+            o.domain = tag
+        failed = [o for o in res if not o.passed and o.failure]
+        if failed and budget:
+            _shrink(spec, inv, cells, failed, settings, budget, tag, f"__d{k + 1}", out, kw)
+        outcomes += res
+    return outcomes
+
+
+def _shrink(spec: Spec, inv: Inventory, cells, failed: list[Outcome], settings: dict, budget: int, tag: str,
+            suffix: str, out, kw: dict) -> None:
+    """Shrink a drawn domain on which `failed` checks failed (their outcomes are updated).
+
+    First the domain is shrunk for all of them together: a candidate is kept when every one
+    still fails on it (one session per candidate runs them all). Then each check alone, from
+    there, on what is left of the budget (different bugs may need different domains). Candidate
+    runs are quick: at most 2 examples and no input shrinking, so a failure that needs rare inputs
+    may stop the shrinking early (the domain is then only less reduced). Each check then runs once more, fully, on its final
+    domain, which saves its failure with shrunk inputs."""
+    from spel.proptest import domains as dmod
+
+    quick = {**settings, "max_examples": min(2, int({**spec.settings, **settings}.get("max_examples", 100))),
+             "phases": _NO_INPUT_SHRINK()}
+    tried = 0
+    t0 = time.monotonic()
+
+    def fails(cand, keys: list[tuple[str, str]]) -> set[tuple[str, str]]:
+        nonlocal tried
+        tried += 1
+        r = _run_domain(_drawn(spec, cand), inv, sorted({sc for sc, _ in keys}), sorted({c for _, c in keys}), quick,
+                        out=io.StringIO(), tag=(tag + ", shrinking", suffix), **kw)
+        return {(o.scenario, o.check) for o in r if not o.passed and o.failure} & set(keys)
+
+    def descend(start, keys):
+        best = start
+        while tried < budget:
+            for cand in dmod.shrink_candidates(best):
+                if tried >= budget:
+                    return best
+                if fails(cand, keys) == set(keys):
+                    best = cand
+                    break
+            else:
+                return best
+        return best
+
+    keys = [(o.scenario, o.check) for o in failed]
+    joint = descend(cells, keys)
+    final = {key: descend(joint, [key]) if len(keys) > 1 else joint for key in keys}
+    # the full run (input shrinking, the saved failure) on each final domain, checks sharing one together
+    groups: dict[int, tuple[Any, list]] = {}
+    for key, dom in final.items():
+        groups.setdefault(id(dom), (dom, []))[1].append(key)
+    by_key = {(o.scenario, o.check): o for o in failed}
+    searching = time.monotonic() - t0
+    print(f"  shrinking: {tried} candidate domains in {searching:.0f} s"
+          f" ({searching / max(tried, 1):.1f} s each)", file=out, flush=True)
+    for dom, ks in groups.values():
+        t1 = time.monotonic()  # (on the drawn domain itself too, when nothing smaller fails: shrunk inputs)
+        r = _run_domain(_drawn(spec, dom), inv, sorted({sc for sc, _ in ks}), sorted({c for _, c in ks}), settings,
+                        out=io.StringIO(), tag=(tag + ", shrunk", suffix), **kw)
+        for o in r:
+            orig = by_key.get((o.scenario, o.check))
+            if orig is None or o.passed or not o.failure:
+                continue
+            orig.message, orig.failure = o.message, o.failure
+            if dom is not cells:
+                orig.domain = f"{tag}, shrunk from {dmod.size(cells)} to {dmod.size(dom)} elements"
+        print(f"  shrunk ({tried} domains tried) for {', '.join(repr(c) for _, c in ks)}: {_domain_summary(dom)}"
+              f" (full run there: {time.monotonic() - t1:.0f} s)", file=out, flush=True)
+        for _, c in ks:
+            o = next((x for x in failed if x.check == c), None)
+            if o is not None and o.failure:
+                print(f"    saved: {o.failure}", file=out, flush=True)
+
+
+def _NO_INPUT_SHRINK() -> tuple:
+    """Hypothesis phases without input shrinking (saved failures replayed first)."""
+    from hypothesis import Phase
+
+    return (Phase.explicit, Phase.reuse, Phase.generate)
+
+
+def _drawn(spec: Spec, cells) -> Spec:
+    return dataclasses.replace(spec, domain=spec.domain.with_gridcells(cells))
+
+
+def _domain_summary(cells) -> str:
+    def topo(t):
+        return "+".join(lu.label + ("(0)" if lu.weight == 0.0 else "") for lu in t.landunits) + (
+            " [w0]" if t.weight == 0.0 else "")
+
+    return "; ".join(f"{g.name}{' x' + str(g.copies) if g.copies > 1 else ''}"
+                     f"{' glcmask' if g.glcmask else ''}: " + " | ".join(topo(t) for t in g.topounits) for g in cells)
+
+
+def _run_domain(spec: Spec, inv: Inventory, scenarios: Optional[list[str]] = None, checks: Optional[list[str]] = None,
+                settings: Optional[dict] = None, fc: Optional[str] = None, rebuild: bool = False,
+                out=sys.stdout, no_build: bool = False, acc: Optional[str] = None, session: Optional[Session] = None,
+                tag: Optional[tuple[str, str]] = None, backend: Any = None) -> list[Outcome]:
+    """run() on the spec's one domain. tag: (description, failure-directory suffix) of a drawn domain."""
     outcomes = []
-    root = session or Session(spec, inv, fc=fc, rebuild=rebuild, no_build=no_build, acc=acc)
+    root = session or Session(spec, inv, fc=fc, rebuild=rebuild, no_build=no_build, acc=acc, backend=backend)
     try:
         for name, scen in spec.scenarios.items():
             if scenarios and not _selected(name, scenarios):
@@ -1433,6 +1574,8 @@ def run(spec: Spec, inv: Inventory, scenarios: Optional[list[str]] = None, check
             if not selected:
                 continue
             s = root.for_scenario(scen)  # the scenario's namelist options: its own session
+            if tag is not None:
+                s.drawn, s.failure_suffix = tag
             s.preflight(scen, selected)
             for c in selected:
                 print(f"[{name}] {c.table} {c.name!r} ...", file=out, flush=True)
@@ -1476,6 +1619,14 @@ def replay(directory: Path, fc: Optional[str] = None, acc: Optional[str] = None,
     except OSError as exc:
         raise SpecError(f"{directory / EXAMPLE_FILE}: {exc.strerror}") from None
     sp, inv = specmod.load(Path(meta["spec"]))
+    if (directory / DOMAIN_FILE).is_file():  # a failure on a drawn domain: that domain
+        import tomllib
+
+        from spel.proptest.hierarchy import Gridcell
+
+        table = tomllib.loads((directory / DOMAIN_FILE).read_text())
+        cells = [Gridcell.from_table(g, f"{DOMAIN_FILE} gridcell {k}") for k, g in enumerate(table["gridcell"])]
+        sp = _drawn(sp, cells)
     scen = sp.scenarios.get(meta["scenario"])
     check = next((c for c in sp.checks if c.name == meta["check"]), None)
     if scen is None or check is None:

@@ -98,6 +98,8 @@ machine's default compiler, else gfortran; `ACC=OFF`). Another build goes to
 Passed to Hypothesis: `max_examples` (default 100), `seed`, and any other setting of
 `hypothesis.settings` (`derandomize`, `phases`, `verbosity`, ...). `-n` and `--seed` of
 `spel proptest run` override them. With a seed, Hypothesis does not use its example database.
+`shrink` (drawn domains only): the most candidate domains to try when shrinking a failing domain
+(default 40; 0: off).
 
 ## `[domain]`
 
@@ -136,13 +138,46 @@ topounits = [                        # several topounits
 | `{ kind = "crop", cfts = [...] }` | `istcrop` | one per CFT (`istcrop*100 + cft`); a CFT's weight is its column's | one each |
 | `{ kind = "urban", density = "md" }` (`roof`, `road_perv`: 0.5) | `isturb_tbd/hd/md` (`urbpoi`, `ifspecial`) | roof, sunwall, shadewall, impervious and pervious road (71-75), `set_landunit_urban`'s weights for `roof`/`road_perv` | one bare (`noveg`) each |
 | `{ kind = "lake" }` | `istdlak` (`lakpoi`, `ifspecial`) | one (`istdlak`, `is_lake`) | one bare |
+| `{ kind = "wetland" }` | `istwet` (`ifspecial`) | one (`istwet`) | one bare |
+| `{ kind = "glacier" }` | `istice` (`ifspecial`) | one (`istice`) | one bare |
+| `{ kind = "glacier_mec", classes = [{ class, weight, topo }] }` | `istice_mec` (`glcmecpoi`, `ifspecial`) | one per elevation class m (`istice_mec*100 + m`), `col_pp%glc_topo` = `topo` | one bare each |
+| `{ kind = "polygon", type = "low", patches = [...] }` | `istsoil` (`ispolygon`, `polygontype` 1/2/3 for low/flat/high) | one soil column (`is_soil`), as `add_polygon_landunit` | as soil |
+
+A topounit holds at most one landunit of each type (one polygon of each type), as ELM creates
+them. Gridcells also take `glcmask = true` (glacier-mec columns of every class exist and are
+active: the ice-sheet coupling's mask) and `icemask = x` (`do_smb_c`).
 
 - **Weights.** A missing weight shares what the given ones leave; the children of every element
   must sum to 1. `wtgcell`, `wttopounit`, `wtlunit`, `wtcol` are the products up the tree.
-- **Activity.** A topounit with weight 0 is inactive, and so is everything under it, as are
-  elements with weight 0 (subgridWeightsMod without its special cases). `setFilters` skips them.
-- **Layout.** Depth first, every element's children contiguous, as ELM lays out a clump; set k of
-  every level is a contiguous range. Element counts differ by level.
+- **Activity** follows subgridWeightsMod's `is_active_l/c/p` (`all_active` off): a topounit is
+  active when its weight is > 0; a landunit when its topounit is and its weight is > 0, or it is
+  glacier-mec in a glcmask gridcell, or it is istsoil (soil, polygon) on a topounit that is not all
+  plain glacier (ELM's virtual natural-vegetation landunit: weight 0 and active); a column when
+  its landunit is active and its weight is > 0, or it is glacier-mec in the glcmask, or its
+  landunit is urban (all five run); a patch when its column is active and its weight is > 0.
+  `setFilters` skips inactive elements. Checked against every gridcell of a full ELM run's restart (types, weights, activity,
+  order: `experiments/elm_layout_oracle.py`).
+- **Layout** (`order`): `"elm"` (default) lays a set out as initGridCellsMod lays out a clump:
+  gridcells and topounits in order, then the landunits in one pass per type over all topounits
+  (soil with each topounit's polygons, crop, urban tbd/hd/md, lake, wetland, glacier,
+  glacier-mec), columns and patches after their landunit. A topounit's landunits are therefore
+  not contiguous, and ELM leaves `top_pp`/`grc_pp` `lndi/lndf/coli/colf/pfti/pftf/n*` at `ispval`
+  (so does the domain). `"depth"` keeps every element's descendants contiguous (the layout before
+  2026-11-12). Set k of every level is a contiguous range either way.
+- **ELM's implicit elements** (`subgrid`): ELM creates a soil landunit on every topounit with
+  every natural pft as a patch, a crop landunit with every CFT column (create_crop_landunit), and
+  every glacier class in glcmask gridcells, most of them with weight 0. With
+  `subgrid = { natpft = [lb, ub], cft = [lb, ub], maxpatch_glcmec = n }` the domain adds what the
+  declaration leaves out, with weight 0 (an added landunit's first pft/CFT/class has weight 1 in
+  it, as the surface data's weights sum to 1; give the pfts of a virtual soil landunit yourself
+  when they matter). Lake, wetland and glacier landunits of weight 0 are then refused (ELM never
+  creates them). Without `subgrid` the domain holds what is declared, nothing more: declare a
+  virtual soil landunit as `{ kind = "soil", weight = 0.0, ... }`. `hierarchy.Subgrid.elm(crop=...)`
+  gives elm_varpar's ranges (0-16 without crops; 0-14 and 15-50 with).
+- **Flags.** `ifspecial`, `lakpoi`, `urbpoi`, `glcmecpoi`, `ispolygon`, `is_soil`, `is_crop`,
+  `is_lake`, `is_on_soil_col`, `is_on_crop_col` as initSubgridMod sets them;
+  `col_pp%hydrologically_active` is `.false.` everywhere because ELM never assigns it
+  (TotalWaterAndHeatMod reads it anyway); `veg_pp%mxy` needs `subgrid`.
 - **Topounits.** `top_pp%topo_grc_ind` is the topounit's number within its gridcell;
   `max_topounits` and `has_topounit` are decided by the declaration (setting them is an error).
   With declared `elevation`s, `top_pp%downhill_ti` follows `set_topounit`'s algorithm (including
@@ -155,7 +190,10 @@ topounits = [                        # several topounits
 
 | Key | Default | Meaning |
 |---|---|---|
-| `gridcell` | required | the `[[domain.gridcell]]` tables: `name`, `copies` (1), and `landunits` (one topounit) or `topounits` |
+| `gridcell` | required (or `draw`) | the `[[domain.gridcell]]` tables: `name`, `copies` (1), `glcmask`, `icemask`, and `landunits` (one topounit) or `topounits` |
+| `draw` | none | drawn domains instead of declared gridcells: see [Drawn domains](#drawn-domains) |
+| `subgrid` | none | ELM's implicit elements: `{ natpft = [lb, ub], cft = [lb, ub], maxpatch_glcmec = n }` |
+| `order` | `"elm"` | `"elm"` or `"depth"` (see Layout) |
 | `nsets` | 1 | copies of the declared gridcells; relations need an even number (base and follow-up halves) |
 | `snow_layers` | 0 | `col_pp%snl = -snow_layers` |
 | `reference` | none | a capture (name under `unit-tests/input-data`, or a directory): constants, parameters and level extents come from it |
@@ -163,6 +201,46 @@ topounits = [                        # several topounits
 | `time` | `{}` | per-step scalars, e.g. `{ jday_mod = 15, secs_curr = 0 }` |
 | `dims` | `{}` | values for names in dimension bounds the reference does not give, e.g. `{ nlevsno = 5 }` |
 | `init` | by the case | `"direct"`: the worker allocates the variables and sets their values from Python (no inputs file); `"files"`: the case reads a synthetic inputs file, as a unit test reads a capture. Unset: direct for cases made since direct init existed, files for older ones (`show` says which). Both give the same results |
+
+### Drawn domains
+
+Instead of declaring gridcells, a spec can draw them: `[domain.draw]` describes a space of
+domains, and a run tests every check on `count` domains drawn from its seed (`domains.py`).
+
+```toml
+[domain.draw]
+count = 4                  # domains per run
+gridcells = [2, 3]         # per domain
+topounits = [1, 3]         # per gridcell; elevations drawn from `elevation`, `ties` of them equal
+zero_topounit = 0.15       # P(a topounit has weight 0: inactive)
+zero_landunit = 0.3        # P(a soil, crop, urban, polygon or glcmask glacier-mec landunit has weight 0)
+pfts = [13]                # pool for soil and polygon columns (max_pfts each); cfts for crop
+
+[domain.draw.kinds]        # P(a topounit holds a landunit of this kind)
+soil = 0.7
+wetland = 0.4
+lake = 0.3
+glacier = 0.3
+```
+
+Other keys: `zero_patch` (a drawn pft, CFT or class of weight 0), `max_pfts`, `cfts`, `max_cfts`,
+`densities`, `mec_classes`, `glcmask`, `icemask` (probabilities per gridcell), `elevation`,
+`ties`, `copies` (each drawn gridcell repeated: relations with `permute` need >= 2).
+
+- Every draw is a domain ELM could build: every topounit has a soil landunit (weight 0 where soil
+  was not drawn: the virtual one), lake/wetland/glacier landunits never have weight 0, and
+  weight-0 siblings have siblings of weight > 0.
+- The spec is checked and `show`n on the first domain of seed 0. Domain k of a seed does not
+  depend on `count`.
+- Each domain has its own session (the shim cannot reallocate a worker's state), so a drawn
+  run costs `count` times a declared one. The inputs are still Hypothesis'.
+- A failure is shrunk: the runner tries smaller domains (one gridcell, topounit, landunit or
+  pft fewer; equal weights where they were > 0; zeros kept) while the check still fails, up to
+  the `shrink` setting (candidate domains, default 40; 0: off). The failure is saved under
+  `failures/<scenario>__<check>__d<k>/` with `domain.toml`, the shrunk domain, which `replay`
+  uses.
+- Python: `pt.Domain(draw=pt.DomainDraw(...))`; `Domain.domains(seed)` shows the domains a run
+  draws.
 
 What is not given:
 
@@ -439,7 +517,8 @@ lists the boundary variables of every multi-step scenario and how they are decla
 point of a multi-step scenario: it states what the rest of ELM does between the steps instead of
 leaving it to chance. Variables nothing else writes are carried (inouts) or keep their drawn
 value (inputs); outputs are set to NaN before every step, as before one call, except those in
-`carry`.
+`carry`. Finding the boundary needs the case's E3SM checkout analyzed (`spel analyze --srcroot`);
+it is cached per case.
 
 **Carried outputs.** An output is written before it is read on every path the routines take, but
 often only on a filter: SurfaceRunoff writes `qflx_from_uphill` on `hydrologyc` columns, and
@@ -449,8 +528,7 @@ ELM never has. `carry` gives such an output its value before step 1 (a rule, dra
 not a relative one: an output has no captured value) and keeps, from step to step, what the
 previous step left where a step does not write it. The routines see nothing different (they write
 before they read); `input%x`, `prev%x` and saved failures include it. Only outputs, and only with
-`steps` > 1. The analysis needs
-the case's E3SM checkout analyzed (`spel analyze --srcroot`); the boundary is cached per case.
+`steps` > 1.
 
 **Forcing draws.** A forcing rule draws over `(step, element, ...)` with the input modes: one value
 for every step and element, independent values per step and element, edges, or one value per
@@ -475,9 +553,9 @@ between steps).
 
 | Command | Does |
 |---|---|
-| `spel proptest init CASE [--reference REF] [--where EXPR] [--landunits KIND...] [--namelist N=V] [-o FILE]` | starter spec with a `[namelist]` table and `# TODO` lines. The domain's landunit kinds come from the filters elm_drv passes the routines (`urbanl`... -> urban, `lakec`... -> lake, any other filter or none -> vegetation; `nourbanl` next to `urbanl` adds nothing), or from `--landunits`; one gridcell per kind, two copies: a soil column with the reference's most common pfts, a town with the densities of its active urban landunits, a lake. A domain of one non-vegetated kind runs over its patch filter (`p in urbanp`); an urban one derives the canyon geometry as ELM does (`scaffold.URBAN_DERIVE`) |
+| `spel proptest init CASE [--reference REF] [--where EXPR] [--landunits KIND...] [--namelist N=V] [-o FILE]` | starter spec with a `[namelist]` table and `# TODO` lines. The domain's landunit kinds come from the filters elm_drv passes the routines (`urbanl`... -> urban, `lakec`... -> lake, `icemecc` -> glacier-mec, any other filter or none -> vegetation; `nourbanl` next to `urbanl` adds nothing), or from `--landunits` (any kind); one gridcell per kind, two copies: a soil column with the reference's most common pfts, a town with the densities of its active urban landunits, a lake, a wetland, a glacier, an ice sheet (glacier-mec in the glcmask), a tundra (soil and two polygons). A domain of one non-vegetated kind runs over its patch filter (`p in urbanp`); an urban one derives the canyon geometry as ELM does (`scaffold.URBAN_DERIVE`) |
 | `spel proptest build CASE [--fc FC] [--acc ACC] [--dbg]` | the shim and the library (also done by the others when sources changed) |
-| `spel proptest stats CASE --reference REF [--landunits KIND...] [--where EXPR] [--stride N] [--namelist N=V]` | rule file and report from a capture, for the inputs read under those options; `--landunits soil crop urban lake` keeps the patches on landunits of those kinds (and their coarser elements) |
+| `spel proptest stats CASE --reference REF [--landunits KIND...] [--where EXPR] [--stride N] [--namelist N=V]` | rule file and report from a capture, for the inputs read under those options; `--landunits soil crop urban lake ...` (any landunit kind) keeps the patches on landunits of those kinds (and their coarser elements) |
 | `spel proptest show SPEC\|CASE [--kind KIND]` | inventory; per scenario its namelist options and where each value comes from, the variables they leave unused, dormant rules, inputs without a rule; defaults in use |
 | `spel proptest probe SPEC [-s SCENARIO] [-n N]` | runs a few examples: outputs never written, variables never changed, aborts |
 | `spel proptest run SPEC [-s SCENARIO] [-k CHECK] [-n N] [--seed N] [--json F] [--junit F]` | the checks |
@@ -495,7 +573,7 @@ Files:
 | `unit-tests/<case>/build-py*/` | the libraries |
 | `unit-tests/<case>/proptest/` | scratch: synthetic domains (`domain-<hash>`, and `domain-<hash>-files` when a failure of a direct-init run is saved), logs of aborted runs, the units cache. `spel create` deletes it with the case |
 | `unit-tests/proptest-data/<case>/hypothesis/` | Hypothesis' example database: failing examples are tried first in the next run |
-| `unit-tests/proptest-data/<case>/failures/<scenario>__<check>/` | the shrunk failing example: `spel-inputs0001.nc` and `spel-constants0001.nc` in capture format, and `example.json`; the follow-up of a namelist relation in `follow/` |
+| `unit-tests/proptest-data/<case>/failures/<scenario>__<check>/` | the shrunk failing example: `spel-inputs0001.nc` and `spel-constants0001.nc` in capture format, and `example.json`; the follow-up of a namelist relation in `follow/`. With drawn domains, `<scenario>__<check>__d<k>/` for domain k, with `domain.toml` (the shrunk domain, which `replay` uses) |
 | `unit-tests/proptest-data/<case>/stats/`, `subspace/` | rule files and reports |
 
 A failing run prints the element, the value of every name the expression uses, and the drawn
@@ -509,7 +587,8 @@ through the reader's checks when it is added (a bad name fails at once, with the
 
 ```python
 from spel.proptest import api as pt
-from spel.proptest.api import Gridcell, Lake, Patch, Soil, Topounit, Urban
+from spel.proptest.api import Gridcell, Lake, Patch, Soil, Topounit, Urban   # also Wetland, Glacier,
+                                                                          # GlacierMec, Polygon, Crop, Subgrid
 
 case = pt.Case("urbval", reference="cf_val")
 dom = pt.Domain([Gridcell.of(Urban("md"), Urban("hd"), copies=2, name="town"),
@@ -527,6 +606,7 @@ spec.to_toml("urbval.proptest.toml")          # pt.Spec.from_toml(path) reads on
 |---|---|
 | `pt.Case(name)` | the inventory: `var("ht_roof")`, `vars(kind=, level=)`, `find("roof")`, `stats_rules(landunits=, where=)` |
 | rules | `pt.Range`, `LogRange`, `Values`, `Value`, `Scale`, `Dist`, each with `clip=`, `pft={13: ...}`, `levels={"1:3": ...}` |
+| `pt.Domain(draw=pt.DomainDraw(...))`, `dom.domains(seed)` | drawn domains; the views of the ones a run with that seed draws |
 | `spec.view()` / `dom.view()` | the declared domain: `gridcells[k].topounits[..].landunits[..].columns[..].patches`, `table(level)` (pandas), `select(level, kind=, role=, pft=, name=)`, `expected_filters()` |
 | `spec.session()` | a `runner.Session` on the validated spec |
 | `s.built()` | what the case built: `filters`, `topology`, `bounds`; `check()` lists differences from the declaration |
@@ -538,8 +618,10 @@ process).
 
 ## Limits
 
-- Landunits are soil, crop, urban or lake; no glacier or wetland yet. Activity follows the
-  weights only (not ELM's `all_active` or zero-weight urban special cases).
+- Every landunit kind ELM builds can be declared or drawn; `all_active` and FATES (`is_fates`,
+  its patch weights) are not modelled. The reference capture must have the parameters the
+  routines read on the landunits a domain holds (a soil-only reference may lack lake or
+  glacier parameters: give them rules).
 - Per-pft rule overrides (`pft = {...}`) apply to patch variables only (a column holds several
   pfts); there are no overrides per urban column type yet (use `derive` with
   `merge(..., col_pp%itype(c) == 71)`).
@@ -558,4 +640,5 @@ process).
 | a check kind | a `Check` subclass with `@register` (its table, `prepare`, `elements`, `mask`, `namespaces`) | `checks.py` |
 | a function | a function with `@register` in a `[functions]` module, or an entry of `FUNCTIONS` | `functions.py` |
 | a topology field | an entry of the `TOPOLOGY_*` sets or a case in `topology_value` | `domain.py` |
-| another way to run the routine | an object with `get`, `run`, `stop` passed as `Session(..., backend=...)` | `runner.py` |
+| another way to run the routine | an object with `get`, `run`, `stop` (and `begin`, `step` for multi-step runs) passed as `Session(..., backend=...)` | `runner.py` |
+| a landunit kind or an ELM subgrid rule | the kind, its constructor and TOML table, its flags and layout pass | `hierarchy.py` (and `domain.EXPECTED_FILTERS`, `domains.py`) |

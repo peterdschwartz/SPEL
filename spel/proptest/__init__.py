@@ -8,7 +8,9 @@ in Fortran syntax in a TOML file (`spec.py`). The expressions are parsed with SP
 with numpy (`fexpr.py`). Every fact about the routine's variables comes from SPEL's
 analysis (`inventory.py`), never from scanning source text.
 
-The synthetic domain is ELM's subgrid hierarchy, declared gridcell by gridcell (`hierarchy.py`).
+The synthetic domain is ELM's subgrid hierarchy, declared gridcell by gridcell (`hierarchy.py`)
+or drawn at random (`domains.py`). Multi-step scenarios carry the state from call to call, with
+the rest of ELM's step stated in the spec (`coupling.py`, `timestep.py`).
 `api.py` builds whole specs in Python and writes them as TOML (`tomlw.py`); `results.py` shows
 what the case built and what an example did (`Session.built`, `Session.execute(...).frame`).
 """

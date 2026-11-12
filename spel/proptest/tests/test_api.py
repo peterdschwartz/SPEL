@@ -120,10 +120,11 @@ def test_domain_view_queries(tmp_path):
     hill = view.gridcells[1]
     assert [(t.number, t.active) for t in hill.topounits] == [(1, True), (2, False)]
     assert view.select("p", name="mixed", kind="soil", pft=13).tolist() == [2]
-    assert view.select("c", role="road_perv").tolist() == [6]  # soil column 1, urban columns 2-6
+    # ELM order: the soil columns of both gridcells (1, 2), then urban (3-7), then the lakes (8, 9)
+    assert view.select("c", role="road_perv").tolist() == [7]
     f = view.expected_filters()
-    assert f["urbanl"].tolist() == [2] and f["lakec"].tolist() == [7]  # the hill's lake (9) is inactive
-    assert f["hydrologyc"].tolist() == [1, 6, 8]
+    assert f["urbanl"].tolist() == [3] and f["lakec"].tolist() == [8]  # the hill's lake (9) is inactive
+    assert f["hydrologyc"].tolist() == [1, 2, 7]
     table = view.table("p")
     assert table.loc[2, "pft"] == 13 and np.isclose(table.loc[1, "wtgcell"], 0.7 * 0.6)
 

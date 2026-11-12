@@ -41,8 +41,8 @@ import numpy as np
 
 from spel.proptest.errors import ProptestError
 from spel.proptest.fexpr import ExprError
-from spel.proptest.hierarchy import (TYPE_CODES, Gridcell, HierarchyError, LandunitKind, Layout,
-                                     UrbanDensity, check_type_codes, ltype_of)
+from spel.proptest.hierarchy import (ISPVAL, ORDERS, TYPE_CODES, Gridcell, HierarchyError, LandunitKind, Layout,
+                                     Subgrid, UrbanDensity, check_type_codes, ltype_of)
 from spel.proptest.inventory import LEVELS, NC_DIM, Inventory, VarInfo
 
 INPUTS_FILE = "spel-inputs0001.nc"
@@ -90,8 +90,15 @@ class DomainSpec:
     # files: elm_init reads an inputs file | direct: see module doc | None: direct when the case
     # can (made with spel_varMod: shim.direct_init), else files (runner.Session decides)
     init: Optional[str] = None
+    # ELM's implicit elements (hierarchy.Subgrid); None: only what is declared
+    subgrid: Optional[Subgrid] = None
+    order: str = "elm"  # hierarchy.ORDERS
+    # drawn domains (domains.DomainDraw): `gridcells` is then the first of them (seed 0), the
+    # sample the spec is checked and built against; runner.run draws its own
+    draw: Optional[Any] = None
 
-    KEYS = ("gridcell", "nsets", "snow_layers", "reference", "constants", "time", "dims", "init")
+    KEYS = ("gridcell", "nsets", "snow_layers", "reference", "constants", "time", "dims", "init", "subgrid",
+            "order", "draw")
 
     @classmethod
     def from_table(cls, table: dict, base: Path, input_data: Optional[Path] = None) -> "DomainSpec":
@@ -100,9 +107,18 @@ class DomainSpec:
             raise DomainError(f"[domain]: unknown keys {sorted(extra)} (sites are [[domain.gridcell]] tables; "
                               "see SPEC.md)")
         cells = table.get("gridcell", [])
-        if not isinstance(cells, list) or not cells:
-            raise DomainError("[domain]: declare the gridcells as [[domain.gridcell]] tables")
+        draw = None
         try:
+            if "draw" in table:
+                from spel.proptest.domains import DomainDraw
+
+                if cells:
+                    raise DomainError("[domain]: give [[domain.gridcell]] tables or [domain.draw], not both")
+                draw = DomainDraw.from_table(table["draw"])
+                cells = [g.to_table() for g in next(draw.domains(0))]
+            if not isinstance(cells, list) or not cells:
+                raise DomainError("[domain]: declare the gridcells as [[domain.gridcell]] tables (or draw them: "
+                                  "[domain.draw])")
             gridcells = [Gridcell.from_table(g, f"[[domain.gridcell]] {k}") for k, g in enumerate(cells)]
         except HierarchyError as exc:
             raise DomainError(str(exc)) from None
@@ -115,7 +131,12 @@ class DomainSpec:
             time={k.lower(): v for k, v in table.get("time", {}).items()},
             dims={k.lower(): int(v) for k, v in table.get("dims", {}).items()},
             init=table.get("init"),
+            subgrid=_subgrid(table.get("subgrid")),
+            order=str(table.get("order", "elm")),
+            draw=draw,
         )
+        if spec.order not in ORDERS:
+            raise DomainError(f"[domain]: order must be one of {list(ORDERS)}, not {spec.order!r}")
         if spec.init is not None and spec.init not in INIT_MODES:
             raise DomainError(f"[domain]: init must be one of {list(INIT_MODES)}, not {spec.init!r}")
         if spec.nsets < 1:
@@ -137,15 +158,28 @@ class DomainSpec:
                 out[key] = dict(getattr(self, key))
         if self.init is not None:
             out["init"] = self.init
-        out["gridcell"] = [g.to_table() for g in self.gridcells]
+        if self.subgrid is not None:
+            out["subgrid"] = self.subgrid.to_table()
+        if self.order != "elm":
+            out["order"] = self.order
+        if self.draw is not None:
+            out["draw"] = self.draw.to_table()
+        else:
+            out["gridcell"] = [g.to_table() for g in self.gridcells]
         return out
+
+    def with_gridcells(self, gridcells: list[Gridcell]) -> "DomainSpec":
+        """This domain with other gridcells (one drawn domain, a shrunk one): no draw."""
+        import dataclasses
+
+        return dataclasses.replace(self, gridcells=list(gridcells), draw=None)
 
     def layout(self, params: Optional[dict[str, Any]] = None) -> Layout:
         """The layout of the declared gridcells (type codes checked against the case's `params`)."""
         try:
             if params:
                 check_type_codes(params)
-            return Layout(self.gridcells, self.nsets)
+            return Layout(self.gridcells, self.nsets, subgrid=self.subgrid, order=self.order)
         except HierarchyError as exc:
             raise DomainError(str(exc)) from None
 
@@ -168,6 +202,15 @@ class DomainSpec:
             )
 
 
+def _subgrid(value: Any) -> Optional[Subgrid]:
+    if value is None:
+        return None
+    try:
+        return Subgrid.from_table(value)
+    except HierarchyError as exc:
+        raise DomainError(str(exc)) from None
+
+
 def _reference_path(ref: Any, base: Path, input_data: Optional[Path]) -> Optional[Path]:
     if not ref:
         return None
@@ -187,7 +230,7 @@ def _reference_path(ref: Any, base: Path, input_data: Optional[Path]) -> Optiona
 FILTER_KINDS = {
     "urbanl": LandunitKind.URBAN, "urbanc": LandunitKind.URBAN, "urbanp": LandunitKind.URBAN,
     "lakec": LandunitKind.LAKE, "lakep": LandunitKind.LAKE, "lakesnowc": LandunitKind.LAKE,
-    "lakenosnowc": LandunitKind.LAKE,
+    "lakenosnowc": LandunitKind.LAKE, "icemecc": LandunitKind.GLACIER_MEC,
 }
 FILTER_COMPLEMENTS = {"nourbanl": "urbanl", "nourbanc": "urbanc", "nourbanp": "urbanp",
                       "nolakec": "lakec", "nolakep": "lakep"}
@@ -201,25 +244,35 @@ def _road_perv(lay: Layout, level: str) -> np.ndarray:
     return lay.itype("c")[c] == TYPE_CODES["icol_road_perv"]
 
 
+def _mec(lay: Layout, level: str) -> np.ndarray:
+    return lay.ltype(level) == TYPE_CODES["istice_mec"]
+
+
+def _icemask(lay: Layout, level: str) -> np.ndarray:
+    return np.asarray([g.icemask for g in lay.levels["g"].decl], dtype=float)[lay.gridcell_of(level)]
+
+
 # The members setFilters builds from the topology alone (filterMod::setFiltersOneGroup, active
-# elements on active topounits): member -> (level, layout, level -> mask). Members that depend on
-# other data (pcropp: pftcon, snowc: the snow state) are not predicted.
+# elements on active topounits), with the flags it tests: member -> (level, layout, level -> mask).
+# Members that depend on other data (pcropp: pftcon, snowc: the snow state) are not predicted.
 EXPECTED_FILTERS: dict[str, tuple[str, Callable[[Layout, str], np.ndarray]]] = {
-    "urbanl": ("l", lambda y, v: y.is_kind(v, _U)),
-    "nourbanl": ("l", lambda y, v: ~y.is_kind(v, _U)),
-    "urbanc": ("c", lambda y, v: y.is_kind(v, _U)),
-    "nourbanc": ("c", lambda y, v: ~y.is_kind(v, _U)),
-    "urbanp": ("p", lambda y, v: y.is_kind(v, _U)),
-    "nourbanp": ("p", lambda y, v: ~y.is_kind(v, _U)),
-    "lakec": ("c", lambda y, v: y.is_kind(v, _L)),
-    "nolakec": ("c", lambda y, v: ~y.is_kind(v, _L)),
-    "lakep": ("p", lambda y, v: y.is_kind(v, _L)),
-    "nolakep": ("p", lambda y, v: ~y.is_kind(v, _L)),
-    "nolakeurbanp": ("p", lambda y, v: ~y.is_kind(v, _L, _U)),
-    "soilc": ("c", lambda y, v: y.is_kind(v, _S, _C)),
-    "soilp": ("p", lambda y, v: y.is_kind(v, _S, _C)),
-    "hydrologyc": ("c", lambda y, v: y.is_kind(v, _S, _C) | _road_perv(y, v)),
+    "urbanl": ("l", lambda y, v: y.flag(v, "urbpoi")),
+    "nourbanl": ("l", lambda y, v: ~y.flag(v, "urbpoi")),
+    "urbanc": ("c", lambda y, v: y.flag(v, "urbpoi")),
+    "nourbanc": ("c", lambda y, v: ~y.flag(v, "urbpoi")),
+    "urbanp": ("p", lambda y, v: y.flag(v, "urbpoi")),
+    "nourbanp": ("p", lambda y, v: ~y.flag(v, "urbpoi")),
+    "lakec": ("c", lambda y, v: y.flag(v, "lakpoi")),
+    "nolakec": ("c", lambda y, v: ~y.flag(v, "lakpoi")),
+    "lakep": ("p", lambda y, v: y.flag(v, "lakpoi")),
+    "nolakep": ("p", lambda y, v: ~y.flag(v, "lakpoi")),
+    "nolakeurbanp": ("p", lambda y, v: ~y.flag(v, "lakpoi") & ~y.flag(v, "urbpoi")),
+    "soilc": ("c", lambda y, v: y.flag(v, "is_soil") | y.flag(v, "is_crop")),
+    "soilp": ("p", lambda y, v: y.flag(v, "is_on_soil_col") | y.flag(v, "is_on_crop_col")),
+    "hydrologyc": ("c", lambda y, v: y.flag(v, "is_soil") | y.flag(v, "is_crop") | _road_perv(y, v)),
     "hydrononsoic": ("c", lambda y, v: _road_perv(y, v)),
+    "icemecc": ("c", lambda y, v: _mec(y, v)),
+    "do_smb_c": ("c", lambda y, v: _mec(y, v) | (y.flag(v, "is_soil") & (_icemask(y, v) > 0.0))),
 }
 
 
@@ -291,12 +344,17 @@ LAST_CHILD = {"topf": "t", "lndf": "l", "colf": "c", "pftf": "p"}
 TOPOLOGY_COUNT = {"npfts": "p", "ncolumns": "c", "nlandunits": "l", "ntopounits": "t"}
 # weight fields: the ancestor level the weight is relative to
 TOPOLOGY_WEIGHT = {"wtgcell": "g", "wtgcell_save": "g", "wttopounit": "t", "wtlunit": "l", "wtcol": "c"}
-TOPOLOGY_FALSE = {"glcmecpoi", "is_fates", "ispolygon"}  # ispolygon: no polygonal tundra landunits
-# logical fields that hold for the elements of landunits of these kinds
-TOPOLOGY_KIND = {
-    "lakpoi": (_L,), "is_lake": (_L,), "urbpoi": (_U,), "ifspecial": (_U, _L),
-    "is_soil": (_S,), "is_on_soil_col": (_S,), "is_crop": (_C,), "is_on_crop_col": (_C,),
-}
+TOPOLOGY_FALSE = {"is_fates"}
+# ELM never assigns col_pp%hydrologically_active (ColumnType allocates it .false.; the
+# is_hydrologically_active function is never called), so it is .false. on every column, though
+# TotalWaterAndHeatMod reads it
+TOPOLOGY_FALSE.add("hydrologically_active")
+# logical subgrid flags: hierarchy.Layout.flag (landunit, column and patch flags of initSubgridMod)
+TOPOLOGY_FLAGS = ("ifspecial", "lakpoi", "urbpoi", "glcmecpoi", "ispolygon", "is_soil", "is_crop", "is_lake",
+                  "is_on_soil_col", "is_on_crop_col")
+# fields ELM leaves at ispval: the ranges and counts of a topounit's or gridcell's landunits,
+# columns and patches (elm_ptrs_compdown sets only the gridcells' topounit range)
+_UNSET_RANGES = {"lndi", "lndf", "nlandunits", "coli", "colf", "ncolumns", "pfti", "pftf", "npfts"}
 # constants the domain decides (topounit_varcon): name -> layout -> value
 DOMAIN_CONSTANTS: dict[str, Callable[[Layout], Any]] = {
     "max_topounits": lambda y: y.max_topounits,
@@ -321,6 +379,8 @@ def topology_value(var: VarInfo, layout: Layout, spec: DomainSpec, ext: list[tup
             return layout.downhill().astype(np.int32)
         except HierarchyError as exc:
             raise DomainError(f"{var.name}: {exc}") from None
+    if lev in ("g", "t") and f in _UNSET_RANGES and layout.order == "elm":
+        return np.full(n, ISPVAL, dtype=np.int32)
     if f in LEVEL_OF_FIELD:
         target = LEVEL_OF_FIELD[f]
         idx = layout.parent(lev, target) if LEVELS.index(target) <= LEVELS.index(lev) else layout.first_child(lev, target)
@@ -338,11 +398,23 @@ def topology_value(var: VarInfo, layout: Layout, spec: DomainSpec, ext: list[tup
         return layout.active(lev)
     if f in TOPOLOGY_FALSE:
         return np.zeros(n, dtype=bool)
-    if f in TOPOLOGY_KIND and lev in ("l", "c", "p"):
-        return layout.is_kind(lev, *TOPOLOGY_KIND[f])
-    if f == "hydrologically_active" and lev == "c":
-        # column_varcon::is_hydrologically_active: soil and crop landunits, the pervious road
-        return layout.is_kind("c", _S, _C) | _road_perv(layout, "c")
+    if f in TOPOLOGY_FLAGS and lev in ("l", "c", "p"):
+        try:
+            return layout.flag(lev, f)
+        except HierarchyError as exc:
+            raise DomainError(f"{var.name}: {exc}") from None
+    if f == "polygontype" and lev == "l":
+        return layout.polygon_type().astype(np.int32)
+    if f == "glc_topo" and lev == "c":
+        topo = layout.glc_topo()
+        if np.isnan(topo).any():
+            raise DomainError(f"{var.name}: the routines read glc_topo; give every glacier-mec class a `topo`")
+        return topo
+    if f == "mxy" and lev == "p":
+        try:
+            return layout.mxy().astype(np.int32)
+        except HierarchyError as exc:
+            raise DomainError(f"{var.name}: {exc}") from None
     if f == "snl":
         return np.full(n, -spec.snow_layers, dtype=np.int32)
     if f == "itype" and lev in ("l", "c", "p"):

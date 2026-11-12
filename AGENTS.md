@@ -5,95 +5,30 @@ reference-vs-development workflow; this file only covers what the README doesn't
 
 ## Environment
 
-The user works on several machines with this repo, and this file is shared between them.
-**Find out which one you're on** (`lscpu`, `nvidia-smi`, `ls ~/climate-projects/py12env`) and
-edit only that machine's notes. Don't replace another machine's section with what you find
-locally. Earlier edits made that mistake.
-
-Common to all: the gfortran netcdf/mpich builds live in `~/.local/gcc/` (the default
-`PKG_CONFIG_PATH`). Production profiling runs on Perlmutter; only test locally unless the user
-asks otherwise.
-
 Machine specifics (toolchains = modules/`PKG_CONFIG_PATH` per compiler, scratch, cprnc, casegen
 defaults) are in machine files: `spel/machines/{perlmutter,chrysalis}.toml` (bundled, detected
 automatically; toolchains take their modules from the E3SM checkout's `config_machines.xml`) or
-`~/.config/spel/machines/<name>.toml` (`spel machine init`; the laptop and workstation need one,
-written from the notes below). `spel machine` shows what applies, `spel machine check` verifies
-the toolchains, `spel run`/`spel profile`/`spel validate` build inside the toolchain of `SPEL_FC`,
-`profile_compare.sh` and `e3sm_casegen.sh --preset` read the same file. `SPEL_MACHINE=none`
-falls back to the current shell environment. When a machine's setup changes, change its machine
-file, not these notes alone.
+`~/.config/spel/machines/<name>.toml` (`spel machine init`). `spel machine` shows what applies,
+`spel machine check` verifies the toolchains, `spel run`/`spel profile`/`spel validate` build
+inside the toolchain of `SPEL_FC`, and `profile_compare.sh` and `e3sm_casegen.sh --preset` read
+the same file. `SPEL_MACHINE=none` falls back to the current shell environment. When a machine's
+setup changes, change its machine file. Batch (Slurm) jobs need the user's OK.
 
-### Perlmutter
+Pitfalls worth knowing:
 
-Production profiling and large (e.g. crop, `--preset crop-perf`) reference runs. Recorded on
-2026-10-19.
-
-- Login nodes are shared and have A100 GPUs. Build and run unit tests on an interactive CPU node
-  (`salloc -N 1 -q interactive -C cpu -t 2:00:00 --no-shell`, then
-  `srun --jobid=JOB --overlap -N1 -n1 -c 64 ...`); Slurm jobs need the user's OK.
-- `spel` comes from the NERSC python module (`nersc-python` 3.13, conda env 26.8.1); the user
-  install is `~/.local/perlmutter/python-3.13/26.8.1/bin/spel`.
-- Crop performance runs: `./e3sm_casegen.sh --preset crop-perf --res t-lr25 --with-crops
-  --compressed-cft` (pm-cpu default compiler = Intel, 1024 tasks, 5 days, debug queue).
-- Performance cases must all be the same kind of build: the crop-perf preset makes threaded builds
-  (`FORCE_BUILD_SMP=TRUE`, `-qopenmp`, NTHRDS=1; machine file `casegen.nthrds = 1`). A non-threaded Intel
-  build of identical code ran 3-8% slower on untouched BGC routines (summer stride-8, 2026-10-22), which
-  looked like a code regression. Don't `xmlchange` a case while its `case.build` runs ("env_run.xml appears
-  to have changed without a corresponding invalidation"; recover with `case.setup --reset`).
-- Stride-8 summer window: `--finidat $SCRATCH/stride8/spin30m.elm.r.0003-07-01.nc --start-date 0003-07-01
-  --datm-years 1901 1903` (symlink: the real path exceeds the namelist string limit). A case without the
-  start date silently runs January from the July restart (it happened once: canflux -20%, surfalb +10%).
-- Unit-test toolchains (`spel/machines/perlmutter.toml`, all verified 2026-10-22 with
-  `spel machine check`): `gfortran` (PrgEnv-gnu, gcc-native 14, the default), `nvfortran`
-  (PrgEnv-nvidia, nvidia/25.9 = `/opt/nvidia/hpc_sdk/Linux_x86_64/25.9`) and `ifx`; modules from
-  E3SM's pm-cpu entry plus `$CRAY_MPICH_DIR/lib/pkgconfig` (the Cray netcdf-fortran `.pc` needs
-  the mpich one). The nvfortran toolchain sets `ACC_DEVICE_TYPE=multicore`: otherwise the
+- Perlmutter login nodes are shared and have A100 GPUs: build and run unit tests on an
+  interactive CPU node. The nvfortran toolchain sets `ACC_DEVICE_TYPE=multicore`; otherwise the
   OpenACC runtime may try the login node's GPU and loop forever printing `Failing in Thread:1`.
-  `SPEL_DBG` defaults to ON (`-O0` + coverage); use `SPEL_DBG=OFF` for timing.
-- `cprnc` is `/global/cfs/cdirs/e3sm/tools/cprnc/cprnc`; restart files need `-m`.
-
-### Chrysalis (LCRC, AMD EPYC, 64 cores/node)
-
-CPU crop-performance runs, which moved here from Perlmutter. Recorded on 2026-10-21.
-
-- `spel` comes from `~/spel-py314` (spack Python 3.14; `~/myenv` is 3.11, too old). Unit tests build with
-  Intel: the `ifx` toolchain of `spel/machines/chrysalis.toml` (modules from E3SM's chrysalis intel/openmpi
-  entry; written from `config_machines.xml`, not yet run there: check with `spel machine check` and fix the
-  machine file if `pkg-config netcdf-fortran` is not found). The older manual route is
-  `source ~/spel-intel-env.sh` (the ELM case's `.env_mach_specific.sh`, `SPEL_FC=ifx`), also usable as
-  `spel validate --test-env` or as the toolchain's `env_file`. The `gfortran` toolchain (E3SM's
-  chrysalis_gnu modules: gcc 11.2, netcdf-fortran 4.5.3) works for the Fortran round-trip tests
-  (`test_subset.py`, 2026-11-11): `SPEL_E3SM_SRCROOT=~/integration/E3SM spel machine env --fc gfortran
-  > env.sh; source env.sh` (the default srcroot `../dev_E3SM` doesn't exist here). Its pkg-config
-  omits `-I` (the directory is on `CPATH`); tests add `fmoddir` themselves.
-- E3SM checkouts: `~/integration/E3SM` (upstream bishtgautam/lnd/add-t-meshes-v3 @ e5aa4e3094,
-  the baseline) and its worktree `~/E3SM-gpu-refactor` (peterdschwartz/lnd/gpu-refactor-nutrient-types,
-  which contains the crop-perf branch). Only these two are compared.
-- Handoff notes and user mods: `/lcrc/group/e3sm/ac.schwartzpd/crop_case_files`
-  (`CHRYSALIS_HANDOFF.md`, `user_mods/stride8_chrys`). Inputs: `/lcrc/group/e3sm/ac.schwartzpd/crop_inputdata`
-  (`stride8/` in inputdata layout, `spin30m_restart/` = the 0003-07-01 stride-8 restart; the paramfile
-  is a symlink into `crop_reduced_inputdata/`).
-- Stride-8 cases are the workhorse. Full 1024-task t-lr25 cases (16 nodes, debug queue) run only when the
-  user asks: `./e3sm_casegen.sh --preset crop-perf --res t-lr25 --no-crops` and `--with-crops
-  --compressed-cft --remove-zero-weight-urban`. The non-crop and 50-pft t-lr25 surfdata are in shared
-  inputdata; the domain and `MOSART_u.oi6to18.lr25.nc` aren't, and casegen takes them from
-  `COMPRESSED_CFT_DIR` for any t-lr25 case.
-- `e3sm_casegen.sh --preset crop-perf` detects Chrysalis by hostname: `chrysalis`, Intel, cases under
-  `/lcrc/globalscratch/$USER/E3SM_testings`, debug queue (account `e3sm`, up to 20 nodes).
-  It forces NTHRDS=1 and 64 MPI tasks per node: the default layout for these compsets is 32 tasks x 2 threads.
-- Stride-8 summer window (128 tasks = 2 nodes, the same gridcells per rank as Perlmutter's 1024-task case):
-  `./e3sm_casegen.sh --preset crop-perf --res ELM_USRDAT --with-crops --user-mods
-  /lcrc/group/e3sm/ac.schwartzpd/crop_case_files/user_mods/stride8_chrys --ntasks 128 --no-daily-history
-  --finidat <spin30m restart> --name-suffix stride8.spin30m --srcroot <checkout>`. CIME accepts the
-  absolute `finidat`. Builds run on the login node; batch jobs need the user's OK. CIME's
-  case-directory git can race with the job right after `case.submit` (`index.lock` exists): resubmit.
-- Put CIME cases and all SPEL unit tests on `/lcrc/globalscratch/ac.schwartzpd` (the user's choice,
-  2026-10-22); `/lcrc/group/e3sm` (fs2) is nearly full and briefly ran out of space on 2026-10-21.
-  `SPEL/unit-tests` is a symlink to `/lcrc/globalscratch/ac.schwartzpd/spel-unit-tests`; keep only
-  symlinks in the SPEL tree. The earlier cases (stride-8, baseline t-lr25) are still under
-  `/lcrc/group/e3sm/ac.schwartzpd/scratch/chrys/E3SM_testings`.
-- `cprnc` is `/lcrc/group/e3sm/tools/cprnc/cprnc`.
+  The Cray netcdf-fortran `.pc` needs `$CRAY_MPICH_DIR/lib/pkgconfig` on `PKG_CONFIG_PATH`.
+- Chrysalis' gfortran toolchain (E3SM's chrysalis_gnu modules) has a pkg-config that omits `-I`
+  (the directory is on `CPATH`); tests add `fmoddir` themselves.
+- `cprnc` compares restart files only with `-m`.
+- Performance comparisons need builds of the same kind: a threaded (`FORCE_BUILD_SMP`) and a
+  non-threaded Intel build of identical code differ by several percent on untouched routines.
+- CIME: don't `xmlchange` a case while its `case.build` runs ("env_run.xml appears to have changed
+  without a corresponding invalidation"; recover with `case.setup --reset`); the case directory's
+  git can race with the job right after `case.submit` (`index.lock` exists): resubmit. A case
+  started from a restart without the matching `--start-date` silently runs from the default date.
 
 ## Generated vs. hand-edited files
 
@@ -128,13 +63,12 @@ For analysis features, test on small snippets instead: `walk()` in
 pattern in `spel/scripts/tests/test_record_access.py` (or `Sub` in
 `spel/transforms/tests/test_acc_to_omp.py`) feeds it to `AccessMapper`.
 
-Compile-check Fortran templates with both compilers (netcdf-fortran `.mod` files are compiler
-specific; the nvfortran include path is per machine, see Environment):
+Compile-check Fortran templates with both compilers, each against its own netcdf-fortran
+(`.mod` files are compiler specific; `spel machine env --fc FC` sets up a toolchain):
 
 ```bash
-gfortran -c -ffree-line-length-none -I$HOME/.local/gcc/netcdf-fortran/include SourceFiles/nc_io.F90 SourceFiles/nc_allocMod.F90
-nvfortran -c -I$HOME/.local/nvhpc-libs/netcdf-fortran/include SourceFiles/nc_io.F90 SourceFiles/nc_allocMod.F90  # laptop
-nvfortran -c -I$HOME/.local/netcdf-fortran/include SourceFiles/nc_io.F90 SourceFiles/nc_allocMod.F90             # GPU workstation
+gfortran -c -ffree-line-length-none -I$NETCDF_FORTRAN_GNU/include SourceFiles/nc_io.F90 SourceFiles/nc_allocMod.F90
+nvfortran -c -I$NETCDF_FORTRAN_NV/include SourceFiles/nc_io.F90 SourceFiles/nc_allocMod.F90
 ```
 
 Do this in a scratch directory so `.mod`/`.o` files don't land in the repo.
@@ -343,8 +277,8 @@ feature that needs to know what a statement *is* or which names it uses must get
   (`ctx.child_loops` in a transform). `spel transform filter-map` rewrites the exact ones and threads the map
   (and `filter_soilp` where missing) through the analyzed callers as keyword actuals; callers outside the
   analysis (elm_interface_funcsMod) need the same by hand.
-- Transforms that replace hand edits of the GPU branch (2026-11-03; all bit-for-bit on the RD/ECA/FATES
-  regression, `$SCRATCH/prsplit/v2/tools/regress.sh`): `scalarize-locals` (local_forms' per-iteration
+- Transforms that replace hand edits of an OpenACC port (bit-for-bit on RD, ECA and FATES
+  regression runs): `scalarize-locals` (local_forms' per-iteration
   arrays -> scalars), `filter-locals` (clump-sized work arrays stored on their filter, across calls as
   groups: filter_locals_ip.py), `drop-dummies` (unused `bounds` dummies and their actuals),
   `acc-routines` (`!$acc routine seq` exactly on the routines kernels reach), `acc-declares`
@@ -379,12 +313,12 @@ feature that needs to know what a statement *is* or which names it uses must get
   `python -m spel.transforms.tools.golden OUT --srcroot SRC --only PASS ...` (old code from a
   `git worktree` of HEAD) and `diff -r`; `--chain nutrient` replays the nutrient refactor (through `spel transform`). Plans must
   not depend on set order: run a pass under two `PYTHONHASHSEED`s if outputs look flaky.
-- pytest needs `DJANGO_DEBUG=true` in the environment (the Django settings refuse to load without
-  a secret otherwise).
+- The Django settings default to `DJANGO_DEBUG=True` (a dev secret), so plain `pytest` works; a
+  production `.env` with `DJANGO_DEBUG=false` needs `DJANGO_SECRET_KEY`.
 
 ## Compact layout (`spel compact`)
 
-- Since 2026-10-22 the E3SM branch no longer carries the compact rewrite: the layout is applied per
+- The compact rewrite is not carried in E3SM sources: the layout is applied per
   case at build time, `e3sm_casegen.sh --compact` (= `spel transform compact-rewrite --srcroot SRC --reanalyze
   -o CASE/SourceMods/src.elm`, case name gets `.compact`; `COMPACT_ARGS` env adds options such as
   `--roles`). The branch does carry `CompactLayoutMod.F90` (the history readers use it); the rewrite
@@ -399,7 +333,7 @@ feature that needs to know what a statement *is* or which names it uses must get
 - `compact-rewrite` needs the analysis of exactly the sources it edits (`spel analyze` first) and refuses
   sources that already have `CompactBindMod.F90` or `.spel-compact.json`. Test it with
   `-o $CASE/SourceMods/src.elm` against a baseline case built from the same commit (bit-for-bit
-  history files; `$SCRATCH/prsplit/validate_level.sh LABEL SRC REF` with `COMPACT_ARGS` does this).
+  history files).
   Don't run analysis probes on a srcroot while a `--reanalyze` of it runs (truncated pickle).
 - `CompactLayoutMod` must only use share modules (`shr_*`): `decompMod` uses it, so ELM modules
   like `abortutils` would make a module cycle.
@@ -441,6 +375,8 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
     `core.fortran` emitters. The routine call's actuals come from `ut.driver_bindings`;
   - `build.py`: builds `<case>/build-py/libspelcase.so` (CMake `SPEL_PYLIB=ON` from
     `generate_cmake`); other builds (`Variant`: fc, acc, dbg) go to `build-py-<fc>-<acc>[-dbg]`;
+  - `hierarchy.py`: ELM's subgrid hierarchy (declarations, `Layout`); `domains.py`: drawn domains
+    and their shrinking;
   - `domain.py`: the synthetic domain under `<case>/proptest/domain-<hash>`: the constants file,
     and either an inputs file (`[domain] init = "files"`) or, by default for cases made with
     spel_varMod, `Domain.direct` (bounds + non-fill values), which the worker allocates through the
@@ -454,7 +390,9 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
     `functions.py` have a registry each (`@register`), and the spec reader and runner know only
     the interfaces. Add a kind there, not as a branch in `spec.py`/`runner.py`;
   - `strategies.py`, `runner.py`: Hypothesis; `Session` runs the routine through a backend
-    (`get`/`run`/`stop`: a `Worker`, or a test's fake);
+    (`get`/`run`/`stop`, `begin`/`step`: a `Worker`, or a test's fake);
+  - `coupling.py`, `timestep.py`: multi-step runs (the boundary, the calendar);
+  - `api.py` (Python builder of specs), `tomlw.py` (TOML writer), `results.py` (inspection);
   - `scaffold.py` (`init`), `stats.py`, `subspace.py`, `coverage.py`: design aids; `paths.py`: where files go.
 
   No module recognises Fortran by text: names, dims, guards and expressions all go through the
@@ -474,7 +412,6 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   same library. Rules of variables dead in a configuration are dormant there (`Session.live_inputs`).
   Liveness of names is checked per scenario at load (`spec._check_configurations`,
   `Check.check_scenario`). `Inventory.load` alone counts every branch as running.
-  On canflux the reference options leave 51 of 284 variables unused (34 under `use_hydrstress`).
   Non-namelist switches (`soil_stress_method`) can be set in `[namelist]` but prune nothing.
 - Files: scratch in `<case>/proptest/` (domains, logs of aborted workers, units cache); what must
   survive `spel create` (which deletes the case directory's contents) in
@@ -483,8 +420,7 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   generated shim differs; `Session` then rebuilds (incremental). The stamp also records the
   netcdf-fortran directory of the build, which the worker puts first in `LD_LIBRARY_PATH`, so a
   gfortran and an nvfortran build of one case run in the same session (differential checks).
-  Without a machine file, build each variant in a shell set up for its compiler (on the laptop:
-  `source ~/.local/nvhpc-libs/env.sh` for nvfortran).
+  Without a machine file, build each variant in a shell set up for its compiler.
 - Input/output classification uses `db_export.trace.StaticTrace` over the case routines
   (`inventory.trace_status`), with the root env seeded from `driver_bindings`, and
   `fieldstate.categorize`: prognostic → inout, input → input, diagnostic/intermediate → output.
@@ -510,32 +446,44 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   and cannot read GCC 14 files) and takes counts as before/after differences, so nothing in the
   build directory is deleted.
 - Domains are ELM's hierarchy (`hierarchy.py`: `Gridcell` > `Topounit` > `Landunit` > `Column` >
-  `Patch`, weights in the parent, constructors `Soil`/`Crop`/`Urban`/`Lake` following
-  initGridCellsMod; `[[domain.gridcell]]` in TOML), laid out by `hierarchy.Layout` depth first,
-  set by set. Element counts differ by level: take them from `layout.count(level)`, ancestors from
-  `layout.parent`/`ancestor_of`, descendants (always a contiguous range) from
-  `first_child`/`last_child`/`descendants`, relation halves from `Session.half_count(level)`;
-  permutations move whole gridcells of one declaration (`layout.row_permutation`). Topology
-  values (`domain.topology_value`) all come from the layout, including `topo_grc_ind` (the number
-  within the gridcell), `downhill_ti` (set_topounit's algorithm, quirk included) and the rank-2
-  `landunit_indices`; `max_topounits`/`has_topounit` are `DOMAIN_CONSTANTS`. Declared topounit
-  elevations pin `top_pp%elevation` (`Domain.pinned`). ELM type codes are `hierarchy.TYPE_CODES`,
-  checked against the case's parameters.
-- Checked on UrbanFluxes (`urbval`, 2026-11-11): a town, a mixed gridcell (soil column with two
-  weighted pfts, urban, lake) and three topounits with one inactive; `Session.built().check()`
-  found no difference between the declaration and the case (topology, bounds, the filters of
-  `domain.EXPECTED_FILTERS`), the inactive topounit's landunit is out of `urbanl`. Urban geometry
-  inputs need ELM's derivations (`scaffold.URBAN_DERIVE`), or about 30% of drawn landunits take
-  logs of negative heights (NaN).
+  `Patch`, weights in the parent; constructors for every landunit kind ELM builds, following
+  initGridCellsMod: `Soil`, `Polygon`, `Crop`, `Urban`, `Lake`, `Wetland`, `Glacier`, `GlacierMec`;
+  `glcmask`/`icemask` per gridcell; `[[domain.gridcell]]` in TOML). Activity is subgridWeightsMod's
+  is_active_l/c/p (`all_active` off). `Layout` lays a set out in ELM's clump order (`order = "elm"`,
+  the default since 2026-11-12): landunits in one pass per type over all topounits, so a gridcell's
+  or topounit's landunits, columns and patches are NOT contiguous (`"depth"` keeps them so). Take
+  element counts from `layout.count(level)`, ancestors from `parent`/`ancestor_of`, descendants
+  from `descendants` (index arrays; `first_child`/`last_child` are ranges only for l -> c -> p),
+  relation halves from `Session.half_count(level)`; `row_permutation` exchanges whole gridcells of
+  one declaration. `[domain] subgrid` adds ELM's implicit elements (the soil landunit on every
+  topounit, every pft/CFT, every glacier class in the glcmask). Topology values
+  (`domain.topology_value`) all come from the layout: flags (`Layout.flag`), `topo_grc_ind`,
+  `downhill_ti` (set_topounit's algorithm, quirk included), the rank-2 `landunit_indices`
+  (polygons under polygontype + 9); ELM leaves the topounit/gridcell landunit ranges at ispval and
+  never sets `col_pp%hydrologically_active` (always .false., though TotalWaterAndHeatMod reads it),
+  and so does the domain. `max_topounits`/`has_topounit` are `DOMAIN_CONSTANTS`; declared
+  topounit elevations pin `top_pp%elevation` (`Domain.pinned`). ELM type codes are
+  `hierarchy.TYPE_CODES`, checked against the case's parameters.
+- Checked against ELM: `experiments/elm_layout_oracle.py RESTART` rebuilds every gridcell of a
+  restart file (land1d/cols1d/pfts1d) as a declaration and compares types, weights, activity and
+  order (every gridcell of a 95,000-gridcell run matched); `Session.built().check()`
+  compares what a case built (topology, bounds, `domain.EXPECTED_FILTERS`) with the declaration.
+  Urban geometry inputs need ELM's derivations (`scaffold.URBAN_DERIVE`), or about 30% of drawn
+  landunits take logs of negative heights (NaN).
+- Drawn domains (`domains.py`, `[domain.draw]`): `runner.run` runs every check on `count` domains
+  drawn from the seed, one Session each (the shim cannot deallocate, so each domain is a new
+  worker); Hypothesis draws only the inputs. Failures of one domain are shrunk together
+  (`runner._shrink`: candidates from `shrink_candidates`, quick runs without input shrinking, then
+  each check alone, then one full run per final domain) and saved to
+  `failures/<scenario>__<check>__d<k>/` with `domain.toml`, which `replay` reads. Known weakness:
+  a shrink step can change which bug fails (e.g. a weight-0 topounit made active).
 - Python API (`api.py`): builds the TOML-shaped dict `spec.parse` reads, checking each piece with
   the reader's own code; `tomlw.py` writes it. Inspection: `results.py` (`BuiltDomain`, `Result`
   frames, `Verdict`), `Session.sample` (the test-run draw through `strategies.RngChooser`).
   `init` takes the landunit kinds from the routine's filter arguments
   (`scaffold.routine_landunits`, `domain.FILTER_KINDS`/`FILTER_COMPLEMENTS`); `stats --landunits`
-  restricts the statistics. Kinds and urban densities are enums (`LandunitKind`, `UrbanDensity`).
-- Not done: glacier/wetland landunits,
-  ELM's activity special cases (`all_active`, zero-weight urban), type-bound routines in the shim. No local case has
-  `driver_args`, so that path is tested only on a synthetic inventory.
+  restricts the statistics. Kinds, urban densities and polygon types are enums (`LandunitKind`,
+  `UrbanDensity`, `PolygonType`).
 - Multi-step runs (SPEC.md "Multi-step runs"): worker ops `begin`/`step` (no reset between steps;
   `run` = one call, unchanged), `Session.run_steps` (cached per example; `compute` returns the
   state of the step being judged, `_step` is shared with siblings and `other`, so relations and
@@ -550,12 +498,14 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   elsewhere (`qflx_from_uphill`: SurfaceRunoff on hydrologyc, ColWaterBalanceCheck on every column), so
   a `between` sees ELM's stale value, not a NaN ELM never has. `child_wsum` skips inactive/weight-0
   children as subgridAveMod does. Fortran `MAX(0, NaN)` is 0 with gfortran and NaN with ifx
-  (2026-11-12); fexpr's `max` propagates NaN (ifx-like), which matters for NaN stores (H2/H3).
+  fexpr's `max` propagates NaN (ifx-like), which matters when a state can hold a NaN.
 - Tutorial: `spel/proptest/examples/canopyfluxes_tutorial.ipynb` (executed, with outputs). Change it through
   its narrative and re-execute it (`nbclient`) after API changes; its text quotes actual results.
 - Tests (`spel/proptest/tests/`): `test_proptest.py` (snippets; the CanopyFluxes end-to-end test is
-  skipped unless the `canflux` case exists and `spel proptest build canflux` has been run), `test_runner_fake.py` (the runner on
-  `fake.py`: a synthetic inventory and a numpy "routine", no build), `test_domain.py`,
+  skipped unless the `canflux` case exists and `spel proptest build canflux` has been run),
+  `test_runner_fake.py` and `test_multistep.py` (the runner on `fake.py`: a synthetic inventory and a
+  numpy "routine", no build), `test_domain.py` (hierarchy, layout, topology, filters),
+  `test_domains.py` (drawing, shrinking, the drawn-domain run on the fake), `test_api.py`,
   `test_runtime.py` (ctypes and the worker on a hand-written gfortran library).
 
 ## Comparing E3SM timings
@@ -621,15 +571,13 @@ Testing:
 - `spel/scripts/tests/test_subset.py`: mask parsing, capture-module generation, and a gfortran
   program writing a synthetic capture (non-unit process bounds) through `nc_io`, compared
   bit-for-bit with the offline subsetter (`subset_dataset`, `diff_datasets`).
-- End to end (done on the laptop on 2026-10-18, all PASS): one `spel validate` run with a full
+- End to end: one `spel validate` run with a full
   case and a subset case of the same routine (e.g. `urb_full: urbanfluxes` and
   `urb_sub[urban]: urbanfluxes`), then check that `subset_dataset` of the full files at the
   `spel_subset_gindex` gridcells is bit-for-bit the subset files, and that `[all]` reproduces the
-  full capture. On the 21-gridcell case, urban = gridcells 3, 5, 7 and lakes = 1-9 (from
-  `PCT_URBAN`/`PCT_LAKE` in its surface dataset). That case has no crops: the `crop` preset
-  (`lun_pp%itype(l) == istcrop`) still needs a test on a crop configuration (Perlmutter).
+  full capture. Pick the expected gridcells from the surface dataset (`PCT_URBAN`, `PCT_LAKE`, ...).
 - To instrument E3SM master without touching uncommitted work in it, use a scratch `git worktree`
-  of its HEAD, rsync the submodule trees and the untracked `mylaptop_gnu.cmake` into it, and pass
+  of its HEAD, rsync the submodule trees and any untracked machine files into it, and pass
   `--srcroot` (its analysis takes about 45 s). Remove the worktree and its `.spel-cache` entry after.
 
 ## Don'ts

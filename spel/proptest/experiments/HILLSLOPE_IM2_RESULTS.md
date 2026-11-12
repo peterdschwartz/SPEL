@@ -182,3 +182,29 @@ subgridAveMod), the domain function `downhill_inactive(t)`.
   (ifx-like).
 - Fix direction (not part of the H1 branch): skip inactive topounits in set_topounit's neighbour
   search, or guard the send with `top_pp%active(downhill_t)`.
+
+## Phase 5: H3, the NaN stores of the full runs (2026-11-12)
+
+**Cause.** ELM keeps a virtual natural-vegetation (soil) landunit of weight 0 active on every active
+topounit that is not all plain glacier (`subgridWeightsMod.F90` is_active_l, l.380). Its column is in
+`hydrologyc`. On a topounit whose other landunits are wetland, lake or glacier it is the only hydrology
+column, so SurfaceRunoff's `top_pp%uphill_wt(t)` (the sum of the hydrologyc columns' `wttopounit`) is 0 and
+`qflx_from_uphill(c) = (0/0) * ...` (SoilHydrologyMod.F90:283) is NaN every step, even with an empty store and
+without any uphill neighbour. ColWaterBalanceCheck's drain then gives `max(0, store - NaN)`: NaN with ifx (the
+full runs), 0 with gfortran (where the store, and any water routed into it, is silently deleted every step).
+The NaN also enters the virtual column's `qflx_top_soil`; its weight is 0, so gridcell averages hide it.
+
+**Check against the full run** (`hs-im2.elm.r.0001-01-06-00000.nc`): the topounits with hydrologyc columns whose
+`wttopounit` sum to 0 are exactly the 1527 NaN `FROM_UPHILL` topounits (1527 both ways, no exception): 1304
+wetland, 158 glacier + lake, 55 lake, 10 lake + wetland. The 37596 topounits without a hydrology column (all
+plain glacier: no virtual landunit) are finite.
+
+**proptest** (`hillslope_im2_h3.proptest.toml`, `... h3`; `Layout.active` now follows is_active_l/c/p, so
+`Soil(13, weight=0.0)` is that virtual landunit): hillslopes "lowest first" (control), "lake low" (a lake
+topounit with the virtual soil landunit at the bottom), "lake alone" (one such topounit); 12-step storm, 6
+examples. Fail at step 1, only at the lake topounits (both sets): the flux from uphill is finite on every
+hydrology column (the virtual columns), the store stays finite, R4 conservation with IM2 off. The control passes.
+
+**Fix direction** (a science choice for the IM2 developers): guard the release with `uphill_wt(t) > 0`; then
+decide where water routed into a topounit with no positive-weight hydrology column goes (into the lake or
+wetland, or straight to runoff), instead of keeping it in a store nothing releases.

@@ -39,9 +39,10 @@ pip install -e .
 ```
 
 This installs the `spel` console script (`[project.scripts]` → `spel.cli:main`).
-Django (the database / web app) and PyTorch (`spel sample`/`spel train`) are optional extras:
-`pip install -e '.[db]'` (`'.[mysql]'` adds the MariaDB driver, `'.[db-test]'` pytest-django),
-`pip install -e '.[ml]'`, or `'.[db,ml]'` for both.
+Django (the database / web app), Hypothesis (`spel proptest`) and PyTorch (`spel sample`/`spel train`)
+are optional extras: `pip install -e '.[db]'` (`'.[mysql]'` adds the MariaDB driver, `'.[db-test]'`
+pytest-django), `pip install -e '.[proptest]'`, `pip install -e '.[ml]'`, or several at once
+(`'.[db,proptest]'`). `spel repl` needs IPython, which no extra installs.
 
 ### Pointing SPEL at E3SM
 
@@ -91,20 +92,11 @@ $EDITOR ~/.config/spel/machines/mybox.toml        # toolchains, [detect], scratc
 SPEL_MACHINE=mybox spel machine check             # until it passes; then put SPEL_MACHINE=mybox in .spel.env
 ```
 
-For each compiler you build with, give the file one `[toolchains.<fc>]` table that makes `<fc>`,
-`cmake` and `pkg-config netcdf-fortran` work: on a machine E3SM supports, `e3sm_compiler = "gnu"`
-takes the modules from E3SM's `config_machines.xml`; on a laptop, `commands` (module loads, PATH)
-or `env_file` plus `pkg_config_path` to the netcdf-fortran built with that compiler (nvfortran needs
-its own build: `.mod` files are compiler specific). Fill `[detect]` so the file is picked
-automatically, or keep selecting it with `SPEL_MACHINE`. Capturing reference data (`--run-case`,
-`spel validate`) also needs the E3SM checkout to build on this machine, i.e. a CIME machine entry
-for it; `e3sm_casegen.sh` takes its machine and scratch from the machine file.
-
-After that, the toolchain is applied by every build: `spel run canflux` uses the machine's default
-compiler, `SPEL_FC=nvfortran spel run canflux` another one, and
-`source <(spel machine env --fc nvfortran)` gives the same environment to an interactive shell.
-Details of the file format are under [Machine configuration](#machine-configuration);
-`SPEL_MACHINE=none` makes SPEL use the current shell environment, as before machine files existed.
+The toolchain tables are described under [Machine configuration](#machine-configuration).
+Capturing reference data (`--run-case`, `spel validate`) also needs the E3SM checkout to build on
+this machine, i.e. a CIME machine entry for it; `e3sm_casegen.sh` takes its machine and scratch
+from the machine file. After that, every build uses the toolchain: `spel run canflux` the
+machine's default compiler, `SPEL_FC=nvfortran spel run canflux` another one.
 
 ### 1. Extract a routine into a standalone test
 
@@ -163,15 +155,14 @@ files.
 ### 5. Merge the change back into ELM
 
 ```bash
-spel restore -c canflux --dry-run     # list the files that would be copied back
-spel restore -c canflux               # copy them into E3SM_SRCROOT
+spel restore -c canflux --dry-run     # list the changed files and their diffs
+spel restore -c canflux               # apply your changes to the case's E3SM checkout
 ```
 
-[`spel restore`](#spel-restore) finds the source files you changed in the case since
-`spel create`. It undoes SPEL's edits (dependencies commented out with a `!#py ` token are
-uncommented) and copies them back to their place in the E3SM checkout. Files that SPEL wrote for
-the test harness itself (`SourceFiles/`) are never copied. The ELM sources then contain exactly
-your change, ready for a full E3SM build and a pull request.
+[`spel restore`](#spel-restore) applies only your edits to the E3SM checkout the case was made
+from: it diffs each case file against the pristine copy `spel create` kept, and patches the
+original source with that diff. The ELM sources then contain exactly your change, ready for a
+full E3SM build and a pull request.
 
 ### 6. Compare a development branch against a reference branch
 
@@ -187,7 +178,10 @@ spel run canflux                                                       # your br
 The second `create` regenerates `unit-tests/canflux/` but leaves the reference data in
 `unit-tests/input-data/canflux/` alone. `spel run` reports which checkout generated the test and
 which one produced the data. The diffs are then the answer differences between the branches. This
-works when both branches read the same derived-type components as inputs.
+works when both branches read the same derived-type components as inputs; when the development
+branch reads others, capture for both: `spel create ... --run-case --capture-for canflux_dev` also
+records the fields and constants the case `canflux_dev` (the same routine created from the
+development branch) reads.
 
 ### 7. Understand the code
 
@@ -224,7 +218,9 @@ spel proptest run   canflux.proptest.toml                        # the checks, o
 Hypothesis draws from a *scenario*, and checks invariants, metamorphic relations (also between
 two namelist settings) and agreement between two builds, all written in Fortran syntax in a TOML
 file. The spec is read under its namelist options: variables only used under options that are
-off (the C13 fields with `use_c13` off) do not appear. A capture checks one regime bit
+off (the C13 fields with `use_c13` off) do not appear. A scenario can run several time steps,
+stating what the rest of ELM's step does between them, and the domain can be declared or drawn
+at random from every subgrid structure ELM builds. A capture checks one regime bit
 for bit; a scenario covers the regimes you describe, including ones no capture reached. Reference
 captures only help to design the scenarios. The tutorial
 [`spel/proptest/examples/canopyfluxes_tutorial.ipynb`](spel/proptest/examples/canopyfluxes_tutorial.ipynb)
@@ -245,9 +241,12 @@ format is in [`spel/proptest/SPEC.md`](spel/proptest/SPEC.md).
 | `SourceFiles/` | Fortran support files copied into every generated unit test |
 | `unit-tests/<casename>/` | Generated unit-test cases |
 | `unit-tests/input-data/` | NetCDF input/output data for unit tests |
+| `spel/transforms/` | `spel transform` (the registry, `core/`, and the compact, nutrient, split and device transforms) |
+| `spel/machines/` | Bundled machine files (`spel machine`) |
 | `unit-tests/proptest-data/` | Results of `spel proptest` that outlive a regenerated case (failing examples, rule files) |
-| `script-output/` | Intermediate generated Fortran |
-| `spel/scripts/fut_<casename>.pkl` | Serialized analysis results (see below) |
+| `unit-tests/.spel-cache/` | Per-checkout `elm_drv` analysis caches |
+| `script-output/` | Intermediate generated Fortran; database exports (`db-export/<label>/`) |
+| `unit-tests/<casename>/fut.pkl` | Serialized analysis of a case (see [Pickled unit tests](#pickled-unit-tests)) |
 
 ---
 ### Machine configuration
@@ -255,14 +254,8 @@ format is in [`spel/proptest/SPEC.md`](spel/proptest/SPEC.md).
 Building a unit test needs a Fortran compiler, `cmake` and a matching `netcdf-fortran` (found with
 `pkg-config`). On a machine SPEL knows, `spel run`, `spel profile` and `spel validate` set that up
 themselves, and `e3sm_casegen.sh --preset ...` and `profile_compare.sh` take their machine
-defaults from the same place:
-
-```bash
-spel machine            # what applies here: E3SM machine, scratch, cprnc, toolchains
-spel machine check      # set up every toolchain and verify compiler, cmake, netcdf-fortran
-spel machine setup      # put unit-tests/ and unit-tests/input-data on scratch (symlinks)
-spel run canflux        # builds with the machine's default toolchain (SPEL_FC=nvfortran for another)
-```
+defaults from the same place (setup steps: [workflow 0](#0-set-up-spel-on-a-machine); commands:
+[`spel machine`](#spel-machine)).
 
 Perlmutter (`gfortran`, `nvfortran`, `ifx`) and Chrysalis (`ifx`, `gfortran`) are bundled
 (`spel/machines/*.toml`) and detected automatically. Their toolchains take the modules and
@@ -270,15 +263,7 @@ environment of the corresponding compiler from the E3SM checkout's
 `cime_config/machines/config_machines.xml`, so they follow E3SM's own module versions; the
 machine file only adds glue (where unit tests go, `pkg-config` paths, `ACC_DEVICE_TYPE`).
 
-For another machine:
-
-```bash
-spel machine init mybox           # ~/.config/spel/machines/mybox.toml from the documented template
-$EDITOR ~/.config/spel/machines/mybox.toml
-SPEL_MACHINE=mybox spel machine check
-```
-
-A toolchain is a table `[toolchains.<fc>]` (`<fc>` = the compiler executable, what `SPEL_FC`
+Another machine gets a file from `spel machine init NAME` (workflow 0). A toolchain is a table `[toolchains.<fc>]` (`<fc>` = the compiler executable, what `SPEL_FC`
 selects) with either `e3sm_compiler = "gnu"` (modules from E3SM's machine entry, which needs
 `e3sm_machine`), `env_file = "~/env.sh"` (a file to source, e.g. a CIME case's
 `.env_mach_specific.sh`) or `commands = ["module load ...", ...]`, plus `pkg_config_path`,
@@ -308,12 +293,14 @@ All commands are subcommands of `spel`. Run `spel <command> --help` for the auth
 | [`spel transform`](#spel-transform) | Source-to-source transforms: OpenACC porting, `acc2omp`, compact layout, nutrient refactor, `split`, `prune`, ... (`spel transform list`) |
 | [`spel compact`](#spel-compact) | Inventory flux fields for a compact subgrid layout (the rewrite is `spel transform compact-rewrite`) |
 | [`spel accplan`](#spel-accplan) | Propose an OpenACC loop structure (collapse, column-parallel, interchange, scatter) per loop |
+| `spel gates` | Checks that the OpenACC transforms have nothing left to do and every sync is present (exit 1 on a failure; `--config PRESET\|lnd_in`, `--allow TEXT`) |
+| [`spel machine`](#spel-machine) | Show and check the machine file and its toolchains |
 | `spel nutrient` | Find the fields C/N/P type variants share (candidates for a common base type) |
-| [`spel restore`](#spel-restore) | Copy the files changed in a unit-test case back into the E3SM checkout |
+| [`spel restore`](#spel-restore) | Apply the edits made in a unit-test case to the E3SM checkout |
 | [`spel diff`](#spel-diff) | Compare two netCDF files and report relative error |
 | [`spel export`](#spel-export) | Write the `elm_drv` analysis as database CSVs (a snapshot) |
 | [`spel config`](#spel-config) | Print the resolved E3SM/ELM source paths |
-| [`spel upload`](#spel-upload) | rsync the netCDF interface files to a remote machine |
+| [`spel upload`](#spel-upload-deprecated) | rsync the netCDF interface files to a remote machine |
 | [`spel repl`](#spel-repl) | Drop into an IPython shell wired to the Fortran parser |
 | [`spel sample`](#spel-sample-and-spel-train-experimental) | *(experimental)* sample unit-test output for ML training |
 | [`spel train`](#spel-sample-and-spel-train-experimental) | *(experimental)* train an emulator network |
@@ -372,6 +359,8 @@ spel create -s <subroutine> [<subroutine> ...] [-c <casename>] [-u] [--db]
 | `--run-case` | no | off | Also create/build/run the CIME case, collect its `spel-*.nc`, then [`spel run`](#spel-run) the unit test (implies `--instrument`) |
 | `--freq`, `--case-args` | no | `9`, `""` | See [`spel instrument`](#spel-instrument) |
 | `--subset`, `--subset-max` | no | all gridcells | Capture a [gridcell subset](#gridcell-subsets) |
+| `--capture-for CASE` | no | — | Also capture the fields and constants case `CASE` reads (the same routine from another branch), so it can run on this case's data |
+| `--device-data` | no | off | Move data with the generated device data layer (`spel transform device-data`) instead of the harness's deep copy |
 
 Without `-u`, an existing case directory is cleared, and stale `.pkl` and `script-output/*.F90`
 files are removed before the run.
@@ -414,7 +403,7 @@ several cases can be instrumented for one build (see [`spel validate`](#spel-val
    `--undo` (also run by `spel validate`) puts them back. A line you've changed since
    `instrument` is left alone and reported. Edits made before this ledger existed must be
    reverted with git.
-4. Copies `nc_io` and `nc_allocMod`, the case's `ReadWriteMod` and `FUTConstantsMod` renamed
+4. Copies `nc_io`, `nc_allocMod` and `spel_varMod`, the case's `ReadWriteMod` and `FUTConstantsMod` renamed
    `ReadWriteMod_<tag>`/`FUTConstantsMod_<tag>`, and `SpelCapture_<tag>` to
    `components/elm/src/main`. IO modules from earlier instrumentations are deleted first.
    `--undo` deletes them too.
@@ -585,7 +574,7 @@ Compiler, debug, and OpenACC settings live in the case's `check_config.sh` (`com
 environment variables `SPEL_FC`, `SPEL_DBG` and `SPEL_ACC` override them without editing the script.
 On a known machine (see [Machine configuration](#machine-configuration)) `spel run` builds and runs
 inside the toolchain of `SPEL_FC` (default: the machine's `default_fc`): modules, `PKG_CONFIG_PATH`
-and the like come from the machine file, and `make` gets `-j<make_jobs>`. Running
+and the like come from the machine file. Running
 `./check_config.sh` by hand needs the same environment: `source <(spel machine env --fc nvfortran)`.
 
 `acc` sets the generated CMake's `ACC` cache option:
@@ -594,7 +583,7 @@ and the like come from the machine file, and `make` gets `-j<make_jobs>`. Runnin
 |-------|-------|-------|
 | `OFF` (default) | none | `!$acc` directives are comments |
 | `MULTICORE` | nvfortran: `-acc=multicore -Minfo=accel` | compute regions run on host threads; set the count with `ACC_NUM_CORES` (default: all cores). gfortran only gets `-fopenacc -foffload=disable` and a warning: GCC has no multicore target, so regions run on one thread |
-| `GPU` | nvfortran: `-acc=gpu -gpu=deepcopy -Minfo=accel -cuda` | needs nvfortran (`-DGPU=ON` still works as an alias) |
+| `GPU` | nvfortran: `-acc=gpu -Minfo=accel -DSPEL_ACC_GPU` | needs nvfortran (`-DGPU=ON` still works as an alias) |
 | `OPENMP` | gfortran: `-fopenmp -U_OPENMP`; nvfortran: `-mp -Minfo=mp -U_OPENMP` | threads the clump loop (`SPEL_CLUMPS`) and sources translated by [`spel transform acc2omp`](#acc2omp); set the thread count with `OMP_NUM_THREADS`. `-U_OPENMP` keeps ELM's own `#ifdef _OPENMP` code off, as in the analysis |
 
 ```bash
@@ -683,7 +672,9 @@ spel transform acc-sync --diff -o /tmp/out --verify   # write flat into DIR, re-
 spel transform --spec steps.toml -o /tmp/out          # several steps, each on the previous one's output
 ```
 
-Options of each transform are flags (`spel transform NAME --help`). A spec file names one
+Options of each transform are flags (`spel transform NAME --help`). `--config PRESET|lnd_in` (or
+`config = "..."` in a spec) restricts the edits to the code that runs in that configuration (a
+`spel/db` preset or a case's `lnd_in`); `--json` prints the plan as JSON. A spec file names one
 `transform` with an `[options]` table, or a list of `[[step]]`s:
 
 ```toml
@@ -706,17 +697,10 @@ that refuses the whole input reports why and writes nothing. `-o DIR` writes by 
 clear `DIR`: use a fresh directory (e.g. a new case's `SourceMods/src.elm`). The API and its
 status are in `spel/transforms/DESIGN.md`.
 
-The transforms replace the former commands `spel acc2omp`, `spel compact rewrite`,
-`spel device-data`, `spel split` and `spel nutrient extract|species|merge|groups|history|restart`,
-which now only print their replacement:
-
-| Former command | Now |
-|----------------|-----|
-| `spel acc2omp MOD ... [--case CASE]` | `spel transform acc2omp [--modules MOD ...] [--case CASE]` |
-| `spel compact rewrite [opts]` | `spel transform compact-rewrite [opts]` (same option names; `--replace` is gone: use an empty `-o` directory) |
-| `spel device-data [--print]` | `spel transform device-data [--dry-run --diff]` |
-| `spel nutrient STEP [opts]` | `spel transform nutrient-STEP [opts]` |
-| `spel split` | `spel transform split` |
+The former commands `spel acc2omp`, `spel compact rewrite`, `spel device-data`, `spel split` and
+`spel nutrient extract|species|merge|groups|history|restart` are now transforms of the same names
+(`spel transform acc2omp`, `compact-rewrite`, `device-data`, `split`, `nutrient-<step>`); the old
+names only print their replacement.
 
 The reports stay commands: `spel compact inventory`, `spel nutrient common|procedures` and
 `spel accplan`. The nutrient refactor of a whole checkout, one commit per step, is
@@ -789,13 +773,18 @@ Compares two netCDF files — typically a reference and a test output written by
 
 ```bash
 spel diff --ref <reference>.nc --test <test>.nc [-v <variable>]
+spel diff --ref spel-outputs0001.nc --inputs spel-inputs0001.nc --case canflux   # check the analysis
 ```
 
-| Flag | Required | Meaning |
-|------|----------|---------|
-| `--ref` | yes | Reference netCDF file |
-| `--test` | yes | Test netCDF file |
-| `-v` | no | Restrict the report to a single variable |
+| Flag | Meaning |
+|------|---------|
+| `--ref` | Reference netCDF file (required) |
+| `--test` | Test netCDF file |
+| `-v` | Restrict the report to a single variable |
+| `--inputs`, `--case` | Validate SPEL's analysis against a capture: inputs must not change between `--inputs` (before the call) and `--ref` (after); outputs that never change are flagged. `--case` names the case whose `spel_access.json` to use |
+| `--constants` | Namelist values for the guards (default: the constants file next to `--inputs`) |
+
+Give `--test`, `--inputs`, or both.
 
 ### `spel export`
 
@@ -822,17 +811,20 @@ fresh `spel analyze` of an E3SM checkout takes about a minute.
 
 ### `spel restore`
 
-Copies the ELM source files you changed inside a unit-test case back into `E3SM_SRCROOT`.
+Applies the edits you made inside a unit-test case to the E3SM checkout the case was made from.
 
 ```bash
-spel restore -c canflux --dry-run   # list them
-spel restore -c canflux -y          # copy without prompting
+spel restore -c canflux --dry-run   # list the changed files and their diffs
+spel restore -c canflux -y          # apply without prompting
 ```
 
-A file counts as changed when its modification time differs from the one most files in the case
-share (the time `spel create` wrote them). The `!#py ` token SPEL used to comment out unneeded code
-is removed again. Files from `SourceFiles/` (the netCDF interface, decomposition and driver stubs of
-the test harness) are never copied back. Review the result with `git diff` in the E3SM checkout.
+`spel create` keeps a pristine copy of every case file in `<case>/.spel-orig/`. A file counts as
+changed when its content differs from that copy; the change is the diff between the two (with the
+`!#py ` tokens SPEL used to comment out unneeded code removed), applied to the source file with
+`patch`. Every diff must apply or nothing is written, and the case's other harness edits never
+reach ELM. Files from `SourceFiles/` (the netCDF interface, decomposition and driver stubs of the
+test harness) are never touched. Cases made before `.spel-orig` existed are refused. Review the
+result with `git diff` in the E3SM checkout.
 
 ### `spel accplan`
 
@@ -841,7 +833,8 @@ parallelize over columns with an inner sequential loop, interchange, or scatter.
 nests and per-loop accesses from the analysis and reports only.
 
 ```bash
-spel accplan --routine soiltemperature --min-lines 5
+spel accplan SoilTemperatureMod --routine soiltemperature --min-lines 5
+spel accplan SoilTemperatureMod --lint     # judge the loops that already carry a directive
 ```
 
 ### `spel config`
@@ -916,12 +909,21 @@ spel proptest build canflux [--fc nvfortran] [--acc MULTICORE] [--dbg]   # a bui
   database export uses: a variable whose first write is conditional and that is read later is an
   inout. Outputs are reset to NaN before every call, so elements the routine skips stay visible.
 - **Domain.** `[domain]` declares ELM's subgrid hierarchy gridcell by gridcell
-  (`[[domain.gridcell]]`): topounits (several per gridcell, with weights and elevations),
-  landunits (soil with one column of weighted pfts, crop with a column per CFT, urban with its
-  five columns, lake), each element weighted in its parent; `copies` per gridcell and `nsets`
-  sets. A reference capture supplies the constants, parameters and level extents. `init` picks
-  the landunit kinds from the filters the routine takes (UrbanFluxes: a town over `p in urbanp`,
-  statistics of urban patches only); `--landunits` overrides it.
+  (`[[domain.gridcell]]`): topounits (several per gridcell, with weights and elevations) and every
+  landunit kind ELM builds (soil, polygonal tundra, crop, urban, lake, wetland, glacier,
+  glacier-mec in the glcmask), each element weighted in its parent; `copies` per gridcell and
+  `nsets` sets. Activity, layout order and subgrid flags are ELM's (checked against every
+  gridcell of a full run's restart), and `subgrid` adds what ELM always creates (the virtual soil
+  landunit, every pft). A reference capture supplies the constants, parameters and level extents.
+  `init` picks the landunit kinds from the filters the routine takes (UrbanFluxes: a town over
+  `p in urbanp`, statistics of urban patches only); `--landunits` overrides it.
+- **Drawn domains.** `[domain.draw]` replaces the declared gridcells with random ones (kinds,
+  weights, weight-0 topounits and landunits, elevations): each run tests `count` of them, and a
+  failure is shrunk to a small domain saved with it (`domain.toml`).
+- **Multi-step runs.** `steps = N` calls the routines N times on the state they leave; the
+  variables the rest of ELM's step writes in between must be declared (`forcing`, `between`,
+  `keep`), and checks can use the state before the step (`prev%x`), tendencies and sums over
+  steps (`tend`, `acc`, `child_wsum(x, 'g')`).
 - **Python API.** `spel.proptest.api` builds the same spec in Python (`pt.Case`, `pt.Domain`,
   `pt.Spec`, rules as `pt.Range(...)`), writes it as TOML, and inspects it: the declared domain
   (`spec.view()`: per-element tables, filters to expect), what the case built
@@ -982,11 +984,9 @@ spel train  -c <casename>
 ## Pickled unit tests
 
 Every `spel create` run ends by serializing the whole `FunctionalUnitTest` object — module dict,
-subroutine dict, derived-type dict, namelist-guarded usage, and configuration — to:
-
-```
-spel/scripts/fut_<casename>.pkl
-```
+subroutine dict, derived-type dict, namelist-guarded usage, and configuration — to
+`unit-tests/<casename>/fut.pkl` (what `spel export --case`, `spel instrument` and `spel proptest`
+read), with a copy in `spel/scripts/fut_<casename>.pkl` (what `spel sample`/`train` read).
 
 ### Why it matters
 
@@ -1006,11 +1006,12 @@ The workflow:
 ```bash
 # Machine A — produce the analysis
 spel create -s canopyfluxes -c 4637ab7 --db
-# -> spel/scripts/fut_4637ab7.pkl
+# -> unit-tests/4637ab7/fut.pkl
 
-# Transfer fut_4637ab7.pkl to machine B's spel/scripts/ directory
+# Transfer it to machine B as unit-tests/4637ab7/fut.pkl
 
-# Machine B — set E3SM_SRCROOT in spel/scripts/config.py to the local clone, then:
+# Machine B — point SPEL at the local clone, then:
+spel config --set-srcroot /path/to/E3SM
 spel config                 # sanity-check the paths
 spel export --case 4637ab7  # -> script-output/db-export/<label>+4637ab7/
 ```
@@ -1113,7 +1114,7 @@ pytest
 ```
 
 Test suites live in `spel/scripts/tests/`, `spel/scripts/fortran_parser/tests/`,
-`spel/transforms/` and `spel/db/app/tests/` (pytest-django, skipped without the `db-test` extra). Tests that need
+`spel/transforms/`, `spel/proptest/tests/`, `spel/scripts/ml_training/tests/` and `spel/db/app/tests/` (pytest-django, skipped without the `db-test` extra). Tests that need
 a whole-ELM analysis use the `elm_drv_analysis` fixture (`conftest.py`). It loads a frozen copy at
 `.pytest-fixtures/elm_drv_analysis.pkl`, which is seeded once from the `E3SM_SRCROOT` analysis
 cache. Delete that file to refresh it, or point `SPEL_TEST_ANALYSIS` at another `analysis.pkl`. If

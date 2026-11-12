@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 # `--landunits` values: hierarchy.LandunitKind's (not imported here: the CLI loads lazily)
-LANDUNIT_CHOICES = ("soil", "crop", "urban", "lake")
+LANDUNIT_CHOICES = ("soil", "crop", "urban", "lake", "wetland", "glacier", "glacier_mec", "polygon")
 
 
 def add_parser(subparsers) -> None:

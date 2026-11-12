@@ -37,9 +37,11 @@ from spel.proptest import rules as rk
 from spel.proptest import spec as sp
 from spel.proptest import tomlw
 from spel.proptest.domain import DomainSpec, expected_filters
+from spel.proptest.domains import DomainDraw  # noqa: F401
 from spel.proptest.errors import SpecError
-from spel.proptest.hierarchy import (Column, Crop, Gridcell, Lake, LandunitKind, Layout, Patch, Soil,  # noqa: F401
-                                     Topounit, Urban, UrbanDensity)
+from spel.proptest.hierarchy import (Column, Crop, Glacier, GlacierMec, Gridcell, Lake, LandunitKind,  # noqa: F401
+                                     Layout, Patch, Polygon, PolygonType, Soil, Subgrid, Topounit, Urban,
+                                     UrbanDensity, Wetland)
 from spel.proptest.inventory import Inventory, VarInfo
 from spel.proptest.scaffold import URBAN_DERIVE
 
@@ -285,10 +287,16 @@ def _rule_table(rule: Rule | Any) -> Any:
 class Domain:
     """The `[domain]` table: declared gridcells (hierarchy.py), sets, reference and overrides."""
 
-    def __init__(self, gridcells: Sequence[Gridcell], nsets: int = 2, reference: Optional[str | Path] = None,
+    def __init__(self, gridcells: Sequence[Gridcell] = (), nsets: int = 2, reference: Optional[str | Path] = None,
                  constants: Optional[dict[str, Any]] = None, time: Optional[dict[str, Any]] = None,
-                 dims: Optional[dict[str, int]] = None, snow_layers: int = 0, init: Optional[str] = None):
-        self.gridcells = list(gridcells)
+                 dims: Optional[dict[str, int]] = None, snow_layers: int = 0, init: Optional[str] = None,
+                 subgrid: Optional[Subgrid] = None, order: str = "elm", draw: Optional[DomainDraw] = None):
+        """draw: drawn domains instead of declared gridcells (`gridcells` is then the draw's
+        first domain for seed 0: the sample for views and checks)."""
+        if draw is not None and gridcells:
+            raise SpecError("Domain: give gridcells or a draw, not both")
+        self.draw = draw
+        self.gridcells = list(next(draw.domains(0))) if draw is not None else list(gridcells)
         self.nsets = nsets
         self.reference = reference
         self.constants = dict(constants or {})
@@ -296,7 +304,12 @@ class Domain:
         self.dims = dict(dims or {})
         self.snow_layers = snow_layers
         self.init = init
-        Layout(self.gridcells, nsets)  # the structure and weights, checked now
+        self.subgrid = subgrid
+        self.order = order
+        self.layout()  # the structure and weights, checked now
+
+    def layout(self) -> Layout:
+        return Layout(self.gridcells, self.nsets, subgrid=self.subgrid, order=self.order)
 
     def to_table(self) -> dict:
         out: dict[str, Any] = {"nsets": self.nsets}
@@ -309,7 +322,14 @@ class Domain:
             out["snow_layers"] = self.snow_layers
         if self.init is not None:
             out["init"] = self.init
-        out["gridcell"] = [g.to_table() for g in self.gridcells]
+        if self.subgrid is not None:
+            out["subgrid"] = self.subgrid.to_table()
+        if self.order != "elm":
+            out["order"] = self.order
+        if self.draw is not None:
+            out["draw"] = self.draw.to_table()
+        else:
+            out["gridcell"] = [g.to_table() for g in self.gridcells]
         return out
 
     def spec(self, case: Case, base: Optional[Path] = None) -> DomainSpec:
@@ -318,15 +338,24 @@ class Domain:
         return d
 
     def view(self, case: Optional[Case] = None) -> "DomainView":
-        lay = Layout(self.gridcells, self.nsets)
+        lay = self.layout()
         if case is not None:
-            DomainSpec(self.gridcells, self.nsets).layout(case.inv.parameters)  # type codes
+            DomainSpec(self.gridcells, self.nsets, subgrid=self.subgrid, order=self.order).layout(
+                case.inv.parameters)  # type codes
         return DomainView(lay)
 
     @classmethod
     def from_spec(cls, d: DomainSpec, input_data: Optional[Path] = None) -> "Domain":
         t = d.to_table(input_data)
-        return cls(d.gridcells, d.nsets, t.get("reference"), d.constants, d.time, d.dims, d.snow_layers, d.init)
+        return cls(() if d.draw is not None else d.gridcells, d.nsets, t.get("reference"), d.constants, d.time,
+                   d.dims, d.snow_layers, d.init, d.subgrid, d.order, d.draw)
+
+    def domains(self, seed: int = 0) -> list["DomainView"]:
+        """The views of the domains a run with this seed draws (one: the declared gridcells)."""
+        if self.draw is None:
+            return [self.view()]
+        return [DomainView(Layout(cells, self.nsets, subgrid=self.subgrid, order=self.order))
+                for cells in self.draw.domains(seed)]
 
 
 # -- querying a declared domain
@@ -408,8 +437,8 @@ class DomainView:
         ctype, pft, ltype = y.itype("c"), y.itype("p"), y.itype("l")
         from spel.proptest.hierarchy import column_role
 
-        def kids(level: str, k: int, finer: str) -> range:
-            return range(int(y.first_child(level, finer)[k]) - 1, int(y.last_child(level, finer)[k]))
+        def kids(level: str, k: int, finer: str) -> list[int]:
+            return [int(r) for r in y.descendants(level, k + 1, finer)]
 
         tops = []
         for t in kids("g", g, "t"):

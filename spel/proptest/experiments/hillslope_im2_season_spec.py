@@ -9,7 +9,7 @@ import netCDF4
 import numpy as np
 
 from spel.proptest import api as pt, coupling
-from spel.proptest.api import Gridcell, Soil, Topounit
+from spel.proptest.api import Gridcell, Lake, Soil, Topounit
 
 HILLS = {
     "lowest first":   [(50, .3), (150, .3), (300, .4)],
@@ -176,8 +176,79 @@ def build_h2(path: Path, steps: int = 24):
     return spec
 
 
+# H3: a topounit whose hydrology columns all have weight 0. ELM keeps a virtual weight-0 soil landunit
+# active on every active topounit (subgridWeightsMod is_active_l); on a lake (or wetland) topounit it
+# is the only hydrologyc column, so SurfaceRunoff's top_pp%uphill_wt(t) is 0 and qflx_from_uphill 0/0.
+def lake_topounit(elevation, weight):
+    return Topounit((Lake(weight=1.0), Soil(13, weight=0.0)), weight=weight, elevation=elevation)
+
+
+def build_h3(path: Path, steps: int = 12):
+    case = pt.Case("hs_season", reference="hs_season")
+    cells = [hill("lowest first", HILLS["lowest first"]),
+             Gridcell(name="lake low", topounits=(lake_topounit(50.0, .4),
+                                                  *hill("x", [(150, .3), (300, .3)]).topounits)),
+             Gridcell(name="lake alone", topounits=(lake_topounit(100.0, 1.0),))]
+    dom = pt.Domain(cells, nsets=2, reference="hs_season")
+    spec = pt.Spec(case, dom, namelist=IM2, build={"fc": "gfortran"}, max_examples=6, path=path)
+    rules = case.stats_rules(namelist=IM2)
+    common, keep = process(case)
+    spec.scenario("storm", over="c in hydrologyc", extends=rules, steps=steps,
+                  between={"top_ws%from_uphill": DRAIN}, carry=CARRY,
+                  inputs={**common, "col_wf%qflx_rain_grnd": pt.LogRange(2e-4, 2e-3), "top_ws%from_uphill": 0.0},
+                  forcing={"col_wf%qflx_rain_grnd": f"merge(col_wf%qflx_rain_grnd(c), 0.0, step <= {steps // 2})"},
+                  keep=keep(["col_wf%qflx_rain_grnd"]),
+                  comment="rain on the ground for the first half of the run; stores start empty")
+    spec.property("H3 the flux from uphill is finite on every hydrology column",
+                  "finite(col_wf%qflx_from_uphill(c))")
+    spec.property("the store stays finite and non-negative",
+                  "finite(top_ws%from_uphill(t)) .and. top_ws%from_uphill(t) >= 0.0", over="t")
+    spec.property("a topounit with water in store releases some of it",
+                  "implies(prev%top_ws%from_uphill(t) > 0.0, child_sum(col_wf%qflx_from_uphill, 't') > 0.0)",
+                  over="t", steps=[2, steps])
+    spec.relation("R4 water is conserved: soil + stores + runoff so far are the same with IM2 off",
+                  "close(child_wsum(base%col_ws%endwb, 'g') + child_wsum(base%top_ws%from_uphill, 'g')"
+                  " + dtime_mod * acc(child_wsum(base%col_wf%qflx_runoff, 'g')),"
+                  " child_wsum(follow%col_ws%endwb, 'g') + dtime_mod * acc(child_wsum(follow%col_wf%qflx_runoff, 'g')),"
+                  " rtol=1.0e-9, atol=1.0e-9)", namelist=OFF, over="g")
+    return spec
+
+
+# Drawn domains: no hillslope is declared. Topounits of soil, wetland, lake and plain glacier (soil
+# often of weight 0: ELM's virtual landunit), some of weight 0, in gridcells of 1-3 topounits. The
+# run should find H3 (and anything else these mixtures break) and shrink it to a small domain.
+DRAW = pt.DomainDraw(count=4, gridcells=(2, 3), topounits=(1, 3),
+                     kinds={"soil": 0.7, "wetland": 0.4, "lake": 0.3, "glacier": 0.3},
+                     zero_topounit=0.15, zero_landunit=0.3, pfts=(13,), elevation=(0.0, 500.0))
+
+
+def build_drawn(path: Path, steps: int = 12):
+    case = pt.Case("hs_season", reference="hs_season")
+    dom = pt.Domain(draw=DRAW, nsets=2, reference="hs_season")
+    spec = pt.Spec(case, dom, namelist=IM2, build={"fc": "gfortran"}, max_examples=4, path=path)
+    rules = case.stats_rules(namelist=IM2)
+    common, keep = process(case)
+    spec.scenario("storm", over="c in hydrologyc", extends=rules, steps=steps,
+                  between={"top_ws%from_uphill": DRAIN}, carry=CARRY,
+                  inputs={**common, "col_wf%qflx_rain_grnd": pt.LogRange(2e-4, 2e-3), "top_ws%from_uphill": 0.0},
+                  forcing={"col_wf%qflx_rain_grnd": f"merge(col_wf%qflx_rain_grnd(c), 0.0, step <= {steps // 2})"},
+                  keep=keep(["col_wf%qflx_rain_grnd"]),
+                  comment="rain on the ground for the first half of the run; stores start empty")
+    spec.property("the flux from uphill is finite on every hydrology column", "finite(col_wf%qflx_from_uphill(c))")
+    spec.property("the store stays finite and non-negative",
+                  "finite(top_ws%from_uphill(t)) .and. top_ws%from_uphill(t) >= 0.0", over="t")
+    spec.property("no topounit sends water to itself",
+                  "implies(col_wf%qflx_to_downhill(c) > 0.0, top_pp%downhill_ti(t) /= t)")
+    spec.relation("R4 water is conserved: soil + stores + runoff so far are the same with IM2 off",
+                  "close(child_wsum(base%col_ws%endwb, 'g') + child_wsum(base%top_ws%from_uphill, 'g')"
+                  " + dtime_mod * acc(child_wsum(base%col_wf%qflx_runoff, 'g')),"
+                  " child_wsum(follow%col_ws%endwb, 'g') + dtime_mod * acc(child_wsum(follow%col_wf%qflx_runoff, 'g')),"
+                  " rtol=1.0e-9, atol=1.0e-9)", namelist=OFF, over="g")
+    return spec
+
+
 if __name__ == "__main__":
     which = sys.argv[2] if len(sys.argv) > 2 else "season"
-    spec = (build_h2 if which == "h2" else build)(Path(sys.argv[1]))
+    spec = {"h2": build_h2, "h3": build_h3, "drawn": build_drawn}.get(which, build)(Path(sys.argv[1]))
     spec.to_toml(spec.path)
     print("written", spec.path)

@@ -1,0 +1,184 @@
+[case]
+name = "hs_season"
+
+[case.build]
+fc = "gfortran"
+
+[settings]
+max_examples = 6
+
+[domain]
+nsets = 2
+reference = "hs_season"
+
+[[domain.gridcell]]
+name = "lowest first"
+topounits = [
+  { weight = 0.3, elevation = 50, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 150, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.4, elevation = 300, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[[domain.gridcell]]
+name = "lake low"
+topounits = [
+  { weight = 0.4, elevation = 50.0, landunits = [{ kind = "lake", weight = 1.0 }, { kind = "soil", patches = [13], weight = 0.0 }] },
+  { weight = 0.3, elevation = 150, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 300, landunits = [{ kind = "soil", patches = [13] }] },
+]
+
+[[domain.gridcell]]
+name = "lake alone"
+topounits = [
+  { weight = 1.0, elevation = 100.0, landunits = [{ kind = "lake", weight = 1.0 }, { kind = "soil", patches = [13], weight = 0.0 }] },
+]
+
+[namelist]
+use_IM2_hillslope_hydrology = true
+
+# rain on the ground for the first half of the run; stores start empty
+[scenario.storm]
+over = "c in hydrologyc"
+extends = """/lcrc/globalscratch/ac.schwartzpd/spel-unit-tests/proptest-data/hs_season/stats/hs_season.inputs.toml"""
+steps = 12
+keep = [
+  "aerosol_vars%mss_bcphi_col",
+  "aerosol_vars%mss_bcpho_col",
+  "aerosol_vars%mss_dst1_col",
+  "aerosol_vars%mss_dst2_col",
+  "aerosol_vars%mss_dst3_col",
+  "aerosol_vars%mss_dst4_col",
+  "aerosol_vars%mss_ocphi_col",
+  "aerosol_vars%mss_ocpho_col",
+  "canopystate_vars%frac_veg_nosno_patch",
+  "canopystate_vars%vegwp_patch",
+  "col_ef%imelt",
+  "col_es%t_grnd",
+  "col_es%t_h2osfc",
+  "col_es%t_soisno",
+  "col_pp%dz",
+  "col_pp%z",
+  "col_pp%zi",
+  "col_wf%qflx_dew_grnd",
+  "col_wf%qflx_dew_snow",
+  "col_wf%qflx_ev_h2osfc",
+  "col_wf%qflx_ev_soil",
+  "col_wf%qflx_evap_grnd",
+  "col_wf%qflx_evap_tot",
+  "col_wf%qflx_floodc",
+  "col_wf%qflx_glcice",
+  "col_wf%qflx_glcice_diag",
+  "col_wf%qflx_glcice_melt",
+  "col_wf%qflx_grnd_irrig",
+  "col_wf%qflx_irrig",
+  "col_wf%qflx_snomelt",
+  "col_wf%qflx_snow_h2osfc",
+  "col_wf%qflx_snow_melt",
+  "col_wf%qflx_snwcp_ice",
+  "col_wf%qflx_snwcp_liq",
+  "col_wf%qflx_sub_snow",
+  "col_wf%qflx_tran_veg",
+  "col_ws%begwb",
+  "col_ws%do_capsnow",
+  "col_ws%frac_h2osfc",
+  "col_ws%frac_h2osfc_act",
+  "col_ws%frac_iceold",
+  "col_ws%frac_sno",
+  "col_ws%frac_sno_eff",
+  "col_ws%h2ocan",
+  "col_ws%h2osfc",
+  "col_ws%h2osno",
+  "col_ws%h2osoi_ice",
+  "col_ws%h2osoi_ice_depth_intg",
+  "col_ws%h2osoi_liq",
+  "col_ws%h2osoi_liq_depth_intg",
+  "col_ws%h2osoi_liqvol",
+  "col_ws%h2osoi_vol",
+  "col_ws%int_snow",
+  "col_ws%snw_rds",
+  "col_ws%swe_old",
+  "glc2lnd_vars%glc_dyn_runoff_routing_grc",
+  "soilhydrology_vars%wa_col",
+  "soilstate_vars%eff_porosity_col",
+  "soilstate_vars%k_soil_root_patch",
+  "soilstate_vars%rootr_patch",
+  "veg_wf%qflx_tran_veg",
+]
+
+[scenario.storm.inputs]
+"col_wf%qflx_dew_grnd" = 0.0
+"col_wf%qflx_dew_snow" = 0.0
+"col_wf%qflx_ev_h2osfc" = 0.0
+"col_wf%qflx_ev_soil" = 0.0
+"col_wf%qflx_evap_grnd" = 0.0
+"col_wf%qflx_evap_tot" = 0.0
+"col_wf%qflx_floodc" = 0.0
+"col_wf%qflx_glcice" = 0.0
+"col_wf%qflx_glcice_diag" = 0.0
+"col_wf%qflx_glcice_melt" = 0.0
+"col_wf%qflx_grnd_irrig" = 0.0
+"col_wf%qflx_irrig" = 0.0
+"col_wf%qflx_snomelt" = 0.0
+"col_wf%qflx_snow_h2osfc" = 0.0
+"col_wf%qflx_snow_melt" = 0.0
+"col_wf%qflx_sub_snow" = 0.0
+"col_wf%qflx_tran_veg" = 0.0
+"veg_wf%qflx_tran_veg" = 0.0
+"col_ws%h2osno" = 0.0
+"col_ws%frac_sno" = 0.0
+"col_ws%frac_sno_eff" = 0.0
+"col_ws%int_snow" = 0.0
+"col_ws%swe_old" = 0.0
+"col_ws%snw_rds" = 0.0
+"col_ws%h2osoi_ice" = 0.0
+"col_ef%imelt" = 0.0
+"col_ws%frac_iceold" = 0.0
+"aerosol_vars%mss_bcphi_col" = 0.0
+"aerosol_vars%mss_bcpho_col" = 0.0
+"aerosol_vars%mss_dst1_col" = 0.0
+"aerosol_vars%mss_dst2_col" = 0.0
+"aerosol_vars%mss_dst3_col" = 0.0
+"aerosol_vars%mss_dst4_col" = 0.0
+"aerosol_vars%mss_ocphi_col" = 0.0
+"aerosol_vars%mss_ocpho_col" = 0.0
+"col_es%t_soisno" = { range = [278.0, 300.0] }
+"col_es%t_grnd" = { range = [280.0, 300.0] }
+"col_es%t_h2osfc" = { range = [280.0, 300.0] }
+"col_ws%do_capsnow" = 0
+"atm2lnd_vars%frac_h2orof_grc" = 0.0
+"atm2lnd_vars%h2orof_grc" = 0.0
+"col_pp%dz" = { value = 0.0, levels = { -4 = 0.0, -3 = 0.0, -2 = 0.0, -1 = 0.0, 0 = 0.0, 1 = 0.017512817916255204, 2 = 0.02757896925967625, 3 = 0.0454700332424132, 4 = 0.07496741098620856, 5 = 0.12360036510228053, 6 = 0.20378255101043175, 7 = 0.33598062644843263, 8 = 0.5539384053686849, 9 = 0.9132900315890611, 10 = 1.5057607013992766, 11 = 2.482579696981332, 12 = 4.0930819526214, 13 = 6.7483512780057175, 14 = 11.12615029420442, 15 = 13.851152141963599 } }
+"col_pp%z" = { value = 0.0, levels = { -4 = 0.0, -3 = 0.0, -2 = 0.0, -1 = 0.0, 0 = 0.0, 1 = 0.007100635417193535, 2 = 0.02792500041531687, 3 = 0.06225857393654604, 4 = 0.11886506690014327, 5 = 0.21219339590896316, 6 = 0.3660657971047043, 7 = 0.6197584979298266, 8 = 1.0380270500015696, 9 = 1.7276353086671965, 10 = 2.8646071131796917, 11 = 4.73915671146575, 12 = 7.829766507142356, 13 = 12.92532061670855, 14 = 21.32646906315379, 15 = 35.17762120511739 } }
+"col_pp%zi" = { value = 0.0, levels = { -5 = 0.0, -4 = 0.0, -3 = 0.0, -2 = 0.0, -1 = 0.0, 0 = 0.0, 1 = 0.017512817916255204, 2 = 0.04509178717593146, 3 = 0.09056182041834465, 4 = 0.16552923140455322, 5 = 0.28912959650683373, 6 = 0.4929121475172655, 7 = 0.8288927739656982, 8 = 1.382831179334383, 9 = 2.2961212109234443, 10 = 3.8018819123227208, 11 = 6.284461609304053, 12 = 10.377543561925453, 13 = 17.12589483993117, 14 = 28.252045134135592, 15 = 42.10319727609919 } }
+"col_wf%qflx_rain_grnd" = { log_range = [0.0002, 0.002] }
+"top_ws%from_uphill" = 0.0
+
+[scenario.storm.forcing]
+"col_wf%qflx_rain_grnd" = "merge(col_wf%qflx_rain_grnd(c), 0.0, step <= 6)"
+
+[scenario.storm.between]
+"top_ws%from_uphill" = """merge(0.0, max(0.0, top_ws%from_uphill(t) - dtime_mod * child_sum(col_wf%qflx_from_uphill, 't')), max(0.0, top_ws%from_uphill(t) - dtime_mod * child_sum(col_wf%qflx_from_uphill, 't')) < 1.0e-20)"""
+
+[scenario.storm.carry]
+"col_wf%qflx_from_uphill" = 0.0
+
+[[property]]
+name = "H3 the flux from uphill is finite on every hydrology column"
+expr = "finite(col_wf%qflx_from_uphill(c))"
+
+[[property]]
+name = "the store stays finite and non-negative"
+expr = "finite(top_ws%from_uphill(t)) .and. top_ws%from_uphill(t) >= 0.0"
+over = "t"
+
+[[property]]
+name = "a topounit with water in store releases some of it"
+expr = "implies(prev%top_ws%from_uphill(t) > 0.0, child_sum(col_wf%qflx_from_uphill, 't') > 0.0)"
+steps = [2, 12]
+over = "t"
+
+[[relation]]
+name = "R4 water is conserved: soil + stores + runoff so far are the same with IM2 off"
+expect = """close(child_wsum(base%col_ws%endwb, 'g') + child_wsum(base%top_ws%from_uphill, 'g') + dtime_mod * acc(child_wsum(base%col_wf%qflx_runoff, 'g')), child_wsum(follow%col_ws%endwb, 'g') + dtime_mod * acc(child_wsum(follow%col_wf%qflx_runoff, 'g')), rtol=1.0e-9, atol=1.0e-9)"""
+namelist = { use_IM2_hillslope_hydrology = false }
+over = "g"

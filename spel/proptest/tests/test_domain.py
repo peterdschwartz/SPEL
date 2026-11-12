@@ -1,5 +1,7 @@
 """The synthetic domain files, built from an inventory without a case behind it (tests/fake.py)."""
 
+import dataclasses
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -184,16 +186,17 @@ def test_topounits_numbers_activity_and_downhill():
     assert lay.sizes() == {"g": 2, "t": 4, "l": 4, "c": 4, "p": 5}
     assert lay.topo_index().tolist() == [1, 1, 2, 3]  # topo_grc_ind: the number within the gridcell
     assert lay.active("t").tolist() == [True, True, True, False]  # weight 0: inactive
-    assert lay.active("p").tolist() == [True, True, True, True, False]
+    # ELM order: the soil landunits of every topounit first, then the lake
+    assert lay.active("p").tolist() == [True, True, True, False, True]
     assert lay.parent("t", "g").tolist() == [1, 2, 2, 2]
     assert lay.first_child("g", "t").tolist() == [1, 2] and lay.last_child("g", "t").tolist() == [1, 4]
     # set_topounit: the nearest lower topounit; the lowest keeps the previous dn_index (ELM's loop)
     assert lay.downhill().tolist() == [-1, 3, 4, 4]  # one topounit: add_topounit's -1, not ispval
     assert lay.max_topounits == 3
     li = lay.landunit_indices("t")
-    assert li.shape == (12, 4) and li[0].tolist() == [-9999, 2, 3, 4] and li[4].tolist() == [1, -9999, -9999, -9999]
-    assert lay.landunit_indices("g")[0].tolist() == [-9999, 2]  # the gridcell's first soil landunit
-    assert "topounit 2/3" in lay.describe("p", 4)
+    assert li.shape == (12, 4) and li[0].tolist() == [-9999, 1, 2, 3] and li[4].tolist() == [4, -9999, -9999, -9999]
+    assert lay.landunit_indices("g")[0].tolist() == [-9999, 1]  # the gridcell's first soil landunit
+    assert "topounit 2/3" in lay.describe("p", 3)
 
 
 def test_weights_and_structure_are_checked():
@@ -267,30 +270,32 @@ def test_urban_lake_and_topounit_topology(tmp_path):
     assert d.direct["sizes"] == {"g": 3, "t": 4, "l": 4, "c": 8, "p": 9}
     assert d.direct["alloc"]["lun_es%taf"] == ([(1, 4)], "real")
     assert d.direct["alloc"]["a%prof"][0] == [(1, 9), (1, fake.NLEV)]
-    assert v["lun_pp%itype"].tolist() == [1, 9, 5, 1]
-    assert v["lun_pp%urbpoi"].tolist() == [False, True, False, False]
-    assert v["lun_pp%lakpoi"].tolist() == [False, False, True, False]
-    assert v["lun_pp%ifspecial"].tolist() == [False, True, True, False]
-    assert v["lun_pp%coli"].tolist() == [1, 2, 7, 8] and v["lun_pp%colf"].tolist() == [1, 6, 7, 8]
-    assert v["lun_pp%pfti"].tolist() == [1, 3, 8, 9] and v["lun_pp%pftf"].tolist() == [2, 7, 8, 9]
-    assert v["lun_pp%ncolumns"].tolist() == [1, 5, 1, 1]
-    assert v["col_pp%itype"].tolist() == [1, 71, 72, 73, 74, 75, 5, 1]
-    assert v["col_pp%landunit"].tolist() == [1, 2, 2, 2, 2, 2, 3, 4]
-    assert v["col_pp%gridcell"].tolist() == [1, 2, 2, 2, 2, 2, 3, 3]
+    # ELM order (initGridCellsMod): the soil landunits of every topounit (veg, two's second
+    # topounit), then urban, then the lake
+    assert v["lun_pp%itype"].tolist() == [1, 1, 9, 5]
+    assert v["lun_pp%urbpoi"].tolist() == [False, False, True, False]
+    assert v["lun_pp%lakpoi"].tolist() == [False, False, False, True]
+    assert v["lun_pp%ifspecial"].tolist() == [False, False, True, True]
+    assert v["lun_pp%coli"].tolist() == [1, 2, 3, 8] and v["lun_pp%colf"].tolist() == [1, 2, 7, 8]
+    assert v["lun_pp%pfti"].tolist() == [1, 3, 4, 9] and v["lun_pp%pftf"].tolist() == [2, 3, 8, 9]
+    assert v["lun_pp%ncolumns"].tolist() == [1, 1, 5, 1]
+    assert v["col_pp%itype"].tolist() == [1, 1, 71, 72, 73, 74, 75, 5]
+    assert v["col_pp%landunit"].tolist() == [1, 2, 3, 3, 3, 3, 3, 4]
+    assert v["col_pp%gridcell"].tolist() == [1, 3, 2, 2, 2, 2, 2, 3]
     assert v["veg_pp%column"].tolist() == [1, 1, 2, 3, 4, 5, 6, 7, 8]
-    assert v["veg_pp%itype"].tolist() == [1, 13, 0, 0, 0, 0, 0, 0, 1]  # urban and lake patches are bare
-    assert np.allclose(v["veg_pp%wtgcell"][:2], [0.5, 0.5]) and np.allclose(v["veg_pp%wtgcell"][7:], [0.6, 0.4])
+    assert v["veg_pp%itype"].tolist() == [1, 13, 1, 0, 0, 0, 0, 0, 0]  # urban and lake patches are bare
+    assert np.allclose(v["veg_pp%wtgcell"][[0, 1, 2, 8]], [0.5, 0.5, 0.4, 0.6])
     assert np.allclose(v["lun_pp%wttopounit"], 1.0)
     w = v["col_pp%wtlunit"]
-    assert w[0] == 1.0 and w[6] == 1.0 and np.isclose(w[1:6].sum(), 1.0)  # set_landunit_urban's weights
-    assert v["col_pp%hydrologically_active"].tolist() == [True, False, False, False, False, True, False, True]
-    assert v["col_pp%is_soil"].tolist() == [True] + [False] * 6 + [True]
-    assert v["col_pp%is_lake"].tolist() == [False] * 6 + [True, False]
+    assert w[0] == 1.0 and w[1] == 1.0 and w[7] == 1.0 and np.isclose(w[2:7].sum(), 1.0)  # set_landunit_urban
+    assert not d.topology["col_pp%hydrologically_active"].any()  # ELM never sets it (ColumnType: .false.)
+    assert v["col_pp%is_soil"].tolist() == [True, True] + [False] * 6
+    assert v["col_pp%is_lake"].tolist() == [False] * 7 + [True]
     assert v["top_pp%topo_grc_ind"].tolist() == [1, 1, 1, 2]
     assert v["top_pp%landunit_indices"].shape == (12, 4) and v["top_pp%landunit_indices"][4].tolist() == [
-        -9999, -9999, 3, -9999]
+        -9999, -9999, 4, -9999]
     assert v["grc_pp%ntopounits"].tolist() == [1, 1, 2]
-    assert d.topology["lun_pp%itype"].tolist() == [1, 9, 5, 1]  # what BuiltDomain compares against
+    assert d.topology["lun_pp%itype"].tolist() == [1, 1, 9, 5]  # what BuiltDomain compares against
 
 
 def test_domain_decides_the_topounit_constants_and_pins_elevations(tmp_path):
@@ -314,3 +319,160 @@ def test_domain_decides_the_topounit_constants_and_pins_elevations(tmp_path):
 def test_type_codes_must_match_the_case(tmp_path):
     with pytest.raises(dom.DomainError, match="isturb_md = 3"):
         dom.DomainSpec([Gridcell.of(Soil(1))]).layout({"isturb_md": 3})
+
+
+def test_activity_follows_subgrid_weights_mod():
+    from spel.proptest.hierarchy import Gridcell, Lake, Layout, Soil, Topounit, Urban
+
+    # a lake topounit with ELM's virtual (weight-0) soil landunit, a soil topounit, an inactive one
+    g = Gridcell(name="lake low", topounits=(
+        Topounit((Lake(weight=1.0), Soil(13, weight=0.0)), weight=0.6, elevation=50.0),
+        Topounit((Soil(13),), weight=0.4, elevation=150.0),
+        Topounit((Soil(13),), weight=0.0, elevation=300.0)))
+    town = Gridcell.of(Urban("md", road_perv=0.0))  # pervious road of weight 0 in the landunit
+    lay = Layout([g, town], nsets=1)
+    assert lay.active("t").tolist() == [True, True, False, True]
+    # ELM order: virtual soil (weight 0, active), soil, the inactive topounit's soil, urban, lake
+    assert lay.active("l").tolist() == [True, True, False, True, True]
+    assert lay.active("c")[:3].tolist() == [True, True, False]
+    assert lay.active("c")[3:].all()  # every urban column, the zero-weight road included; the lake
+    assert lay.active("p")[0] and not lay.active("p")[2]
+
+
+# -- every landunit kind ELM builds, ELM's order and implicit elements (2026-11-12)
+
+
+def test_wetland_glacier_mec_and_polygon_constructors_round_trip():
+    from spel.proptest.hierarchy import Glacier, GlacierMec, Gridcell, Lake, Polygon, Soil, Wetland
+
+    g = Gridcell.of(Soil(1, 12, weight=0.4), Polygon("low", 12, weight=0.2), Wetland(weight=0.1), Glacier(weight=0.1),
+                    GlacierMec({1: (0.25, 800.0), 3: (0.75, 1500.0)}, weight=0.1), Lake(weight=0.1),
+                    name="arctic", glcmask=True, icemask=0.5)
+    back = Gridcell.from_table(g.to_table(), "g")
+    assert back == g
+    lay = Layout([g])
+    assert lay.itype("l").tolist() == [1, 1, 5, 6, 3, 4]  # soil + its polygon, lake, wetland, ice, ice_mec
+    assert lay.itype("c").tolist() == [1, 1, 5, 6, 3, 401, 403]
+    assert lay.polygon_type().tolist() == [-9999, 1, -9999, -9999, -9999, -9999]
+    assert np.allclose(lay.glc_topo(), [0, 0, 0, 0, 0, 800.0, 1500.0])
+    assert lay.flag("c", "is_soil").tolist() == [True, True, False, False, False, False, False]
+    assert lay.flag("l", "ifspecial").tolist() == [False, False, True, True, True, True]
+    assert lay.flag("p", "glcmecpoi")[-2:].all()
+    li = lay.landunit_indices("t")
+    assert li[0, 0] == 1 and li[9, 0] == 2 and li[5, 0] == 4  # the polygon under polygontype + 9
+    f = dom.expected_filters(lay)
+    assert f["soilc"].tolist() == [1, 2] and f["hydrologyc"].tolist() == [1, 2]  # not wetland or glacier
+    assert f["nolakec"].tolist() == [1, 2, 4, 5, 6, 7] and f["icemecc"].tolist() == [6, 7]
+    assert f["do_smb_c"].tolist() == [1, 2, 6, 7]  # icemask > 0: the soil columns too
+
+
+def test_one_landunit_per_type_and_topounit():
+    from spel.proptest.hierarchy import Polygon, Soil
+
+    with pytest.raises(HierarchyError, match="both soil"):
+        Layout([Gridcell.of(Soil(1, weight=0.5), Soil(2))])
+    with pytest.raises(HierarchyError, match="polygon low"):
+        Layout([Gridcell.of(Soil(1), Polygon("low", 1, weight=0.0), Polygon("low", 2, weight=0.0))])
+
+
+def test_activity_special_cases_of_subgrid_weights_mod():
+    from spel.proptest.hierarchy import Glacier, GlacierMec, Soil, Wetland
+
+    # all plain glacier: the virtual soil landunit is not active (is_topo_all_gla)
+    ice = Layout([Gridcell.of(Glacier(weight=1.0), Soil(1, weight=0.0))])
+    assert ice.active("l").tolist() == [False, True]
+    # wetland only: the virtual soil landunit and its column are active, its patch too
+    wet = Layout([Gridcell.of(Wetland(weight=1.0), Soil(1, weight=0.0))])
+    assert wet.active("l").tolist() == [True, True] and wet.active("c").all() and wet.active("p").all()
+    # glcmask: glacier-mec of weight 0 and its weight-0 classes are active; without it they are not
+    mec = GlacierMec({1: 1.0, 2: 0.0}, weight=0.0)
+    on = Layout([Gridcell.of(Soil(1), mec, glcmask=True)])
+    off = Layout([Gridcell.of(Soil(1), mec)])
+    assert on.active("l").tolist() == [True, True] and on.active("c").tolist() == [True, True, True]
+    assert on.active("p").all()  # is_active_p: active column, the patch's weight in it (1) > 0
+    assert off.active("l").tolist() == [True, False] and off.active("c").tolist() == [True, False, False]
+    # an inactive topounit: nothing on it is active, glcmask or not
+    t0 = Layout([Gridcell((Topounit((Soil(1),), weight=1.0), Topounit((Soil(1), mec), weight=0.0)), glcmask=True)])
+    assert t0.active("l").tolist() == [True, False, False]
+
+
+def test_elm_order_interleaves_topounits_and_keeps_sets_contiguous():
+    from spel.proptest.hierarchy import Lake, Polygon, Soil, Urban, Wetland
+
+    a = Gridcell((Topounit((Soil(1), Polygon("high", 1, weight=0.0), Lake(weight=0.5))),
+                  Topounit((Wetland(weight=0.5), Soil(2)))), name="a")
+    b = Gridcell.of(Urban("hd", weight=0.5), Soil(3), name="b")
+    lay = Layout([a, b], nsets=2)
+    per = lay.per_set("l")
+    first = [lay.levels["l"].decl[k].label for k in range(per)]
+    assert first == ["soil", "polygon high", "soil", "soil", "urban hd", "lake", "wetland"]
+    assert lay.parent("l", "t")[:per].tolist() == [1, 1, 2, 3, 3, 1, 2]
+    assert (lay.set_of("l") == np.repeat([0, 1], per)).all() and (lay.set_of("p") == np.repeat([0, 1], lay.per_set("p"))).all()
+    assert not lay.contiguous("t", "l") and lay.contiguous("l", "p")
+    assert lay.descendants("g", 1, "l").tolist() == [0, 1, 2, 5, 6]
+    depth = Layout([a, b], order="depth")
+    assert [x.label for x in depth.levels["l"].decl] == ["soil", "polygon high", "lake", "wetland", "soil", "urban hd", "soil"]
+    assert depth.contiguous("t", "l")
+
+
+def test_row_permutation_in_elm_order():
+    from spel.proptest.hierarchy import Lake, Soil
+
+    g = Gridcell.of(Soil(1), Lake(weight=0.3), copies=2, name="g")
+    lay = Layout([g])  # soil(g1) soil(g2) lake(g1) lake(g2)
+    assert lay.gridcell_of("l").tolist() == [0, 1, 0, 1]
+    assert lay.row_permutation("l", [1, 0]).tolist() == [1, 0, 3, 2]
+    x = np.array([10, 20, 30, 40])
+    assert x[lay.row_permutation("l", [1, 0])].tolist() == [20, 10, 40, 30]
+
+
+def test_topounit_ranges_are_unset_in_elm_order(tmp_path):
+    inv = fake.inventory(tmp_path / "case", [
+        fake.var("top_pp%lndi", "begt:endt", "topology", "integer"),
+        fake.var("grc_pp%npfts", "begg:endg", "topology", "integer"),
+        fake.var("grc_pp%topi", "begg:endg", "topology", "integer"),
+        fake.var("lun_pp%polygontype", "begl:endl", "topology", "integer"),
+        fake.var("lun_pp%ispolygon", "begl:endl", "topology", "logical"),
+        fake.var("lun_pp%glcmecpoi", "begl:endl", "topology", "logical")])
+    from spel.proptest.hierarchy import Polygon, Soil
+
+    spec = dom.DomainSpec([Gridcell.of(Soil(1), Polygon("flat", 1, weight=0.0))], init="direct")
+    d = dom.build_domain(inv, spec, tmp_path / "domain")
+    assert d.topology["top_pp%lndi"].tolist() == [-9999] and d.topology["grc_pp%npfts"].tolist() == [-9999]
+    assert d.topology["grc_pp%topi"].tolist() == [1]
+    assert d.topology["lun_pp%polygontype"].tolist() == [-9999, 2]
+    assert d.topology["lun_pp%ispolygon"].tolist() == [False, True] and not d.topology["lun_pp%glcmecpoi"].any()
+    depth = dom.build_domain(inv, dataclasses.replace(spec, order="depth"), tmp_path / "depth")
+    assert depth.topology["top_pp%lndi"].tolist() == [1]
+
+
+def test_subgrid_adds_what_elm_always_creates():
+    from spel.proptest.hierarchy import Crop, GlacierMec, Subgrid, Wetland
+
+    sub = Subgrid(natpft=(0, 3), cft=(4, 5), maxpatch_glcmec=3)
+    g = Gridcell((Topounit((Wetland(),)), Topounit((Soil(2, weight=0.6), Crop(5, weight=0.4)))), glcmask=True)
+    lay = Layout([g], subgrid=sub)
+    labels = [(int(t), x.label) for t, x in zip(lay.parent("l", "t"), lay.levels["l"].decl)]
+    # soil (virtual) on both, crop (virtual on the wetland topounit), wetland, glacier-mec on both
+    assert labels == [(1, "soil"), (2, "soil"), (1, "crop"), (2, "crop"), (1, "wetland"),
+                      (1, "glacier_mec"), (2, "glacier_mec")]
+    soil1 = lay.descendants("l", 1, "p")
+    assert lay.itype("p")[soil1].tolist() == [0, 1, 2, 3]  # every natural pft
+    assert lay.weight("p", "c")[soil1].tolist() == [1.0, 0.0, 0.0, 0.0]  # undeclared: bare ground
+    soil2 = lay.descendants("l", 2, "p")
+    assert lay.weight("p", "c")[soil2].tolist() == [0.0, 0.0, 1.0, 0.0]
+    crop2 = lay.descendants("l", 4, "c")
+    assert lay.itype("c")[crop2].tolist() == [204, 205] and lay.weight("c", "l")[crop2].tolist() == [0.0, 1.0]
+    assert lay.children("l", "c")[5:].tolist() == [3, 3]  # every elevation class
+    assert lay.active("l").tolist() == [True, True, False, True, True, True, True]
+    assert lay.mxy()[soil1].tolist() == [1, 2, 3, 4]
+    with pytest.raises(HierarchyError, match="weight 0"):
+        Layout([Gridcell.of(Soil(1), Wetland(weight=0.0))], subgrid=sub)
+    with pytest.raises(HierarchyError, match="outside"):
+        Layout([Gridcell.of(Soil(9))], subgrid=sub)
+    with pytest.raises(HierarchyError, match="glcmask"):
+        Layout([Gridcell.of(Soil(1), GlacierMec({1: 1.0}, weight=0.0))], subgrid=sub)
+    assert Subgrid.from_table(sub.to_table()) == sub
+    spec = dom.DomainSpec.from_table({"subgrid": sub.to_table(), "order": "depth",
+                                      "gridcell": [g.to_table()]}, Path("."))
+    assert spec.subgrid == sub and spec.layout().order == "depth"
