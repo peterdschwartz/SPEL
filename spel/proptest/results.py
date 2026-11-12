@@ -216,8 +216,13 @@ def _columns(name: str, data: np.ndarray, lb: tuple[int, ...], axis: int) -> dic
 def _aggregate(lay, values: np.ndarray, fine: str, level: str, how: str) -> np.ndarray:
     owner = lay.ancestor_of(fine, level)
     n = lay.count(level)
-    if how == "wsum":
-        return np.bincount(owner, weights=values * lay.weight(fine, level), minlength=n)
+    if how == "wsum":  # as ELM's subgridAveMod: inactive and zero-weight children are skipped (an
+        # Inf or NaN left in a weight-0 topounit does not make its gridcell's sum NaN)
+        w = lay.weight(fine, level)
+        keep = lay.active(fine) & (w != 0.0)
+        part = np.zeros(values.shape)
+        part[keep] = values[keep] * w[keep]
+        return np.bincount(owner, weights=part, minlength=n)
     if how == "sum":
         return np.bincount(owner, weights=values, minlength=n)
     if how == "mean":

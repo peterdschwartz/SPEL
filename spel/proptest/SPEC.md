@@ -13,7 +13,7 @@ rule stops loading or the run: nothing is defaulted without a word.
 - [`[case]`](#case), [`[settings]`](#settings), [`[domain]`](#domain), [`[namelist]`](#namelist), [`[units]`](#units), [`[functions]`](#functions)
 - [`[scenario.<name>]`](#scenarioname): [rules](#rules), [`derive`](#derive), [`assume`](#assume)
 - Checks: [`[[property]]`](#property), [`[[relation]]`](#relation), [`[compare]` and `[[differential]]`](#compare-and-differential)
-- [Multi-step runs](#multi-step-runs): `steps`, `time`, `forcing`, `between`, `keep`; `prev%`, `step`, `tend`, `child_*`
+- [Multi-step runs](#multi-step-runs): `steps`, `time`, `forcing`, `between`, `keep`, `carry`; `prev%`, `step`, `tend`, `child_*`
 - [Commands, files and exit codes](#commands-files-and-exit-codes)
 - [Limits](#limits), [Extending](#extending)
 
@@ -77,8 +77,8 @@ Functions besides the intrinsics:
 | `rel_change(new, old)` | `(new - old) / max(abs(old), 1e-30)` |
 | `tend(x)` | x after the step minus x before it (`x - prev%x`; one call: `x - input%x`); any expression of the state, e.g. `tend(child_sum(col_ws%h2osfc, 't'))` |
 | `acc(x)` | x summed over the steps so far (each step's value in its own state; one call: x), e.g. `acc(child_wsum(col_wf%qflx_runoff, 'g'))` |
-| `elevation(t)`, `lowest(t)`, `uphill_count(t)` | from the domain declaration: a topounit's declared elevation (NaN without one), whether it is the lowest of its gridcell (ties included), how many other topounits point to it with ELM's `top_pp%downhill_ti` |
-| `child_sum(x, 't')`, `child_wsum`, `child_mean`, `child_min`, `child_max` | the whole variable x of a finer level reduced over the descendants of each element of level `'g'`, `'t'`, `'l'` or `'c'` (`wsum`: weighted by their weights relative to that level, as ELM's p2c/c2l); the level's element variable must be bound (a check over that level or a finer one) |
+| `elevation(t)`, `lowest(t)`, `uphill_count(t)`, `downhill_inactive(t)` | from the domain declaration: a topounit's declared elevation (NaN without one), whether it is the lowest of its gridcell (ties included), how many other topounits point to it with ELM's `top_pp%downhill_ti`, whether its downhill neighbour is an inactive (weight-0) topounit (set_topounit does not skip them) |
+| `child_sum(x, 't')`, `child_wsum`, `child_mean`, `child_min`, `child_max` | the whole variable x of a finer level reduced over the descendants of each element of level `'g'`, `'t'`, `'l'` or `'c'` (`wsum`: weighted by their weights relative to that level, as ELM's p2c/c2l; like them it skips inactive and weight-0 descendants, so an Inf or NaN left in a weight-0 topounit does not reach its gridcell); the level's element variable must be bound (a check over that level or a finer one) |
 | `active_dir(p, "<output>", k=1)` | coordinate of the element's drawn inputs along direction `k` of the saved active subspace of that output (run `spel proptest subspace` first) |
 
 ## `[case]`
@@ -414,6 +414,8 @@ keep = ["col_es%t_soisno", "col_ws%*"]       # boundary variables left to the pr
 [scenario.season.between]                    # after every step, in this order, on the state after it
 "top_ws%from_uphill" = "max(0.0, top_ws%from_uphill(t) - dtime_mod * child_sum(col_wf%qflx_from_uphill, 't'))"
 
+[scenario.season.carry]                      # outputs not set to NaN between steps; value before step 1
+"col_wf%qflx_from_uphill" = 0.0              # ELM's cold start (ColumnDataType InitCold)
 ```
 
 **The boundary.** Between two calls ELM runs the rest of its step, and some of those routines
@@ -436,7 +438,18 @@ its writers (routine, file:line, before/after the case, conditional). `spel prop
 lists the boundary variables of every multi-step scenario and how they are declared. This is the
 point of a multi-step scenario: it states what the rest of ELM does between the steps instead of
 leaving it to chance. Variables nothing else writes are carried (inouts) or keep their drawn
-value (inputs); outputs are set to NaN before every step, as before one call. The analysis needs
+value (inputs); outputs are set to NaN before every step, as before one call, except those in
+`carry`.
+
+**Carried outputs.** An output is written before it is read on every path the routines take, but
+often only on a filter: SurfaceRunoff writes `qflx_from_uphill` on `hydrologyc` columns, and
+ColWaterBalanceCheck reads it on every column. In ELM the other columns hold what they held (the
+cold start's 0); here they would be NaN, and a `between` or check reading them would see a NaN
+ELM never has. `carry` gives such an output its value before step 1 (a rule, drawn like an input;
+not a relative one: an output has no captured value) and keeps, from step to step, what the
+previous step left where a step does not write it. The routines see nothing different (they write
+before they read); `input%x`, `prev%x` and saved failures include it. Only outputs, and only with
+`steps` > 1. The analysis needs
 the case's E3SM checkout analyzed (`spel analyze --srcroot`); the boundary is cached per case.
 
 **Forcing draws.** A forcing rule draws over `(step, element, ...)` with the input modes: one value

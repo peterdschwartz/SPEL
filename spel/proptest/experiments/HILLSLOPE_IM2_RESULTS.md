@@ -133,3 +133,52 @@ testmod `elm/topounit_im2`, cold start 0001-01-01, 5 days, DEBUG=FALSE, Intel, 2
   the NaN comes from the send from or to such topounits or from the drain loop in
   ColWaterBalanceCheck, which runs over every column (BalanceCheckMod.F90:322). To investigate with a
   proptest scenario ("lake low"/"wetland low" hillslopes, `hydrologynodrainage`).
+
+## Phase 3: a day of IM2 routing with proptest multi-step runs (2026-11-12)
+
+Notebook `hillslope_im2_season.ipynb`, spec `hillslope_im2_season.proptest.toml` (built by
+`hillslope_im2_season_spec.py`). Case `hs_season` (hydrologynodrainage + hydrologydrainage, `next`),
+reference merged from the hs_bug_nodrain and hs_bug captures. 48 half-hour steps; hillslopes lowest
+first/last, cycle, Caspian 184059, flat (one topounit), two sets; scenarios storm (rain on the ground for
+12 steps), steady (constant rain), recession (full stores, no rain). Boundary (coupling.py): 61 variables;
+1 forcing (rain), 1 between (the store drain of ColWaterBalanceCheck), the rest keep (an isolated process:
+no snow, ice, evaporation or transpiration).
+
+- `runner.run`, 6 examples per check, seed 0, 354 s: every store invariant and every IM2-on/off identity
+  passes (finite, non-negative, conserved, released at frac_from_uphill per step, topmost store halves in a
+  recession; one-topounit gridcells and the topmost topounit's soil identical with IM2 off, total water
+  conserved, never sooner to the river, receivers never hold less). Only two checks fail, in storm and
+  steady: no self-sends (lowest last t3, Caspian t4) and D3 "the outlet passes on at least what it does
+  without IM2" (those outlets and cycle t3, which points uphill).
+- 20 mirrored storms (40 twin pairs): cumulative river runoff after the day relative to IM2 off, mean (min):
+  intended 0.776 (0.175), bug 0.627 (3e-6); step by which half the day's runoff arrived: IM2 off 8.6,
+  intended 9.7, bug 17.5. Totals include subsurface drainage (not routed), so the ratios understate the
+  surface-runoff effect.
+- A shrunk D3 failure had negative runoff: a drawn water table at the surface (`zwt` = 0) with unrelated
+  soil water makes Drainage return negative drainage in step 1 (an inconsistent start, not IM2).
+- Not covered: H2 and H3 (the between drain reads outputs proptest sets to NaN on columns the routines do
+  not process).
+
+## Phase 4: H2, a weight-0 downhill neighbour (2026-11-12)
+
+Spec `hillslope_im2_h2.proptest.toml` (`hillslope_im2_season_spec.py ... h2`), case `hs_season`, 24 steps, two
+sets. Hillslopes listed lowest first (H1 cannot trigger): "lowest first" (control), "dead outlet" (the lowest
+has weight 0), "dead middle", "dead top". New in proptest for this: `carry` (outputs that keep their last
+value where a step does not write them: `qflx_from_uphill` = 0 on the inactive columns, as ELM's cold start
+leaves them; otherwise the drain read proptest's NaN), `child_wsum` skipping inactive/weight-0 children (as
+subgridAveMod), the domain function `downhill_inactive(t)`.
+
+- Storm (6 examples per check, seed 0): all four checks fail at step 1, only in dead outlet and dead middle
+  (both sets): "no active topounit sends water to an inactive one" (4 of 18 columns), "the store stays
+  finite" (the weight-0 topounit's store is `inf`: HydrologyDrainage divides by `top_pp%wtgcell` = 0),
+  "the stores gain what is sent" (the sent water reaches no active store), R4 conservation with IM2 off
+  (the gridcell loses what it sends). Dead top and the control pass.
+- Storm with `trap_fpe`: step 1 stops with SIGFPE "floating-point divide by zero".
+- On a dry step the same division gives `0 * Inf = NaN`. ColWaterBalanceCheck's
+  `max(0, from_uphill - qflx_from_uphill*dtime)` then differs by compiler (tested with a small program):
+  `MAX(0, NaN)` is 0 with gfortran 11.2 and NaN with ifx 2025.2 (-O0 and -O2). Intel builds keep a NaN
+  store for good; gfortran builds flush it to 0. The full runs were Intel builds, consistent with the
+  persistent NaN `FROM_UPHILL` of Phase 2 (its source is still open: H3). proptest's `max` propagates NaN
+  (ifx-like).
+- Fix direction (not part of the H1 branch): skip inactive topounits in set_topounit's neighbour
+  search, or guard the send with `top_pp%active(downhill_t)`.

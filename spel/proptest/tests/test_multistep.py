@@ -144,6 +144,9 @@ def test_execute_keeps_every_step(tmp_path):
     ({"steps": 2, "between": {"b%y": "1.0"}}, "between sets input or inout"),
     ({"steps": 2, "keep": ["nothing%like_this"]}, "matches no variable"),
     ({"steps": 2, "time": {"no_such_time": 1}}, "per-step scalar"),
+    ({"steps": 2, "carry": {"a%x": 0.0}}, "`carry` is for outputs"),
+    ({"carry": {"b%partial": 0.0}}, "`carry` needs `steps` > 1"),
+    ({"steps": 2, "carry": {"b%partial": {"scale": [0.5, 2.0]}}}, "relative to the captured value"),
 ])
 def test_spec_errors(tmp_path, scenario, message):
     with pytest.raises(SpecError, match=message):
@@ -216,3 +219,60 @@ def test_topounit_functions_from_the_declaration(tmp_path):
         {"name": "uphill", "expr": "uphill_count(t) == merge(0, merge(1, 2, mod(t - 1, 3) == 1), mod(t - 1, 3) == 0)"},
     ])
     assert all(o.passed for o in res), [o.message for o in res]
+
+
+# -- outputs written on some elements only (b%partial: where x > 0.5)
+KEPT = "close(partial(p), merge(x(p), prev%partial(p), x(p) > 0.5))"
+
+
+def test_a_carried_output_keeps_what_the_previous_step_left(tmp_path):
+    res, _ = run(tmp_path, {"steps": 3, "carry": {"b%partial": 0.25}}, property=[
+        {"name": "starts from the carry rule", "expr": "input%partial(p) == 0.25"},
+        {"name": "written or kept", "expr": KEPT},
+        {"name": "finite", "expr": "finite(partial(p))"},
+    ])
+    assert all(o.passed for o in res), [o.message for o in res]
+
+
+def test_an_output_not_carried_is_nan_where_a_step_does_not_write_it(tmp_path):
+    res, _ = run(tmp_path, {"steps": 3}, property=[
+        {"name": "finite", "expr": "implies(x(p) <= 0.5, .not. finite(partial(p)))"},
+        {"name": "written", "expr": "implies(x(p) > 0.5, partial(p) == x(p))"},
+    ])
+    assert all(o.passed for o in res), [o.message for o in res]
+
+
+def test_carry_is_a_rule_of_the_state_before_step_1(tmp_path):
+    s, _ = load(tmp_path, {"steps": 2, "carry": {"b%partial": 0.0}})
+    sc = s.scenarios[0] if isinstance(s.scenarios, list) else s.scenarios["s"]
+    assert sc.carry == ["b%partial"] and "b%partial" in sc.inputs
+    assert sp.dormant_rules(sc, fake.inventory(tmp_path / "case")) == []
+
+
+def test_child_wsum_skips_inactive_children():
+    from spel.proptest.hierarchy import Gridcell, Layout, Soil, Topounit
+    from spel.proptest.results import _aggregate
+
+    g = Gridcell(name="dead outlet", topounits=(Topounit((Soil(13),), weight=0.0, elevation=50.0),
+                                                Topounit((Soil(13),), weight=0.5, elevation=150.0),
+                                                Topounit((Soil(13),), weight=0.5, elevation=300.0)))
+    lay = Layout([g], nsets=1)
+    store = np.array([np.inf, 2.0, 4.0])  # what ELM's division leaves in the weight-0 topounit
+    with np.errstate(all="raise"):
+        np.testing.assert_allclose(_aggregate(lay, store, "t", "g", "wsum"), [3.0])
+    assert np.isinf(_aggregate(lay, store, "t", "g", "sum")[0])  # the plain sum still sees it
+
+
+def test_downhill_inactive_names_a_weight_0_neighbour(tmp_path):
+    def hill(name, weights):
+        return {"name": name, "topounits": [
+            {"weight": w, "elevation": e, "landunits": [{"kind": "soil", "patches": [13]}]}
+            for w, e in zip(weights, (50.0, 150.0, 300.0))]}
+
+    # lowest first: 300 -> 150 -> 50; the weight-0 topounit is the outlet, the middle, the top
+    hills = [hill("dead outlet", (0.0, 0.5, 0.5)), hill("dead middle", (0.5, 0.0, 0.5)),
+             hill("dead top", (0.5, 0.5, 0.0))]
+    res, _ = run(tmp_path, domain={"gridcell": hills, "nsets": 2}, property=[
+        {"name": "downhill_inactive", "over": "t",
+         "expr": "downhill_inactive(t) .eqv. (mod(t - 1, 9) == 1 .or. mod(t - 1, 9) == 5)"}])
+    assert res[0].passed, res[0].message

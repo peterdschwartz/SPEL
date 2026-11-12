@@ -333,7 +333,8 @@ class Session:
     def domain_functions(self) -> dict[str, Callable]:
         """Topounit facts from the domain declaration: `elevation(t)` (declared elevation, NaN where
         none), `lowest(t)` (the lowest topounit of its gridcell, ties included), `uphill_count(t)`
-        (other topounits whose top_pp%downhill_ti, as ELM computes it, is t)."""
+        (other topounits whose top_pp%downhill_ti, as ELM computes it, is t), `downhill_inactive(t)`
+        (t's downhill neighbour is an inactive, weight-0 topounit: set_topounit does not skip them)."""
         if getattr(self, "_domain_fns", None) is None:
             lay = self.layout
             elev = np.array([np.nan if e is None else float(e) for e in lay.elevation])
@@ -355,7 +356,10 @@ class Session:
             def at(values):
                 return lambda t: values[np.asarray(t, dtype=np.int64) - 1]
 
-            self._domain_fns = {"elevation": at(elev), "lowest": at(lowest), "uphill_count": at(ups)}
+            act = lay.active("t")
+            dead = np.array([0 < d <= elev.size and not act[d - 1] for d in dn], dtype=bool)
+            self._domain_fns = {"elevation": at(elev), "lowest": at(lowest), "uphill_count": at(ups),
+                                "downhill_inactive": at(dead)}
         return self._domain_fns
 
     def _aggregate(self, how: str, x: FArray, level: str) -> np.ndarray:
@@ -775,12 +779,17 @@ class Session:
         self.check_boundary(scenario)
         names = self.step_names()
         # the outputs under this configuration, NaN before every step (not the manifest's, which
-        # counts every branch: an input here can be an output there and must keep its value)
-        poison = sorted(n for n, v in self.inv.vars.items() if v.kind == "output" and v.type == "real")
+        # counts every branch: an input here can be an output there and must keep its value);
+        # carried outputs keep what the previous step left where a step does not write them
+        poison = sorted(n for n, v in self.inv.vars.items()
+                        if v.kind == "output" and v.type == "real" and n not in scenario.carry)
         tnames = {e.lower() for e in (self.inv.time_names() or ())}
         time = self.start_time(scenario)
         before = self._farrays(ex.inputs)  # the state before step 1
-        self.backend.begin(self.live_inputs(ex))
+        start = self.live_inputs(ex)
+        start.update({n: ex.inputs[n] for n in scenario.carry  # dormant where nothing uses it
+                      if n in ex.inputs and self.inv.vars[n].kind != "unused" and n in self.domain.extents})
+        self.backend.begin(start)
         states: list[dict[str, FArray]] = []
         times: list[dict[str, Any]] = []
         pending: dict[str, np.ndarray] = {}  # `between` values for the next step

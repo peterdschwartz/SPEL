@@ -42,11 +42,9 @@ def reference_geometry(case):
     return out
 
 
-def build(path: Path):
-    case = pt.Case("hs_season", reference="hs_season")
-    dom = pt.Domain([hill(n, t) for n, t in HILLS.items()], nsets=2, reference="hs_season")
-    spec = pt.Spec(case, dom, namelist=IM2, build={"fc": "gfortran"}, max_examples=8, path=path)
-    rules = case.stats_rules(namelist=IM2)
+def process(case):
+    """The isolated process both specs run: the inputs every scenario shares, and `keep` (the
+    boundary variables left to the process, less those declared otherwise)."""
     live = case.inv.configured({k.lower(): v for k, v in IM2.items()})
     boundary = sorted(n for n, w in coupling.boundary(case.inv, {"use_im2_hillslope_hydrology": True}).items()
                       if live.vars[n].kind in ("input", "inout"))
@@ -64,10 +62,20 @@ def build(path: Path):
         "atm2lnd_vars%frac_h2orof_grc": 0.0, "atm2lnd_vars%h2orof_grc": 0.0,  # no river water on the land
         **reference_geometry(case),
     })
-    between = {"top_ws%from_uphill": DRAIN}
 
     def keep(forcing=()):
-        return sorted(set(boundary) - set(between) - set(forcing))
+        return sorted(set(boundary) - {"top_ws%from_uphill"} - set(forcing))
+
+    return common, keep
+
+
+def build(path: Path):
+    case = pt.Case("hs_season", reference="hs_season")
+    dom = pt.Domain([hill(n, t) for n, t in HILLS.items()], nsets=2, reference="hs_season")
+    spec = pt.Spec(case, dom, namelist=IM2, build={"fc": "gfortran"}, max_examples=8, path=path)
+    rules = case.stats_rules(namelist=IM2)
+    common, keep = process(case)
+    between = {"top_ws%from_uphill": DRAIN}
 
     scen = dict(over="c in hydrologyc", extends=rules, steps=STEPS, between=between)
     spec.scenario("storm", inputs={**common, "col_wf%qflx_rain_grnd": pt.LogRange(2e-4, 2e-3),
@@ -122,7 +130,54 @@ def build(path: Path):
     return spec
 
 
+# H2: a weight-0 (inactive) topounit as a downhill neighbour. Listed lowest first, so H1 never
+# triggers: every failure is H2's. "lowest first" is the intact control.
+HILLS_H2 = {
+    "lowest first": HILLS["lowest first"],
+    "dead outlet":  [(50, 0.0), (150, .5), (300, .5)],   # the lowest has weight 0
+    "dead middle":  [(50, .5), (150, 0.0), (300, .5)],   # the chain breaks in the middle
+    "dead top":     [(50, .5), (150, .5), (300, 0.0)],   # sends nothing: behaves as 2 topounits
+}
+# ELM's drain reads qflx_from_uphill on every column; SurfaceRunoff writes it on hydrologyc only, so
+# the inactive columns of a weight-0 topounit keep the cold start's 0 (carried, not NaN)
+CARRY = {"col_wf%qflx_from_uphill": 0.0}
+
+
+def build_h2(path: Path, steps: int = 24):
+    case = pt.Case("hs_season", reference="hs_season")
+    dom = pt.Domain([hill(n, t) for n, t in HILLS_H2.items()], nsets=2, reference="hs_season")
+    spec = pt.Spec(case, dom, namelist=IM2, build={"fc": "gfortran"}, max_examples=6, path=path)
+    rules = case.stats_rules(namelist=IM2)
+    common, keep = process(case)
+    scen = dict(over="c in hydrologyc", extends=rules, steps=steps, between={"top_ws%from_uphill": DRAIN},
+                carry=CARRY)
+    storm = dict(inputs={**common, "col_wf%qflx_rain_grnd": pt.LogRange(2e-4, 2e-3), "top_ws%from_uphill": 0.0},
+                 forcing={"col_wf%qflx_rain_grnd": f"merge(col_wf%qflx_rain_grnd(c), 0.0, step <= {steps // 4})"},
+                 keep=keep(["col_wf%qflx_rain_grnd"]), **scen)
+    spec.scenario("storm", **storm, comment="rain on the ground for the first quarter of the run; stores start empty")
+    spec.scenario("storm trapped", **storm, trap_fpe=True,
+                  comment="the same storm with floating-point exceptions trapped: ELM's division by the weight-0 "
+                          "topounit's weight stops step 1")
+
+    spec.property("H2 no active topounit sends water to an inactive one",
+                  "implies(col_wf%qflx_to_downhill(c) > 0.0, .not. downhill_inactive(t))", scenarios=["storm"])
+    spec.property("the store stays finite and non-negative",
+                  "finite(top_ws%from_uphill(t)) .and. top_ws%from_uphill(t) >= 0.0", over="t", scenarios=["storm"])
+    spec.property("the stores gain what is sent and lose what is released",
+                  "close(tend(child_wsum(top_ws%from_uphill, 'g')), dtime_mod * (child_wsum(col_wf%qflx_to_downhill, 'g')"
+                  " - child_wsum(col_wf%qflx_from_uphill, 'g')), rtol=1.0e-9, atol=1.0e-12)", over="g",
+                  scenarios=["storm"])
+    spec.property("the routines finish every step", ".true.", over="g", scenarios=["storm trapped"])
+    spec.relation("R4 water is conserved: soil + stores + runoff so far are the same with IM2 off",
+                  "close(child_wsum(base%col_ws%endwb, 'g') + child_wsum(base%top_ws%from_uphill, 'g')"
+                  " + dtime_mod * acc(child_wsum(base%col_wf%qflx_runoff, 'g')),"
+                  " child_wsum(follow%col_ws%endwb, 'g') + dtime_mod * acc(child_wsum(follow%col_wf%qflx_runoff, 'g')),"
+                  " rtol=1.0e-9, atol=1.0e-9)", namelist=OFF, over="g", scenarios=["storm"])
+    return spec
+
+
 if __name__ == "__main__":
-    spec = build(Path(sys.argv[1]))
+    which = sys.argv[2] if len(sys.argv) > 2 else "season"
+    spec = (build_h2 if which == "h2" else build)(Path(sys.argv[1]))
     spec.to_toml(spec.path)
     print("written", spec.path)

@@ -38,7 +38,7 @@ BUILD_KEYS = {"fc", "acc", "dbg"}
 PREV = "prev"
 STEP_NAME = "step"
 STEP_FUNCTIONS = {"tend", "acc", "child_sum", "child_wsum", "child_mean", "child_min", "child_max",
-                  "elevation", "lowest", "uphill_count"}  # built in (runner.Session.context_functions, fexpr)
+                  "elevation", "lowest", "uphill_count", "downhill_inactive"}  # built in (runner.Session.context_functions, fexpr)
 
 
 @dataclass
@@ -57,6 +57,7 @@ class Scenario:
     forcing_exprs: list[tuple[str, Expr]] = field(default_factory=list)  # ... or computed before every step
     between: list[tuple[str, Expr]] = field(default_factory=list)  # after every step, in this order
     keep: list[str] = field(default_factory=list)  # boundary variables left to the process (fnmatch patterns)
+    carry: list[str] = field(default_factory=list)  # outputs not set to NaN between steps (their rules: inputs)
 
     def boundary_declared(self, name: str) -> bool:
         """Whether a boundary variable has its stand-in for the other routines of the step."""
@@ -207,6 +208,10 @@ def _check_configurations(spec: Spec, inv: Inventory) -> None:
         cfg = inv.configured(constants(spec, inv, scen))
         where = f"[scenario.{sname}]"
         for v in scen.inputs:
+            if v in scen.carry:
+                if cfg.vars[v].kind == "unused":
+                    raise SpecError(f"{where}.carry: nothing reads or writes {v} under these options")
+                continue
             if inv.vars[v].kind not in INPUT_KINDS and cfg.vars[v].kind not in INPUT_KINDS:
                 raise SpecError(f"{where}.inputs: {v} is a {inv.vars[v].kind}, not an input or parameter")
         for v, e in scen.derive:
@@ -358,7 +363,7 @@ def _over(text: Optional[str], inv: Inventory, where: str) -> Optional[tuple[str
 def _scenario(name: str, table: dict, base: Path, inv: Inventory, names: Names) -> Scenario:
     where = f"[scenario.{name}]"
     known = {"over", "extends", "trap_fpe", "inputs", "derive", "assume", "namelist",
-             "steps", "time", "forcing", "between", "keep"}
+             "steps", "time", "forcing", "between", "keep", "carry"}
     extra = set(table) - known
     if extra:
         raise SpecError(f"{where}: unknown keys {sorted(extra)}")
@@ -406,11 +411,35 @@ def _scenario(name: str, table: dict, base: Path, inv: Inventory, names: Names) 
         listed = [listed]
     assume = [names.expr(t, f"{where}.assume") for t in listed]
     steps, time, forcing, forcing_exprs, between, keep = _steps_tables(table, inv, names, where)
+    carry = _carry(table, inputs, inv, names, steps, where)
     return Scenario(name=name, level=over[0], filter=over[1], inputs=inputs, derive=derive, assume=assume,
                     trap_fpe=bool(table.get("trap_fpe", False)),
                     namelist=names.namelist(table.get("namelist", {}), f"{where}.namelist"),
                     steps=steps, time=time, forcing=forcing, forcing_exprs=forcing_exprs, between=between,
-                    keep=keep)
+                    keep=keep, carry=carry)
+
+
+def _carry(table: dict, inputs: dict[str, Rule], inv: Inventory, names: Names, steps: int, where: str) -> list[str]:
+    """`carry`: outputs that keep, where a step does not write them, what the previous step left
+    (ELM's memory), instead of NaN; the rule is the value before step 1. Added to `inputs`."""
+    carry = []
+    for key, value in table.get("carry", {}).items():
+        v = names.var(key, f"{where}.carry")
+        kind = inv.vars[v].kind
+        if kind != "output":
+            raise SpecError(f"{where}.carry.{key}: {v} is {kind}; `carry` is for outputs (inputs and inouts "
+                            f"are carried already)")
+        if v in inputs:
+            raise SpecError(f"{where}.carry.{key}: {v} also has a rule in `inputs`")
+        rule = rules.parse(v, value, f"{where}.carry.{key}")
+        if rules.KINDS[rule.kind].relative:
+            raise SpecError(f"{where}.carry.{key}: a `{rule.kind}` rule is relative to the captured value; "
+                            f"an output has none: give the value before step 1 (ELM's cold start)")
+        inputs[v] = rule
+        carry.append(v)
+    if carry and steps == 1:
+        raise SpecError(f"{where}: `carry` needs `steps` > 1 (one call sets every output)")
+    return carry
 
 
 def _steps_tables(table: dict, inv: Inventory, names: Names, where: str):
@@ -500,7 +529,7 @@ def _order_derive(derive: list[tuple[str, Expr]], inv: Inventory, where: str) ->
 def dormant_rules(scenario: Scenario, inv: Inventory) -> list[str]:
     """Rules and derive targets of the scenario for variables that are not inputs under `inv`'s
     configuration (they are inputs under other namelist options, and are not set here)."""
-    names = [*scenario.inputs, *(v for v, _ in scenario.derive)]
+    names = [*(n for n in scenario.inputs if n not in scenario.carry), *(v for v, _ in scenario.derive)]
     return sorted(n for n in names if inv.vars[n].kind not in INPUT_KINDS)
 
 

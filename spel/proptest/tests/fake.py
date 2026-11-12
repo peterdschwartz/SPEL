@@ -5,6 +5,8 @@ backend whose "routine" is numpy.
     ysum(p) = sum(prof(p, :))            output
     state(p) = state(p) + 1              inout
     never(p)                             output, never written
+    partial(p) = x(p) where x(p) > 0.5   output written on some elements only (multi-step runs:
+                                         elsewhere it keeps what it held, NaN unless carried)
 
 and under the namelist option `use_extra` (off by default), as the analysis would record it:
 
@@ -63,6 +65,7 @@ def inventory(case_dir: Path, extra: Optional[list[VarInfo]] = None) -> Inventor
         var("b%never", "begp:endp", "output", status="w"),
         var("a%boost", "begp:endp", "input"),
         var("b%extra", "begp:endp", "output", status="w"),
+        var("b%partial", "begp:endp", "output", status="w"),
         *(extra or []),
     ]
     return Inventory(
@@ -80,6 +83,7 @@ def inventory(case_dir: Path, extra: Optional[list[VarInfo]] = None) -> Inventor
             "never": "b%never",
             "boost": "a%boost",
             "extra": "b%extra",
+            "partial": "b%partial",
         },
         filters={},
         instances={},
@@ -148,12 +152,20 @@ class FakeBackend:
 
     def begin(self, inputs, poison=True):
         self.current = {k: np.array(v, copy=True) for k, v in inputs.items()}
+        x = np.asarray(inputs["a%x"])
+        self.current.setdefault("b%partial", np.full(x.shape, np.nan))  # reset: outputs NaN
 
     def step(self, inputs, outputs, trap=False, poison=True):
-        """One step on the carried state: `a%state` (inout) is what the previous step left."""
+        """One step on the carried state: `a%state` (inout) is what the previous step left;
+        `poison` (a list) as the worker: those outputs NaN before the step."""
+        if isinstance(poison, list):
+            for n in poison:
+                if n in self.current:
+                    self.current[n] = np.full(np.shape(self.current[n]), np.nan)
         self.current.update({k: np.array(v, copy=True) for k, v in inputs.items()})
         values = self._compute(self.current)
         self.current["a%state"] = values["a%state"]
+        self.current["b%partial"] = values["b%partial"]
         return {n: FArray(values[n], (1,) * values[n].ndim, n) for n in outputs}
 
     def _compute(self, inputs):
@@ -188,6 +200,8 @@ class FakeBackend:
             "b%extra": extra,
             **{k: np.asarray(v) for k, v in inputs.items() if k != "a%state"},
         }
+        held = np.asarray(inputs.get("b%partial", np.full(x.shape, np.nan)), dtype=float)
+        values["b%partial"] = np.where(x > 0.5, x, held)
         return values
 
     def stop(self):

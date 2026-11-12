@@ -546,6 +546,11 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   proptest tests a process; what the rest of the step does is stated in the spec, not pulled in as
   more routines (that closes over elm_drv and becomes an end-to-end test). The shim calls the case's
   filter builders before the routines, as main.F90 does, so dynamic filters follow the state.
+- Outputs are NaN before every step; `carry` (SPEC.md) exempts outputs written on a filter and read
+  elsewhere (`qflx_from_uphill`: SurfaceRunoff on hydrologyc, ColWaterBalanceCheck on every column), so
+  a `between` sees ELM's stale value, not a NaN ELM never has. `child_wsum` skips inactive/weight-0
+  children as subgridAveMod does. Fortran `MAX(0, NaN)` is 0 with gfortran and NaN with ifx
+  (2026-11-12); fexpr's `max` propagates NaN (ifx-like), which matters for NaN stores (H2/H3).
 - Tutorial: `spel/proptest/examples/canopyfluxes_tutorial.ipynb` (executed, with outputs). Change it through
   its narrative and re-execute it (`nbclient`) after API changes; its text quotes actual results.
 - Tests (`spel/proptest/tests/`): `test_proptest.py` (snippets; the CanopyFluxes end-to-end test is

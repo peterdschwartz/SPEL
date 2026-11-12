@@ -461,11 +461,12 @@ class Scenario:
                  assume: Sequence[str] = (), namelist: Optional[dict[str, Any]] = None, trap_fpe: bool = False,
                  steps: int = 1, time: Optional[dict[str, Any]] = None,
                  forcing: Optional[dict[str, Rule | Any | str]] = None, between: Optional[dict[str, str]] = None,
-                 keep: Sequence[str] = ()):
+                 keep: Sequence[str] = (), carry: Optional[dict[str, Rule | Any]] = None):
         """Multi-step runs (SPEC.md "Multi-step runs"): `steps` calls per example; `time` of step 1;
         `forcing`: a rule (drawn for every step) or an expression (str) per boundary input;
         `between`: expressions applied after every step; `keep`: boundary variables left to the
-        process (fnmatch patterns)."""
+        process (fnmatch patterns); `carry`: outputs that keep their last value where a step does
+        not write them (not NaN), with their value before step 1."""
         self.spec = spec
         self.name = name
         self.over = over
@@ -480,6 +481,7 @@ class Scenario:
         self.forcing: dict[str, Rule | Any | str] = {spec.case.canonical(k): v for k, v in (forcing or {}).items()}
         self.between: dict[str, str] = {spec.case.canonical(k): v for k, v in (between or {}).items()}
         self.keep = list(keep)
+        self.carry: dict[str, Rule | Any] = {spec.case.canonical(k): v for k, v in (carry or {}).items()}
         for k, r in (inputs or {}).items():
             self.inputs[spec.case.canonical(k)] = r
         for k, e in (derive or {}).items():
@@ -527,6 +529,8 @@ class Scenario:
             out["between"] = dict(self.between)
         if self.keep:
             out["keep"] = list(self.keep)
+        if self.carry:
+            out["carry"] = {k: _rule_table(r) for k, r in self.carry.items()}
         return out
 
     def check(self) -> sp.Scenario:
@@ -572,11 +576,11 @@ class Spec:
                  assume: Sequence[str] = (), namelist: Optional[dict[str, Any]] = None,
                  trap_fpe: bool = False, comment: str = "", steps: int = 1, time: Optional[dict[str, Any]] = None,
                  forcing: Optional[dict[str, Rule | Any | str]] = None, between: Optional[dict[str, str]] = None,
-                 keep: Sequence[str] = ()) -> Scenario:
+                 keep: Sequence[str] = (), carry: Optional[dict[str, Rule | Any]] = None) -> Scenario:
         if name in self.scenarios:
             raise SpecError(f"scenario {name!r} exists")
         s = Scenario(self, name, over, extends, inputs, derive, assume, namelist, trap_fpe, steps, time, forcing,
-                     between, keep)
+                     between, keep, carry)
         self.scenarios[name] = s
         if comment:
             self.comments[("scenario", name)] = comment
@@ -702,7 +706,8 @@ class Spec:
                          steps=t.get("steps", 1), time=t.get("time"),
                          forcing={k: (v if isinstance(v, str) else Rule.from_table(v))
                                   for k, v in t.get("forcing", {}).items()},
-                         between=t.get("between"), keep=t.get("keep", []))
+                         between=t.get("between"), keep=t.get("keep", []),
+                         carry={k: Rule.from_table(v) for k, v in t.get("carry", {}).items()})
         for key in chk.KINDS:
             for t in data.get(key, []):
                 t = dict(t)
