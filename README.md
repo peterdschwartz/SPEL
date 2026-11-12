@@ -297,6 +297,7 @@ All commands are subcommands of `spel`. Run `spel <command> --help` for the auth
 | [`spel machine`](#spel-machine) | Show and check the machine file and its toolchains |
 | `spel nutrient` | Find the fields C/N/P type variants share (candidates for a common base type) |
 | [`spel restore`](#spel-restore) | Apply the edits made in a unit-test case to the E3SM checkout |
+| [`spel archive`](#spel-archive) | Pack unit-test cases with their reference data into one archive for another machine, or extract one |
 | [`spel diff`](#spel-diff) | Compare two netCDF files and report relative error |
 | [`spel export`](#spel-export) | Write the `elm_drv` analysis as database CSVs (a snapshot) |
 | [`spel config`](#spel-config) | Print the resolved E3SM/ELM source paths |
@@ -825,6 +826,30 @@ changed when its content differs from that copy; the change is the diff between 
 reach ELM. Files from `SourceFiles/` (the netCDF interface, decomposition and driver stubs of the
 test harness) are never touched. Cases made before `.spel-orig` existed are refused. Review the
 result with `git diff` in the E3SM checkout.
+
+### `spel archive`
+
+Moves unit-test cases to another machine. `pack` deletes each case's build and scratch
+directories (`build/`, `build-py*/`, `proptest/`; the next `spel run` or `spel proptest` rebuilds
+them) and writes one archive with the cases and their `unit-tests/input-data/<case>`. Symlinked
+reference files (as `profile_compare.sh --link-inputs` makes) are stored as the files they point
+to. `extract` puts everything back under `unit-tests/`.
+
+```bash
+spel archive pack canflux canflux_dev -o canflux.spel.tar.gz   # asks before deleting build dirs (-y: don't)
+spel archive pack canflux --dry-run                            # what would be deleted and archived
+spel archive pack canflux --keep-builds --proptest-data        # builds stay (never archived); add proptest results
+spel archive list canflux.spel.tar.gz                          # cases, sizes, the E3SM checkout each came from
+spel archive extract canflux.spel.tar.gz --set-srcroot ~/E3SM  # on the other machine
+spel archive extract canflux.spel.tar.gz canflux --force       # one case, replacing an existing one
+```
+
+The archive is `.tar.gz` by default (`.tar.xz` or `.tar` by the name given to `-o`) and holds a
+manifest (`spel-archive.json`). `extract` refuses to replace an existing case or its data without
+`--force`, and refuses archives with paths outside `cases/`, `input-data/` or `proptest-data/`, or
+with links. `--set-srcroot DIR` records the new machine's E3SM checkout in each case's
+`spel_meta.json` (what `spel restore` patches); the pickled analysis needs no change. To build
+there, point SPEL at an E3SM checkout as usual (`spel config --set-srcroot`).
 
 ### `spel accplan`
 

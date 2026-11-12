@@ -497,7 +497,7 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
 - Outputs are NaN before every step; `carry` (SPEC.md) exempts outputs written on a filter and read
   elsewhere (`qflx_from_uphill`: SurfaceRunoff on hydrologyc, ColWaterBalanceCheck on every column), so
   a `between` sees ELM's stale value, not a NaN ELM never has. `child_wsum` skips inactive/weight-0
-  children as subgridAveMod does. Fortran `MAX(0, NaN)` is 0 with gfortran and NaN with ifx
+  children as subgridAveMod does. Fortran `MAX(0, NaN)` is 0 with gfortran and NaN with ifx;
   fexpr's `max` propagates NaN (ifx-like), which matters when a state can hold a NaN.
 - Tutorial: `spel/proptest/examples/canopyfluxes_tutorial.ipynb` (executed, with outputs). Change it through
   its narrative and re-execute it (`nbclient`) after API changes; its text quotes actual results.

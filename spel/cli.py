@@ -440,6 +440,24 @@ def restore(args):
     restore_case(args.case, dry_run=args.dry_run, yes=args.yes)
 
 
+def archive(args):
+    from spel.scripts import case_archive as ca
+
+    try:
+        if args.action == "pack":
+            out = Path(args.output) if args.output else ca.default_output(args.cases)
+            ca.pack(args.cases, out, Path(unittests_dir), proptest_data=args.proptest_data,
+                    keep_builds=args.keep_builds, dry_run=args.dry_run, yes=args.yes)
+        elif args.action == "extract":
+            ca.extract(Path(args.archive), Path(args.dest) if args.dest else Path(unittests_dir),
+                       cases=args.cases or None, force=args.force,
+                       set_srcroot=Path(args.set_srcroot) if args.set_srcroot else None)
+        else:
+            ca.list_archive(Path(args.archive))
+    except (ca.ArchiveError, OSError) as err:
+        sys.exit(f"spel archive {args.action}: error: {err}")
+
+
 def config(args):
     import textwrap
     from pathlib import Path
@@ -1009,6 +1027,33 @@ def main():
         help="Don't prompt for confirmation before copying files",
     )
     restore_parser.set_defaults(func=restore)
+
+    archive_parser = subparsers.add_parser(
+        "archive",
+        help="Move unit-test cases between machines: pack cases with their input-data into one tar "
+        "archive (build directories removed), extract one, or list one",
+    )
+    archive_sub = archive_parser.add_subparsers(dest="action", required=True)
+    pack_p = archive_sub.add_parser(
+        "pack", help="delete the cases' build/scratch directories and archive the cases with their input-data")
+    pack_p.add_argument("cases", nargs="+", help="unit-test case names (directories under unit-tests/)")
+    pack_p.add_argument("-o", "--output", help="archive file: .tar.gz (default <case>.spel.tar.gz), .tar.xz or .tar")
+    pack_p.add_argument("--proptest-data", action="store_true",
+                        help="also archive unit-tests/proptest-data/<case> (failures, rule files, Hypothesis database)")
+    pack_p.add_argument("--keep-builds", action="store_true",
+                        help="leave the build directories in place (they are never archived)")
+    pack_p.add_argument("--dry-run", action="store_true", help="show what would be deleted and archived")
+    pack_p.add_argument("-y", "--yes", action="store_true", help="delete the build directories without asking")
+    ext_p = archive_sub.add_parser("extract", help="unpack an archive into unit-tests/")
+    ext_p.add_argument("archive", help="a file written by `spel archive pack`")
+    ext_p.add_argument("cases", nargs="*", help="only these cases (default: all)")
+    ext_p.add_argument("--dest", help="unit-tests directory to extract into (default: this SPEL's)")
+    ext_p.add_argument("--force", action="store_true", help="replace cases (and their data) that exist")
+    ext_p.add_argument("--set-srcroot", metavar="DIR",
+                       help="record this E3SM checkout in each case's spel_meta.json (used by `spel restore`)")
+    list_p = archive_sub.add_parser("list", help="show an archive's cases")
+    list_p.add_argument("archive")
+    archive_parser.set_defaults(func=archive)
 
     # parsed for --help/validation only: apply_srcroot() already applied it
     srcroot_help = (
