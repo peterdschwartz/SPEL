@@ -122,3 +122,38 @@ def test_extract_refuses_unsafe_members(tmp_path, name, link):
     with pytest.raises(ca.ArchiveError, match="refusing"):
         ca.extract(arc, tmp_path / "dest", out=io.StringIO())
     assert not (tmp_path / "evil").exists() and not (tmp_path / "dest").exists()
+
+
+def test_a_case_loads_from_the_checkout_its_meta_names(tmp_path):
+    """`--set-srcroot` reaches the loaded case: sources anchored there, `e3sm_srcroot` naming it
+    (the analysis cache of step coupling and units follows it)."""
+    import pickle
+    import warnings
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from spel.scripts import export_objects as eo
+
+    unittests, here = tmp_path / "unit-tests", tmp_path / "E3SM"
+    here.mkdir()
+    case = make_case(unittests, "hs", srcroot="/elsewhere/next")
+    mod = SimpleNamespace(filepath=Path("components/elm/src/main/Mod.F90"))
+    fut = SimpleNamespace(module_dict={"mod": mod}, subroutine_dict={}, type_dict={},
+                          e3sm_srcroot=Path("/elsewhere/next"))
+    (case / eo.CASE_PICKLE).write_bytes(pickle.dumps(fut))
+
+    # the recorded checkout is not here: configured srcroot for sources, a warning, e3sm_srcroot as pickled
+    with pytest.warns(UserWarning, match="not on this machine"):
+        got = eo.unpickle_case(case)
+    assert got.e3sm_srcroot == Path("/elsewhere/next")
+    assert got.module_dict["mod"].filepath == eo.E3SM_SRCROOT / "components/elm/src/main/Mod.F90"
+
+    # as `spel archive extract --set-srcroot` leaves it
+    arc = ca.pack(["hs"], tmp_path / "hs.tar", unittests, yes=True, out=io.StringIO())
+    dest = tmp_path / "dest"
+    ca.extract(arc, dest, set_srcroot=here, out=io.StringIO())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        got = eo.unpickle_case(dest / "hs")
+    assert got.e3sm_srcroot == here.resolve()
+    assert got.module_dict["mod"].filepath == here.resolve() / "components/elm/src/main/Mod.F90"

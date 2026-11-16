@@ -375,8 +375,17 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
     `core.fortran` emitters. The routine call's actuals come from `ut.driver_bindings`;
   - `build.py`: builds `<case>/build-py/libspelcase.so` (CMake `SPEL_PYLIB=ON` from
     `generate_cmake`); other builds (`Variant`: fc, acc, dbg) go to `build-py-<fc>-<acc>[-dbg]`;
-  - `hierarchy.py`: ELM's subgrid hierarchy (declarations, `Layout`); `domains.py`: drawn domains
-    and their shrinking;
+  - `hierarchy/`: ELM's subgrid hierarchy, importable as `spel.proptest.hierarchy`: `codes.py`
+    (`Level` StrEnum `g t l c p`, `LandunitKind`, `Flag`, type codes), `decl.py` (declarations: a
+    `Landunit` subclass per kind that stores what is declared and derives its `columns`, ltype,
+    `elm_order`, TOML table and `Subgrid` completion; `LANDUNITS` registry for `from_table`),
+    `subgrid.py`, `layout.py` (`Layout`: one `LevelTable` per level, typed `layout.landunits`/...,
+    `tree()` of `views.py`'s element views), `pfts.py` (`Pft`: an IntEnum of pftvarcon's
+    `expected_pftnames`, parsed once per srcroot and cached in `.spel-cache/<srcroot>/pft_names.json`
+    by source hash; `api.Case.pfts` for a case's srcroot; `Patch` stores the plain index, since a
+    per-srcroot enum doesn't pickle). Declarations are frozen with vararg constructors: change
+    them with `with_weight`/`with_patches`/`with_landunit`/`with_topounit`, not `dataclasses.replace`.
+    `domains.py`: drawn domains and their shrinking;
   - `domain.py`: the synthetic domain under `<case>/proptest/domain-<hash>`: the constants file,
     and either an inputs file (`[domain] init = "files"`) or, by default for cases made with
     spel_varMod, `Domain.direct` (bounds + non-fill values), which the worker allocates through the
@@ -445,7 +454,7 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
 - `coverage` uses the gcov of the gfortran in use (`gcov-<major>`; the plain `gcov` here is GCC 13's
   and cannot read GCC 14 files) and takes counts as before/after differences, so nothing in the
   build directory is deleted.
-- Domains are ELM's hierarchy (`hierarchy.py`: `Gridcell` > `Topounit` > `Landunit` > `Column` >
+- Domains are ELM's hierarchy (`hierarchy/`: `Gridcell` > `Topounit` > `Landunit` > `Column` >
   `Patch`, weights in the parent; constructors for every landunit kind ELM builds, following
   initGridCellsMod: `Soil`, `Polygon`, `Crop`, `Urban`, `Lake`, `Wetland`, `Glacier`, `GlacierMec`;
   `glcmask`/`icemask` per gridcell; `[[domain.gridcell]]` in TOML). Activity is subgridWeightsMod's
@@ -458,13 +467,14 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   one declaration. `[domain] subgrid` adds ELM's implicit elements (the soil landunit on every
   topounit, every pft/CFT, every glacier class in the glcmask). Topology values
   (`domain.topology_value`) all come from the layout: flags (`Layout.flag`), `topo_grc_ind`,
-  `downhill_ti` (set_topounit's algorithm, quirk included), the rank-2 `landunit_indices`
+  `downhill_ti` (set_topounit's algorithm, quirk included, as long as E3SM has it; `[domain] downhill =
+  "intended"` for a fixed ELM; `Layout.downhill(rule=, local=)`), the rank-2 `landunit_indices`
   (polygons under polygontype + 9); ELM leaves the topounit/gridcell landunit ranges at ispval and
   never sets `col_pp%hydrologically_active` (always .false., though TotalWaterAndHeatMod reads it),
   and so does the domain. `max_topounits`/`has_topounit` are `DOMAIN_CONSTANTS`; declared
   topounit elevations pin `top_pp%elevation` (`Domain.pinned`). ELM type codes are
   `hierarchy.TYPE_CODES`, checked against the case's parameters.
-- Checked against ELM: `experiments/elm_layout_oracle.py RESTART` rebuilds every gridcell of a
+- Checked against ELM: `experiments/tools/elm_layout_oracle.py RESTART` rebuilds every gridcell of a
   restart file (land1d/cols1d/pfts1d) as a declaration and compares types, weights, activity and
   order (every gridcell of a 95,000-gridcell run matched); `Session.built().check()`
   compares what a case built (topology, bounds, `domain.EXPECTED_FILTERS`) with the declaration.
@@ -475,8 +485,12 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   worker); Hypothesis draws only the inputs. Failures of one domain are shrunk together
   (`runner._shrink`: candidates from `shrink_candidates`, quick runs without input shrinking, then
   each check alone, then one full run per final domain) and saved to
-  `failures/<scenario>__<check>__d<k>/` with `domain.toml`, which `replay` reads. Known weakness:
-  a shrink step can change which bug fails (e.g. a weight-0 topounit made active).
+  `failures/<scenario>__<check>__d<k>/` with `domain.toml`, which `replay` reads. A candidate
+  counts only when each check fails the same way (`runner.FailureSignature`: aborted, or which terms
+  are non-finite at the first failing element; `child_*` calls are one term), so shrinking does not
+  slip to another bug that trips the same check (it did: an R4 failure from a lake's NaN runoff
+  shrank to H3). The price: a candidate whose quick run fails differently is passed over (a less
+  reduced domain). A final run that fails differently says so in the outcome (`note: ...`).
 - Python API (`api.py`): builds the TOML-shaped dict `spec.parse` reads, checking each piece with
   the reader's own code; `tomlw.py` writes it. Inspection: `results.py` (`BuiltDomain`, `Result`
   frames, `Verdict`), `Session.sample` (the test-run draw through `strategies.RngChooser`).
@@ -501,6 +515,12 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   fexpr's `max` propagates NaN (ifx-like), which matters when a state can hold a NaN.
 - Tutorial: `spel/proptest/examples/canopyfluxes_tutorial.ipynb` (executed, with outputs). Change it through
   its narrative and re-execute it (`nbclient`) after API changes; its text quotes actual results.
+- Worked example of finding and diagnosing bugs: `spel/proptest/experiments/hillslope_im2/` (IM2
+  hillslope routing, case `hs_season`). A property test on drawn multi-step domains fails, the shrunk
+  cases suggest hypotheses, one spec per hypothesis confirms each, then the code is traced and the
+  diagnosis proven with `[domain] downhill = "intended"`. `specs.py` builds the specs (named after what
+  they test, no h1/h2 codes), `analysis.py` holds the notebook's analyses as named functions,
+  `README.md` is the report. General tools (restart oracle, restart diff) are in `experiments/tools/`.
 - Tests (`spel/proptest/tests/`): `test_proptest.py` (snippets; the CanopyFluxes end-to-end test is
   skipped unless the `canflux` case exists and `spel proptest build canflux` has been run),
   `test_runner_fake.py` and `test_multistep.py` (the runner on `fake.py`: a synthetic inventory and a

@@ -1,6 +1,6 @@
 """Compare hierarchy.Layout with what ELM built, gridcell by gridcell, from a restart file.
 
-usage: python -m spel.proptest.experiments.elm_layout_oracle RESTART [nsample] [seed]
+usage: python -m spel.proptest.experiments.tools.elm_layout_oracle RESTART [nsample] [seed]
 
 For each sampled gridcell, a declaration is rebuilt from the restart's land1d/cols1d/pfts1d
 records and laid out twice:
@@ -15,7 +15,7 @@ from collections import Counter
 import netCDF4
 import numpy as np
 
-from spel.proptest.hierarchy import (TYPE_CODES, Column, Gridcell, HierarchyError, Landunit, LandunitKind, Layout,
+from spel.proptest.hierarchy import (Column, Gridcell, HierarchyError, Landunit, LandunitKind, Layout,
                                      Patch, Subgrid, Topounit, UrbanDensity)
 
 KIND = {1: LandunitKind.SOIL, 2: LandunitKind.CROP, 3: LandunitKind.GLACIER, 4: LandunitKind.GLACIER_MEC,
@@ -85,9 +85,9 @@ def main():
                     if cw > 0 or kind is LandunitKind.URBAN:
                         cols_imp.append(Column(int(r["cols1d_ityp"][c]), imp or tuple(pats[:1]), cw))
                 lw = float(r["land1d_wttopounit"][l])
-                lus_full.append(Landunit(kind, tuple(cols_full), lw, DENS.get(lt)))
+                lus_full.append(Landunit.from_columns(kind, cols_full, lw, DENS.get(lt)))
                 if lw > 0 or kind in (LandunitKind.URBAN, LandunitKind.SOIL):
-                    lus_imp.append(Landunit(kind, tuple(cols_imp), lw, DENS.get(lt)))
+                    lus_imp.append(Landunit.from_columns(kind, cols_imp, lw, DENS.get(lt)))
             tw = float(sum(r["land1d_wtxy"][l] for l in lus_of_t[t]))
             tw_sum.append(tw)
             tops_full.append(Topounit(tuple(lus_full), tw, 0.0))

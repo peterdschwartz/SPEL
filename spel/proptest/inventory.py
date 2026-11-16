@@ -38,6 +38,7 @@ from typing import Any, Optional
 
 from spel.proptest.errors import ProptestError
 from spel.proptest.fexpr import ExprError, designator, evaluate_bound, parse_expr, uses, Evaluator
+from spel.proptest.hierarchy.codes import LEVEL_NAMES, LEVELS  # noqa: F401  (re-exported)
 from spel.proptest.paths import PROPTEST_DIR, work_dir
 from spel.scripts.fortran_parser.spel_ast import BoundsExpression, Expression
 
@@ -50,8 +51,6 @@ LEVEL_OF_BOUND = {
     "begg_all": "g", "endg_all": "g", "begl_all": "l", "endl_all": "l",
     "begc_all": "c", "endc_all": "c", "begp_all": "p", "endp_all": "p",
 }
-LEVELS = ("g", "t", "l", "c", "p")
-LEVEL_NAMES = {"g": "gridcell", "t": "topounit", "l": "landunit", "c": "column", "p": "patch"}
 # nc_io's subgrid dimension names (nc_subgrid_level)
 NC_DIM = {"g": "gridcell", "t": "topo", "l": "landunit", "c": "column", "p": "patch"}
 # real fields of the subgrid hierarchy the domain builder computes (weights, areas)

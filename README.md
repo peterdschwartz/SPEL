@@ -848,8 +848,10 @@ The archive is `.tar.gz` by default (`.tar.xz` or `.tar` by the name given to `-
 manifest (`spel-archive.json`). `extract` refuses to replace an existing case or its data without
 `--force`, and refuses archives with paths outside `cases/`, `input-data/` or `proptest-data/`, or
 with links. `--set-srcroot DIR` records the new machine's E3SM checkout in each case's
-`spel_meta.json` (what `spel restore` patches); the pickled analysis needs no change. To build
-there, point SPEL at an E3SM checkout as usual (`spel config --set-srcroot`).
+`spel_meta.json`. Loading the case then uses that checkout: its sources, what `spel restore`
+patches, and its analysis cache (proptest's step coupling and units need `spel analyze` of it
+there). A case whose recorded checkout is not on the machine falls back to the configured one,
+with a warning. To build there, point SPEL at an E3SM checkout as usual (`spel config --set-srcroot`).
 
 ### `spel accplan`
 

@@ -364,7 +364,7 @@ class Evaluator:
         resolve: Callable[[list[str]], Any],
         functions: Optional[dict[str, Callable]] = None,
         prev: Any = None,
-        aggregate: Optional[Callable[[str, "FArray", str], np.ndarray]] = None,
+        aggregate: Optional[Callable[[str, "FArray", str, Optional[str]], np.ndarray]] = None,
         history: Optional[list] = None,
     ):
         """prev: the state before the step, for `tend(x)`: a resolve() or (resolve, namespaces);
@@ -611,11 +611,19 @@ class Evaluator:
     def child(self, name: str, node: FuncExpression) -> Any:
         """`child_sum(x, 't')` (and wsum, mean, min, max): the variable x of a finer level reduced
         over the descendants of each element of level 't', for the current elements of that level
-        (its element variable must be bound: the check runs over that level or a finer one)."""
+        (its element variable must be bound: the check runs over that level or a finer one).
+        `child_sum(x, 't', filter%hydrologyc)`: only over the descendants in that filter of x's level."""
         if self.aggregate is None:
             raise ExprError(f"{name}: not available here")
-        if len(node.args) != 2:
-            raise ExprError(f"{name} takes a variable and a level: {name}(x, 't')")
+        if len(node.args) not in (2, 3):
+            raise ExprError(f"{name} takes a variable, a level and optionally a filter: "
+                            f"{name}(x, 't'[, filter%hydrologyc])")
+        member = None
+        if len(node.args) == 3:
+            path = designator(node.args[2])
+            if not (path and len(path) == 2 and path[0] == "filter"):
+                raise ExprError(f"{name}: the third argument is a filter of x's level, e.g. filter%hydrologyc")
+            member = path[1]
         x = self.eval(node.args[0])
         level = self.eval(node.args[1])
         if not isinstance(x, FArray):
@@ -623,7 +631,7 @@ class Evaluator:
                             f"{name}(col_wf%qflx_surf, 't')")
         if not isinstance(level, str) or level not in ("g", "t", "l", "c"):
             raise ExprError(f"{name}: the level is one of 'g', 't', 'l', 'c' (got {level!r})")
-        full = np.asarray(self.aggregate(CHILD_AGGREGATES[name], x, level))
+        full = np.asarray(self.aggregate(CHILD_AGGREGATES[name], x, level, member))
         elems = self.local.get(level)
         if not isinstance(elems, np.ndarray):
             raise ExprError(f"{name}(..., {level!r}): no element variable {level} here (run the check "

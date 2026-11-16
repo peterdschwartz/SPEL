@@ -72,6 +72,17 @@ def test_shrink_candidates_are_smaller_and_valid():
     assert not list(shrink_candidates([Gridcell.of(Soil(1))]))  # nothing smaller
 
 
+def test_shrinking_patches_keeps_every_soil_column():
+    from spel.proptest.hierarchy import Column, Patch
+
+    cols = (Column(1, (Patch(1), Patch(13)), weight=0.5), Column(1, (Patch(2), Patch(12)), weight=0.5))
+    g = Gridcell.of(Soil.of_columns(cols))
+    cands = [c[0].topounits[0].landunits[0] for c in shrink_candidates([g])]
+    assert [[p.pft for p in col.patches] for lu in cands for col in lu.columns] == [
+        [13], [2, 12], [1], [2, 12], [1, 13], [12], [1, 13], [2]]  # one patch fewer in one column
+    assert all(len(lu.columns) == 2 and [c.weight for c in lu.columns] == [0.5, 0.5] for lu in cands)
+
+
 def test_runner_draws_domains_and_shrinks_a_failure(tmp_path):
     from spel.proptest import runner
     from spel.proptest import spec as sp
@@ -98,3 +109,45 @@ def test_runner_draws_domains_and_shrinks_a_failure(tmp_path):
     shrunk = [Gridcell.from_table(c, "c") for c in cells]
     assert Layout(shrunk).sizes() == {"g": 1, "t": 1, "l": 1, "c": 1, "p": 1}  # any patch fails: the smallest domain
     assert "shrunk (" in text and "saved:" in text
+
+
+def test_shrinking_keeps_only_candidates_that_fail_the_same_way(tmp_path, monkeypatch):
+    """A candidate on which the check fails with another signature (another bug) is passed over;
+    a final run that fails differently is reported in the outcome."""
+    from spel.proptest import runner
+    from spel.proptest import spec as sp
+    from spel.proptest.tests import fake
+
+    case = tmp_path / "case"
+    inv = fake.inventory(case)
+    s = sp.parse(fake.spec_data(case), tmp_path / "t.proptest.toml", case, inv)
+    nan_x = runner.FailureSignature(nonfinite=frozenset({"a%x"}))
+    other = runner.FailureSignature(nonfinite=frozenset({"b%y"}))
+    final_sig = {"value": nan_x}
+
+    def fake_run(spec, inv, scenarios, checks, settings, *args, tag=None, **kw):
+        names = [g.name for g in spec.domain.gridcells]
+        if tag[0].endswith(", shrunk"):
+            sig = final_sig["value"]
+        elif "a" in names:
+            sig = nan_x  # the drawn domain's bug lives in gridcell "a"
+        else:
+            sig = other  # "b" alone fails too, but another way
+        return [runner.Outcome("s", "c", False, "msg", "property", failure="dir", signature=sig)]
+
+    monkeypatch.setattr(runner, "_run_domain", fake_run)
+    cells = [Gridcell.of(Soil(1), name="a"), Gridcell.of(Soil(1), name="b")]
+    failed = [runner.Outcome("s", "c", False, "msg", "property", failure="dir", signature=nan_x)]
+    out = io.StringIO()
+    runner._shrink(s, inv, cells, failed, {"seed": 0}, 40, "domain 1/1", "__d1", out, {})
+    text = out.getvalue()
+    assert "shrunk (2 domains tried)" in text and ": a: soil" in text, text  # [b] passed over, [a] kept
+    assert "failed differently" not in failed[0].message
+
+    final_sig["value"] = other  # the full run's input shrinking slipped
+    failed = [runner.Outcome("s", "c", False, "msg", "property", failure="dir", signature=nan_x)]
+    out = io.StringIO()
+    runner._shrink(s, inv, cells, failed, {"seed": 0}, 40, "domain 1/1", "__d1", out, {})
+    assert "the drawn domain failed differently (non-finite: a%x); this shrunk example: non-finite: b%y" \
+        in failed[0].message
+    assert "failed differently after shrinking" in out.getvalue()

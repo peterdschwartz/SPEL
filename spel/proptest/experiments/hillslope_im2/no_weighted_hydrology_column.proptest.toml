@@ -14,17 +14,17 @@ reference = "hs_season"
 [[domain.gridcell]]
 name = "lowest first"
 topounits = [
-  { weight = 0.3, elevation = 50, landunits = [{ kind = "soil", patches = [13] }] },
-  { weight = 0.3, elevation = 150, landunits = [{ kind = "soil", patches = [13] }] },
-  { weight = 0.4, elevation = 300, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 50.0, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 150.0, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.4, elevation = 300.0, landunits = [{ kind = "soil", patches = [13] }] },
 ]
 
 [[domain.gridcell]]
 name = "lake low"
 topounits = [
   { weight = 0.4, elevation = 50.0, landunits = [{ kind = "lake", weight = 1.0 }, { kind = "soil", patches = [13], weight = 0.0 }] },
-  { weight = 0.3, elevation = 150, landunits = [{ kind = "soil", patches = [13] }] },
-  { weight = 0.3, elevation = 300, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 150.0, landunits = [{ kind = "soil", patches = [13] }] },
+  { weight = 0.3, elevation = 300.0, landunits = [{ kind = "soil", patches = [13] }] },
 ]
 
 [[domain.gridcell]]
@@ -36,7 +36,7 @@ topounits = [
 [namelist]
 use_IM2_hillslope_hydrology = true
 
-# rain on the ground for the first half of the run; stores start empty
+# 0.7-7 mm/h of rain on the ground for 6 of 12 steps; stores start empty
 [scenario.storm]
 over = "c in hydrologyc"
 extends = """/lcrc/globalscratch/ac.schwartzpd/spel-unit-tests/proptest-data/hs_season/stats/hs_season.inputs.toml"""
@@ -163,7 +163,7 @@ keep = [
 "col_wf%qflx_from_uphill" = 0.0
 
 [[property]]
-name = "H3 the flux from uphill is finite on every hydrology column"
+name = "the flux from uphill is finite on every hydrology column"
 expr = "finite(col_wf%qflx_from_uphill(c))"
 
 [[property]]
@@ -178,7 +178,7 @@ steps = [2, 12]
 over = "t"
 
 [[relation]]
-name = "R4 water is conserved: soil + stores + runoff so far are the same with IM2 off"
-expect = """close(child_wsum(base%col_ws%endwb, 'g') + child_wsum(base%top_ws%from_uphill, 'g') + dtime_mod * acc(child_wsum(base%col_wf%qflx_runoff, 'g')), child_wsum(follow%col_ws%endwb, 'g') + dtime_mod * acc(child_wsum(follow%col_wf%qflx_runoff, 'g')), rtol=1.0e-9, atol=1.0e-9)"""
+name = "water is conserved: soil + stores + runoff so far are the same with IM2 off"
+expect = """close(child_wsum(base%col_ws%endwb, 'g', filter%hydrologyc) + child_wsum(base%top_ws%from_uphill, 'g') + dtime_mod * acc(child_wsum(base%col_wf%qflx_runoff, 'g', filter%hydrologyc)), child_wsum(follow%col_ws%endwb, 'g', filter%hydrologyc) + dtime_mod * acc(child_wsum(follow%col_wf%qflx_runoff, 'g', filter%hydrologyc)), rtol=1.0e-9, atol=1.0e-9)"""
 namelist = { use_IM2_hillslope_hydrology = false }
 over = "g"

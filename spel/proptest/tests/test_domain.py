@@ -199,6 +199,40 @@ def test_topounits_numbers_activity_and_downhill():
     assert "topounit 2/3" in lay.describe("p", 3)
 
 
+def test_hillslope_gridcell_and_elevation_column():
+    g = Gridcell.hillslope([(300, 0.5), (150, 0.5), (50, 0.0)], Soil(13), name="hill", copies=2)
+    assert g == Gridcell(name="hill", copies=2, topounits=tuple(
+        Topounit((Soil(13),), weight=w, elevation=e) for e, w in [(300.0, 0.5), (150.0, 0.5), (50.0, 0.0)]))
+    with pytest.raises(HierarchyError, match="landunits"):
+        Gridcell.hillslope([(10, 1.0)])
+    with pytest.raises(HierarchyError, match="no topounit"):
+        Gridcell.hillslope([], Soil(13))
+    lay = Layout([Gridcell.of(Lake()), g])
+    tt, ct = lay.table("t"), lay.table("c")
+    assert np.isnan(tt["elevation"].iloc[0]) and tt["elevation"].iloc[1:].tolist() == [300.0, 150.0, 50.0] * 2
+    # every element carries its topounit's elevation (ELM order: the lake column comes last)
+    np.testing.assert_array_equal(ct["elevation"].to_numpy(), tt["elevation"].to_numpy()[lay.ancestor_of("c", "t")])
+    assert np.isnan(ct["elevation"].iloc[-1])
+    assert "elevation" not in lay.table("g") and "elevation" not in Layout([Gridcell.of(Lake())]).table("c")
+
+
+def test_downhill_rules_local_numbers_and_problems():
+    profiles = {"lowest first": [(50, 0.3), (150, 0.3), (300, 0.4)], "lowest last": [(300, 0.4), (150, 0.3), (50, 0.3)],
+                "tie": [(100, 0.4), (50, 0.3), (50, 0.3)]}
+    lay = Layout([Gridcell.hillslope(p, Soil(13), name=n) for n, p in profiles.items()])
+    # ELM: the lowest keeps the previous topounit's dn_index (the first topounit of a gridcell: -1)
+    assert lay.downhill(local=True).tolist() == [-1, 1, 2, 2, 3, 3, 3, 3, 3]
+    assert lay.downhill().tolist() == [-1, 1, 2, 5, 6, 6, 9, 9, 9]
+    assert lay.downhill_problems() == ["", "", "", "", "", "-> itself", "", "-> 3 (level)", "-> itself"]
+    assert lay.downhill(rule="intended", local=True).tolist() == [-1, 1, 2, 2, 3, -1, 3, -1, -1]
+    assert not any(lay.downhill_problems("intended"))
+    # the layout's rule is what the domain's top_pp%downhill_ti uses
+    fixed = Layout(lay.declared, downhill="intended")
+    assert fixed.downhill().tolist() == lay.downhill(rule="intended").tolist()
+    with pytest.raises(HierarchyError, match="downhill must be one of"):
+        Layout(lay.declared, downhill="fixed")
+
+
 def test_weights_and_structure_are_checked():
     with pytest.raises(HierarchyError, match="sum to 1"):
         Layout([Gridcell.of(Soil(Patch(1, 0.7), Patch(2, 0.7)))])
@@ -314,6 +348,14 @@ def test_domain_decides_the_topounit_constants_and_pins_elevations(tmp_path):
     assert d.direct["values"]["top_pp%downhill_ti"].tolist() == [2, 2]
     with pytest.raises(dom.DomainError, match="follow from the declared gridcells"):
         dom.build_domain(inv, dom.DomainSpec([hill], constants={"max_topounits": 1}), tmp_path / "d2")
+    # the intended rule: the lowest topounit has no downhill neighbour
+    d = dom.build_domain(inv, dom.DomainSpec([hill], init="direct", downhill="intended"), tmp_path / "d3")
+    assert d.direct["values"]["top_pp%downhill_ti"].tolist() == [2, -1]
+    table = dom.DomainSpec([hill], downhill="intended").to_table()
+    assert table["downhill"] == "intended" and "downhill" not in dom.DomainSpec([hill]).to_table()
+    assert dom.DomainSpec.from_table(table, tmp_path).downhill == "intended"
+    with pytest.raises(dom.DomainError, match="downhill must be one of"):
+        dom.DomainSpec.from_table({**table, "downhill": "fixed"}, tmp_path)
 
 
 def test_type_codes_must_match_the_case(tmp_path):
@@ -404,14 +446,14 @@ def test_elm_order_interleaves_topounits_and_keeps_sets_contiguous():
     b = Gridcell.of(Urban("hd", weight=0.5), Soil(3), name="b")
     lay = Layout([a, b], nsets=2)
     per = lay.per_set("l")
-    first = [lay.levels["l"].decl[k].label for k in range(per)]
+    first = [lu.label for lu in lay.landunits[:per]]
     assert first == ["soil", "polygon high", "soil", "soil", "urban hd", "lake", "wetland"]
     assert lay.parent("l", "t")[:per].tolist() == [1, 1, 2, 3, 3, 1, 2]
     assert (lay.set_of("l") == np.repeat([0, 1], per)).all() and (lay.set_of("p") == np.repeat([0, 1], lay.per_set("p"))).all()
     assert not lay.contiguous("t", "l") and lay.contiguous("l", "p")
     assert lay.descendants("g", 1, "l").tolist() == [0, 1, 2, 5, 6]
     depth = Layout([a, b], order="depth")
-    assert [x.label for x in depth.levels["l"].decl] == ["soil", "polygon high", "lake", "wetland", "soil", "urban hd", "soil"]
+    assert [x.label for x in depth.landunits] == ["soil", "polygon high", "lake", "wetland", "soil", "urban hd", "soil"]
     assert depth.contiguous("t", "l")
 
 
@@ -452,7 +494,7 @@ def test_subgrid_adds_what_elm_always_creates():
     sub = Subgrid(natpft=(0, 3), cft=(4, 5), maxpatch_glcmec=3)
     g = Gridcell((Topounit((Wetland(),)), Topounit((Soil(2, weight=0.6), Crop(5, weight=0.4)))), glcmask=True)
     lay = Layout([g], subgrid=sub)
-    labels = [(int(t), x.label) for t, x in zip(lay.parent("l", "t"), lay.levels["l"].decl)]
+    labels = [(int(t), x.label) for t, x in zip(lay.parent("l", "t"), lay.landunits)]
     # soil (virtual) on both, crop (virtual on the wetland topounit), wetland, glacier-mec on both
     assert labels == [(1, "soil"), (2, "soil"), (1, "crop"), (2, "crop"), (1, "wetland"),
                       (1, "glacier_mec"), (2, "glacier_mec")]
@@ -476,3 +518,49 @@ def test_subgrid_adds_what_elm_always_creates():
     spec = dom.DomainSpec.from_table({"subgrid": sub.to_table(), "order": "depth",
                                       "gridcell": [g.to_table()]}, Path("."))
     assert spec.subgrid == sub and spec.layout().order == "depth"
+
+
+PFTVARCON_SNIPPET = """module pftvarcon
+  implicit none
+  integer, parameter :: pftname_len = 40
+contains
+  subroutine pftconrd()
+    character(len=pftname_len) :: expected_pftnames(0:3)
+    integer :: i
+    expected_pftnames( 0) = 'not_vegetated                      '
+    expected_pftnames( 1) = 'needleleaf_evergreen_temperate_tree'
+    expected_pftnames( 2) = 'c3_non-arctic_grass                '
+    expected_pftnames( 3) = 'c4_grass'
+    i = 1
+  end subroutine pftconrd
+end module pftvarcon
+"""
+
+
+def test_pft_enum_is_read_from_the_source_and_cached(tmp_path, monkeypatch):
+    import pickle
+
+    import spel.scripts.analysis_cache as ac
+    from spel.proptest.hierarchy import pfts
+
+    root = tmp_path / "E3SM"
+    src = root / pfts.PFTVARCON
+    src.parent.mkdir(parents=True)
+    src.write_text(PFTVARCON_SNIPPET)
+    monkeypatch.setattr(ac, "cache_root", lambda: tmp_path / "cache")
+    assert pfts.pft_names(root) == ("not_vegetated", "needleleaf_evergreen_temperate_tree", "c3_non-arctic_grass",
+                                    "c4_grass")
+    Pft = pfts.pft_enum(root)
+    assert pfts.pft_enum(root) is Pft  # once per srcroot
+    assert Pft.C3_NON_ARCTIC_GRASS == 2 and Pft(2).elm_name == "c3_non-arctic_grass" and len(Pft) == 4
+    # a member is stored as its index, so declarations stay picklable and equal to the int form
+    assert Soil(Pft.C4_GRASS) == Soil(3) and Patch(Pft.C4_GRASS, 0.5) == Patch(3, 0.5)
+    assert type(Patch(Pft.C4_GRASS).pft) is int and pickle.loads(pickle.dumps(Soil(Patch(Pft.C4_GRASS)))) == Soil(3)
+    # the cache answers until the source changes
+    cache = tmp_path / "cache" / ac.cache_key(root) / pfts.CACHE_FILE
+    assert cache.is_file()
+    src.write_text(PFTVARCON_SNIPPET.replace("'c4_grass'", "'c4_grass_x'"))
+    assert pfts.pft_names(root)[3] == "c4_grass_x"
+    src.write_text(PFTVARCON_SNIPPET.replace("expected_pftnames( 2)", "expected_pftnames( 5)"))
+    with pytest.raises(HierarchyError, match="not set for 0..n"):
+        pfts.pft_names(root)

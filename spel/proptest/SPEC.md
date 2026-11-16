@@ -2,12 +2,15 @@
 
 A spec describes property-based tests of one SPEL unit-test case: a synthetic domain, one or more
 *scenarios* (how the inputs are drawn) and *checks* (what must hold after the routine ran).
-`spel proptest init CASE` writes a starter; `spel/proptest/examples/canopyfluxes.proptest.toml`
-is a finished one, and `canopyfluxes_tutorial.ipynb` next to it explains how it was arrived at.
+`spel proptest init CASE` writes a starter.
+
+Inside `spel/proptest/examples/`:
+- `canopyfluxes.proptest.toml`
+- `canopyfluxes_tutorial.ipynb`
 
 Every name in a spec is checked against SPEL's analysis of the case when the file loads. An
 unknown name, an unknown key, a rule for something that is not an input, or an input without a
-rule stops loading or the run: nothing is defaulted without a word.
+rule stops loading or the run.
 
 - [Names and expressions](#names-and-expressions)
 - [`[case]`](#case), [`[settings]`](#settings), [`[domain]`](#domain), [`[namelist]`](#namelist), [`[units]`](#units), [`[functions]`](#functions)
@@ -77,8 +80,8 @@ Functions besides the intrinsics:
 | `rel_change(new, old)` | `(new - old) / max(abs(old), 1e-30)` |
 | `tend(x)` | x after the step minus x before it (`x - prev%x`; one call: `x - input%x`); any expression of the state, e.g. `tend(child_sum(col_ws%h2osfc, 't'))` |
 | `acc(x)` | x summed over the steps so far (each step's value in its own state; one call: x), e.g. `acc(child_wsum(col_wf%qflx_runoff, 'g'))` |
-| `elevation(t)`, `lowest(t)`, `uphill_count(t)`, `downhill_inactive(t)` | from the domain declaration: a topounit's declared elevation (NaN without one), whether it is the lowest of its gridcell (ties included), how many other topounits point to it with ELM's `top_pp%downhill_ti`, whether its downhill neighbour is an inactive (weight-0) topounit (set_topounit does not skip them) |
-| `child_sum(x, 't')`, `child_wsum`, `child_mean`, `child_min`, `child_max` | the whole variable x of a finer level reduced over the descendants of each element of level `'g'`, `'t'`, `'l'` or `'c'` (`wsum`: weighted by their weights relative to that level, as ELM's p2c/c2l; like them it skips inactive and weight-0 descendants, so an Inf or NaN left in a weight-0 topounit does not reach its gridcell); the level's element variable must be bound (a check over that level or a finer one) |
+| `elevation(t)`, `lowest(t)`, `uphill_count(t)`, `downhill_inactive(t)` | from the domain declaration: a topounit's declared elevation (NaN without one), whether it is the lowest of its gridcell (ties included), how many other topounits point to it with the domain's `top_pp%downhill_ti`, whether its downhill neighbour is an inactive (weight-0) topounit (set_topounit does not skip them) |
+| `child_sum(x, 't')`, `child_wsum`, `child_mean`, `child_min`, `child_max` | the whole variable x of a finer level reduced over the descendants of each element of level `'g'`, `'t'`, `'l'` or `'c'`; `child_sum(x, 'g', filter%hydrologyc)` only over those in a filter of x's level (the session's filter, as `over` uses it), e.g. the columns the routines compute (a lake's `qflx_runoff` the case never sets is NaN) (`wsum`: weighted by their weights relative to that level, as ELM's p2c/c2l; like them it skips inactive and weight-0 descendants, so an Inf or NaN left in a weight-0 topounit does not reach its gridcell); the level's element variable must be bound (a check over that level or a finer one) |
 | `active_dir(p, "<output>", k=1)` | coordinate of the element's drawn inputs along direction `k` of the saved active subspace of that output (run `spel proptest subspace` first) |
 
 ## `[case]`
@@ -106,7 +109,7 @@ Passed to Hypothesis: `max_examples` (default 100), `seed`, and any other settin
 The routine runs on a synthetic domain with ELM's subgrid hierarchy: gridcells, topounits,
 landunits, columns and patches, each with a weight in its parent. Gridcells are declared one by
 one (`[[domain.gridcell]]`), each `copies` times, and the whole set is repeated `nsets` times
-(`hierarchy.py`; the Python API builds the same tables, see [Python API](#python-api)).
+(`hierarchy/`; the Python API builds the same tables, see [Python API](#python-api)).
 
 ```toml
 [domain]
@@ -156,7 +159,7 @@ active: the ice-sheet coupling's mask) and `icemask = x` (`do_smb_c`).
   its landunit is active and its weight is > 0, or it is glacier-mec in the glcmask, or its
   landunit is urban (all five run); a patch when its column is active and its weight is > 0.
   `setFilters` skips inactive elements. Checked against every gridcell of a full ELM run's restart (types, weights, activity,
-  order: `experiments/elm_layout_oracle.py`).
+  order: `experiments/tools/elm_layout_oracle.py`).
 - **Layout** (`order`): `"elm"` (default) lays a set out as initGridCellsMod lays out a clump:
   gridcells and topounits in order, then the landunits in one pass per type over all topounits
   (soil with each topounit's polygons, crop, urban tbd/hd/md, lake, wetland, glacier,
@@ -181,8 +184,11 @@ active: the ice-sheet coupling's mask) and `icemask = x` (`do_smb_c`).
 - **Topounits.** `top_pp%topo_grc_ind` is the topounit's number within its gridcell;
   `max_topounits` and `has_topounit` are decided by the declaration (setting them is an error).
   With declared `elevation`s, `top_pp%downhill_ti` follows `set_topounit`'s algorithm (including
-  its quirk: the lowest topounit keeps the previous `dn_index`) and `top_pp%elevation` is pinned
-  to them: a scenario cannot rule it.
+  its quirk: `dn_index` is reset once per gridcell, so a topounit with no lower neighbour, the
+  lowest, keeps the previous topounit's answer and can point uphill or at itself) and
+  `top_pp%elevation` is pinned to them: a scenario cannot rule it. `downhill = "intended"` gives
+  every topounit the highest of the lower topounits instead (-1 when none is lower): the topology
+  an ELM with set_topounit fixed builds.
 - **Index fields** (`*_pp%gridcell/topounit/landunit/column`, `topi/topf`, `lndi/lndf`, `coli/colf`,
   `pfti/pftf`, `ntopounits` ... `npfts`, `grc_pp/top_pp%landunit_indices`) come from the layout;
   `spel proptest show SPEC` prints the gridcells and the element counts, and
@@ -194,6 +200,7 @@ active: the ice-sheet coupling's mask) and `icemask = x` (`do_smb_c`).
 | `draw` | none | drawn domains instead of declared gridcells: see [Drawn domains](#drawn-domains) |
 | `subgrid` | none | ELM's implicit elements: `{ natpft = [lb, ub], cft = [lb, ub], maxpatch_glcmec = n }` |
 | `order` | `"elm"` | `"elm"` or `"depth"` (see Layout) |
+| `downhill` | `"elm"` | `top_pp%downhill_ti`: `"elm"` (E3SM's set_topounit, quirk included) or `"intended"` (the nearest lower topounit; for a fixed ELM) |
 | `nsets` | 1 | copies of the declared gridcells; relations need an even number (base and follow-up halves) |
 | `snow_layers` | 0 | `col_pp%snl = -snow_layers` |
 | `reference` | none | a capture (name under `unit-tests/input-data`, or a directory): constants, parameters and level extents come from it |
@@ -593,7 +600,9 @@ from spel.proptest.api import Gridcell, Lake, Patch, Soil, Topounit, Urban   # a
 case = pt.Case("urbval", reference="cf_val")
 dom = pt.Domain([Gridcell.of(Urban("md"), Urban("hd"), copies=2, name="town"),
                  Gridcell(name="hill", topounits=(Topounit((Soil(1, 13),), weight=0.5, elevation=300.0),
-                                                  Topounit((Lake(),), weight=0.5, elevation=150.0)))],
+                                                  Topounit((Lake(),), weight=0.5, elevation=150.0))),
+                 # one topounit per (elevation, weight), each with the same landunits
+                 Gridcell.hillslope([(50.0, 0.3), (150.0, 0.3), (300.0, 0.4)], Soil(13), name="slope")],
                 nsets=2, reference="cf_val")
 spec = pt.Spec(case, dom, namelist={"implicit_stress": False})
 base = spec.scenario("base", over="p in urbanp", extends=case.stats_rules(landunits=["urban"]),
@@ -641,4 +650,4 @@ process).
 | a function | a function with `@register` in a `[functions]` module, or an entry of `FUNCTIONS` | `functions.py` |
 | a topology field | an entry of the `TOPOLOGY_*` sets or a case in `topology_value` | `domain.py` |
 | another way to run the routine | an object with `get`, `run`, `stop` (and `begin`, `step` for multi-step runs) passed as `Session(..., backend=...)` | `runner.py` |
-| a landunit kind or an ELM subgrid rule | the kind, its constructor and TOML table, its flags and layout pass | `hierarchy.py` (and `domain.EXPECTED_FILTERS`, `domains.py`) |
+| a landunit kind or an ELM subgrid rule | the kind, its constructor and TOML table, its flags and layout pass | a `Landunit` subclass in `hierarchy/decl.py`, flags in `hierarchy/codes.py` (and `domain.EXPECTED_FILTERS`, `domains.py`) |

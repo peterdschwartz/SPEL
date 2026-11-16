@@ -18,20 +18,28 @@ dependencies = [
 	"netCDF4>=1.7.2",
 	"colorlog>=6.9.0",
 	"dotenv",
-	"mpi4py",
 ]
 
 [project.optional-dependencies]
 # Django web app / database (spel/db)
 db = ["Django>=5.1.2"]
-# MariaDB/MySQL backend for the hosted instance (DB_ENGINE=mysql)
-mysql = ["mysqlclient"]
 # Loader/view tests under spel/db
 db-test = ["pytest-django"]
 # NN emulator training (`spel sample`, `spel train`)
 ml = ["torch", "scikit-learn"]
 # Property-based tests (`spel proptest`)
-proptest = ["hypothesis>=6"]
+proptest = [
+    "hypothesis>=6",
+    "numpy>=2.4.6",
+    "hypothesis>=6.170.15",
+    "netcdf4>=1.7.5.1.post1",
+]
+examples = [
+	"ipykernel>=7.4.0",
+	"jupyterlab>=4.6.6",
+	"matplotlib>=3.11.2",
+	"kitcat>=2.0.2",
+]
 
 [tool.setuptools.packages.find]
 include = ["spel*"]

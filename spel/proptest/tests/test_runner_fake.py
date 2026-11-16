@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from spel.proptest import runner
-from spel.proptest import spec as sp
+from spel.proptest import spec as spec
 from spel.proptest import strategies as strat
 from spel.proptest.tests import fake
 
@@ -18,7 +18,7 @@ pytest.importorskip("netCDF4")
 def load(tmp_path, bug="", inv=None, **tables):
     case = tmp_path / "case"
     inv = inv or fake.inventory(case)
-    s = sp.parse(fake.spec_data(case, **tables), tmp_path / "t.proptest.toml", case, inv)
+    s = spec.parse(fake.spec_data(case, **tables), tmp_path / "t.proptest.toml", case, inv)
     return s, inv, fake.FakeBackend(bug)
 
 
@@ -39,6 +39,21 @@ def test_property_passes_and_fails_with_a_report(tmp_path):
     assert not res[0].passed
     assert "fails at" in res[0].message and "a%x = " in res[0].message and "y = " in res[0].message
     assert "saved:" in text and (tmp_path / "proptest-data" / "case" / "failures" / "s__small" / "example.json").is_file()
+
+
+def test_failure_signature_names_the_non_finite_terms(tmp_path):
+    import json
+
+    res, _ = run(tmp_path, property=[{"name": "never written", "expr": "never(p) > 0.0 .or. y(p) < -10.0"},
+                                 {"name": "small", "expr": "y(p) < 2.5"},
+                                 {"name": "summed", "expr": "child_sum(never, 'g') > 0.0 .and. x(p) >= 0.0"}])
+    by = {o.check: o for o in res}
+    assert by["never written"].signature == runner.FailureSignature(nonfinite=frozenset({"b%never"}))
+    assert by["small"].signature == runner.FailureSignature() and by["small"].signature.text() == "finite values"
+    # a child_* reduction is one term, labelled as written; the variable inside is not looked at whole
+    assert by["summed"].signature.nonfinite == {"child_sum(never,g)"}
+    meta = json.loads((Path(by["never written"].failure) / runner.EXAMPLE_FILE).read_text())
+    assert meta["signature"] == {"aborted": False, "nonfinite": ["b%never"]}
 
 
 def test_inout_is_the_input_before_and_the_result_after(tmp_path):
@@ -93,7 +108,7 @@ def test_finer_element_variable_is_unbound_for_a_site_with_columns(tmp_path):
 
 
 def test_relation_needs_an_even_number_of_sets(tmp_path):
-    with pytest.raises(sp.SpecError, match="nsets must be even"):
+    with pytest.raises(spec.SpecError, match="nsets must be even"):
         load(tmp_path, domain={"gridcell": fake.vegetated(1), "nsets": 3}, relation=[{"name": "c", "expect": "same(follow%y(p), base%y(p))"}])
 
 
@@ -131,7 +146,7 @@ def test_differential_compares_two_backends(tmp_path):
 
 
 def test_differential_needs_a_compare_table(tmp_path):
-    with pytest.raises(sp.SpecError, match=r"no \[compare\] table"):
+    with pytest.raises(spec.SpecError, match=r"no \[compare\] table"):
         load(tmp_path, differential=[{"name": "d"}])
 
 
@@ -152,7 +167,7 @@ def test_levels_override_and_uniform_columns(tmp_path):
         prof = session.inputs_at(s.scenarios["s"], np.random.default_rng(0).random).inputs["a%prof"]
     assert (prof[:, 0] == 10.0).all() and ((prof[:, 1] >= 0.0) & (prof[:, 1] <= 1.0)).all()
     assert ((prof[:, 2:] >= 20.0) & (prof[:, 2:] <= 30.0)).all()
-    with pytest.raises(sp.SpecError, match="levels"):
+    with pytest.raises(spec.SpecError, match="levels"):
         load(tmp_path, scenario={"s": {"inputs": {"a%x": {"range": [0.0, 1.0], "levels": {"1": 0.0}},
                                                   "a%prof": 1.0, "a%state": 0.0}}})
 
@@ -190,25 +205,25 @@ def test_spec_functions_from_a_module(tmp_path):
                  property=[{"name": "f", "expr": "close(y(p), twice(x(p)) + input%state(p))"}])
     assert res[0].passed
     (tmp_path / "empty.py").write_text("x = 1\n")
-    with pytest.raises(sp.SpecError, match="registers no function"):
+    with pytest.raises(spec.SpecError, match="registers no function"):
         load(tmp_path, functions={"modules": ["empty.py"]})
-    with pytest.raises(sp.SpecError, match="unknown name 'thrice'"):
+    with pytest.raises(spec.SpecError, match="unknown name 'thrice'"):
         load(tmp_path, property=[{"name": "f", "expr": "thrice(x(p)) > 0.0"}])
 
 
 def test_unknown_name_inside_a_namespace_stops_loading(tmp_path):
-    with pytest.raises(sp.SpecError, match="not a variable"):
+    with pytest.raises(spec.SpecError, match="not a variable"):
         load(tmp_path, relation=[{"name": "r", "expect": "follow%nosuch(p) == base%y(p)"}])
 
 
 def test_filled_parameter_refuses_to_run(tmp_path):
     case = tmp_path / "case"
     inv = fake.inventory(case, [fake.var("pftcon%slatop", "0:78", "parameter")])
-    s = sp.parse(fake.spec_data(case, property=[{"name": "p", "expr": "finite(y(p))"}]), tmp_path / "t.toml", case, inv)
+    s = spec.parse(fake.spec_data(case, property=[{"name": "p", "expr": "finite(y(p))"}]), tmp_path / "t.toml", case, inv)
     inv.parameters["x78"] = 78
     with runner.Session(s, inv, backend=fake.FakeBackend()) as session:
         assert "pftcon%slatop" in session.domain.filled
-        with pytest.raises(sp.SpecError, match="pftcon%slatop .no reference capture"):
+        with pytest.raises(spec.SpecError, match="pftcon%slatop .no reference capture"):
             session.preflight(s.scenarios["s"])
 
 
@@ -222,11 +237,11 @@ def test_init_without_a_reference_leaves_todo_lines(tmp_path):
     assert '# TODO "a%x" = { range = [?, ?] }' in text and "finite(b%y(p))" in text
     assert "same(follow%b%y(p), base%b%y(p))" in text
     assert any("3 inputs have no rule" in line for line in todo) and any("no reference capture" in line for line in todo)
-    s, _ = sp.load(path, inv=inv)  # the starter loads; a run refuses until the TODO lines are rules
+    s, _ = spec.load(path, inv=inv)  # the starter loads; a run refuses until the TODO lines are rules
     scen = s.scenarios["default"]
-    assert sp.missing_rules(scen, inv.configured(sp.constants(s, inv, scen)), {}) == ["a%prof", "a%state", "a%x"]
+    assert spec.missing_rules(scen, inv.configured(spec.constants(s, inv, scen)), {}) == ["a%prof", "a%state", "a%x"]
     assert "[namelist]" in text and "extra" not in text and "boost" not in text  # dead while use_extra is off
-    with pytest.raises(sp.SpecError, match="exists"):
+    with pytest.raises(spec.SpecError, match="exists"):
         scaffold.write(case, inv, path)
 
 
@@ -260,7 +275,7 @@ def test_init_takes_the_landunit_kinds_from_the_routine_filters(tmp_path):
     domain = text.split("[namelist]")[0]
     assert 'density = "hd"' in domain and 'density = "md"' in domain and '"soil"' not in domain
     assert 'over = "p in urbanp"' in text and any("densities" in line for line in todo)
-    s, _ = sp.load(path, inv=inv)
+    s, _ = spec.load(path, inv=inv)
     assert [lu.density.value for lu in s.domain.gridcells[0].topounits[0].landunits] == ["hd", "md"]
     assert [g.name for g in s.domain.gridcells] == ["town"] and s.domain.gridcells[0].copies == 2
     inv.unit_test = _bindings("filter%lakep")
@@ -321,7 +336,7 @@ def test_variables_dead_under_the_configuration_do_not_show(tmp_path):
     with runner.Session(s, inv, backend=fake.backends(made=made)) as session:
         assert session.inv.vars["a%boost"].kind == "unused" and session.inv.vars["b%extra"].kind == "unused"
         assert session.inv.vars["b%extra"].dead_under == ("use_extra",)
-        assert sp.missing_rules(scen, session.inv, session.domain.constants) == []  # boost needs no rule
+        assert spec.missing_rules(scen, session.inv, session.domain.constants) == []  # boost needs no rule
         assert "b%extra" not in session.live_outputs()
         assert session.probe(scen, n=2).never_written == ["b%never"]
     assert inv.vars["a%boost"].kind == "input"  # without a configuration every branch counts
@@ -332,15 +347,15 @@ def test_a_rule_for_a_dead_input_is_dormant(tmp_path):
     inputs = {"a%x": {"range": [0.0, 1.0]}, "a%prof": 1.0, "a%state": 0.0, "a%boost": {"range": [1.0, 2.0]}}
     s, inv, _ = load(tmp_path, scenario={"s": {"inputs": inputs}}, property=[{"name": "p", "expr": "finite(y(p))"}])
     with runner.Session(s, inv, backend=fake.backends(made=made)) as session:
-        assert sp.dormant_rules(s.scenarios["s"], session.inv) == ["a%boost"]
+        assert spec.dormant_rules(s.scenarios["s"], session.inv) == ["a%boost"]
         res = runner.run(s, inv, settings={"seed": 0}, out=io.StringIO(), session=session)
     assert res[0].passed and "a%boost" not in made[0].seen and "a%x" in made[0].seen
 
 
 def test_naming_a_dead_variable_is_a_load_error_that_names_the_option(tmp_path):
-    with pytest.raises(sp.SpecError, match=r"extra \(b%extra\) has no value in scenario s.*use_extra = \.false\."):
+    with pytest.raises(spec.SpecError, match=r"extra \(b%extra\) has no value in scenario s.*use_extra = \.false\."):
         load(tmp_path, property=[{"name": "p", "expr": "finite(extra(p))"}])
-    with pytest.raises(sp.SpecError, match="boost .* has no value"):
+    with pytest.raises(spec.SpecError, match="boost .* has no value"):
         load(tmp_path, scenario={"s": {"inputs": {"a%x": 0.5, "a%prof": 1.0}, "derive": {"a%state": "boost(p)"}}},
              property=[{"name": "p", "expr": "finite(y(p))"}])
     # live in the scenario that turns the option on
@@ -348,11 +363,11 @@ def test_naming_a_dead_variable_is_a_load_error_that_names_the_option(tmp_path):
 
 
 def test_namelist_keys_are_options_of_the_case(tmp_path):
-    with pytest.raises(sp.SpecError, match="use_extar is not an option of the case .*use_extra"):
+    with pytest.raises(spec.SpecError, match="use_extar is not an option of the case .*use_extra"):
         load(tmp_path, namelist={"use_extar": True})
-    with pytest.raises(sp.SpecError, match="use_other is not an option"):
+    with pytest.raises(spec.SpecError, match="use_other is not an option"):
         load(tmp_path, relation=[{"name": "r", "namelist": {"use_other": 1}, "expect": "same(follow%y(p), base%y(p))"}])
-    with pytest.raises(sp.SpecError, match="cannot be combined with `namelist`"):
+    with pytest.raises(spec.SpecError, match="cannot be combined with `namelist`"):
         load(tmp_path, relation=[{"name": "r", "namelist": {"use_extra": True}, "permute": True,
                                   "expect": "same(follow%y(p), base%y(p))"}])
 
@@ -367,7 +382,7 @@ def test_scenario_under_another_option_needs_its_inputs(tmp_path):
     made = []
     s, inv, _ = load(tmp_path, scenario=scenarios, property=checks)
     with runner.Session(s, inv, backend=fake.backends(made=made)) as session:
-        with pytest.raises(sp.SpecError, match="inputs without a rule.*a%boost"):
+        with pytest.raises(spec.SpecError, match="inputs without a rule.*a%boost"):
             session.for_scenario(s.scenarios["on"]).preflight(s.scenarios["on"])
     scenarios["on"]["inputs"] = {**base, "a%boost": {"range": [1.0, 2.0]}}
     s, inv, _ = load(tmp_path, scenario=scenarios, property=checks)
@@ -395,7 +410,7 @@ def test_relation_under_other_options(tmp_path):
     assert "a%boost" not in made[0].seen and "a%boost" in made[1].seen  # each side gets the inputs it reads
 
     # `follow%` is checked in the follow-up's configuration, `base%` in the scenario's
-    with pytest.raises(sp.SpecError, match="base%extra .* has no value"):
+    with pytest.raises(spec.SpecError, match="base%extra .* has no value"):
         load(tmp_path, relation=[dict(rel, expect="same(follow%extra(p), base%extra(p))")], **tables)
 
     # a failure keeps both runs and replays

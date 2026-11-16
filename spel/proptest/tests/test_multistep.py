@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from spel.proptest import runner
-from spel.proptest import spec as sp
+from spel.proptest import spec as spec
 from spel.proptest import timestep
 from spel.proptest.errors import SpecError
 from spel.proptest.tests import fake
@@ -45,7 +45,7 @@ def load(tmp_path, scenario=None, **tables):
     data = fake.spec_data(case, **tables)
     if scenario is not None:
         data["scenario"]["s"].update(scenario)
-    return sp.parse(data, tmp_path / "t.proptest.toml", case, inv), inv
+    return spec.parse(data, tmp_path / "t.proptest.toml", case, inv), inv
 
 
 def run(tmp_path, scenario=None, **tables):
@@ -126,6 +126,44 @@ def test_child_aggregates_reduce_over_descendants(tmp_path):
     assert all(o.passed for o in res), [o.message for o in res]
 
 
+def test_child_aggregates_take_a_filter_of_the_variable_level(tmp_path):
+    from spel.proptest.hierarchy import Layout, Gridcell, Soil
+    from spel.proptest.results import _aggregate
+
+    # results._aggregate: elements outside `include` take no part in any reduction
+    lay = Layout([Gridcell.of(Soil(1, 13)), Gridcell.of(Soil(2, 12))])  # patches 1, 2 | 3, 4
+    v, odd = np.array([1.0, 2.0, 4.0, np.nan]), np.array([True, False, True, False])
+    np.testing.assert_allclose(_aggregate(lay, v, "p", "g", "sum", odd), [1.0, 4.0])
+    np.testing.assert_allclose(_aggregate(lay, v, "p", "g", "wsum", odd), [0.5, 2.0])  # weights 0.5
+    np.testing.assert_allclose(_aggregate(lay, v, "p", "g", "mean", odd), [1.0, 4.0])
+    np.testing.assert_allclose(_aggregate(lay, v, "p", "g", "max", odd), [1.0, 4.0])
+    assert np.isnan(_aggregate(lay, v, "p", "g", "sum")[1])  # unfiltered, the NaN reaches its gridcell
+
+    # child_sum(x, 'g', filter%m) in a check: two gridcells of two patches per set, nsets 2
+    case = tmp_path / "case"
+    inv = fake.inventory(case)
+    inv.filters.update({"oddp": "1", "evenp": "1", "bigp": "1"})
+    statics = {"filter%oddp": np.array([1, 3, 5, 7, 0]), "filter%num_oddp": np.array(4),
+               "filter%evenp": np.array([2, 4, 6, 8]), "filter%num_evenp": np.array(4),
+               "filter%bigp": np.array([99]), "filter%num_bigp": np.array(1)}
+    data = fake.spec_data(case, property=[
+        {"name": "the halves add up", "over": "g",
+         "expr": "close(child_sum(b%y, 'g', filter%oddp) + child_sum(b%y, 'g', filter%evenp), child_sum(b%y, 'g'))"},
+        {"name": "not a filter", "over": "g", "expr": "child_sum(b%y, 'g', 1.0) > 0.0"},
+        {"name": "another level", "over": "g", "expr": "child_sum(b%y, 'g', filter%bigp) > 0.0"},
+    ])
+    data["domain"] = {"gridcell": [{"name": "two", "landunits": [{"kind": "soil", "patches": [1, 13]}]},
+                                   {"name": "two more", "landunits": [{"kind": "soil", "patches": [2, 12]}]}],
+                      "nsets": 2}
+    s = spec.parse(data, tmp_path / "t.proptest.toml", case, inv)
+    with runner.Session(s, inv, backend=fake.FakeBackend(statics=statics)) as session:
+        res = runner.run(s, inv, settings={"seed": 0, "max_examples": 5}, out=io.StringIO(), session=session)
+    by = {o.check: o for o in res}
+    assert by["the halves add up"].passed, by["the halves add up"].message
+    assert not by["not a filter"].passed and "third argument is a filter" in by["not a filter"].message
+    assert not by["another level"].passed and "another level" in by["another level"].message
+
+
 def test_execute_keeps_every_step(tmp_path):
     s, inv = load(tmp_path, {"steps": 3})
     with runner.Session(s, inv, backend=fake.FakeBackend()) as session:
@@ -159,7 +197,7 @@ def test_check_steps_must_be_valid(tmp_path):
 
 
 def test_boundary_declared():
-    s = sp.Scenario("s", "c", None, {}, [], [], steps=2, keep=["col_ws%*"], forcing={"top_af%rain": None})
+    s = spec.Scenario("s", "c", None, {}, [], [], steps=2, keep=["col_ws%*"], forcing={"top_af%rain": None})
     assert s.boundary_declared("col_ws%h2osoi_liq") and s.boundary_declared("top_af%rain")
     assert not s.boundary_declared("col_wf%qflx_surf")
 
@@ -246,7 +284,7 @@ def test_carry_is_a_rule_of_the_state_before_step_1(tmp_path):
     s, _ = load(tmp_path, {"steps": 2, "carry": {"b%partial": 0.0}})
     sc = s.scenarios[0] if isinstance(s.scenarios, list) else s.scenarios["s"]
     assert sc.carry == ["b%partial"] and "b%partial" in sc.inputs
-    assert sp.dormant_rules(sc, fake.inventory(tmp_path / "case")) == []
+    assert spec.dormant_rules(sc, fake.inventory(tmp_path / "case")) == []
 
 
 def test_child_wsum_skips_inactive_children():

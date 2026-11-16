@@ -28,7 +28,7 @@ glacier = 0.3
 [namelist]
 use_IM2_hillslope_hydrology = true
 
-# rain on the ground for the first half of the run; stores start empty
+# 0.7-7 mm/h of rain on the ground for 6 of 12 steps; stores start empty
 [scenario.storm]
 over = "c in hydrologyc"
 extends = """/lcrc/globalscratch/ac.schwartzpd/spel-unit-tests/proptest-data/hs_season/stats/hs_season.inputs.toml"""
@@ -168,7 +168,7 @@ name = "no topounit sends water to itself"
 expr = "implies(col_wf%qflx_to_downhill(c) > 0.0, top_pp%downhill_ti(t) /= t)"
 
 [[relation]]
-name = "R4 water is conserved: soil + stores + runoff so far are the same with IM2 off"
-expect = """close(child_wsum(base%col_ws%endwb, 'g') + child_wsum(base%top_ws%from_uphill, 'g') + dtime_mod * acc(child_wsum(base%col_wf%qflx_runoff, 'g')), child_wsum(follow%col_ws%endwb, 'g') + dtime_mod * acc(child_wsum(follow%col_wf%qflx_runoff, 'g')), rtol=1.0e-9, atol=1.0e-9)"""
+name = "water is conserved: soil + stores + runoff so far are the same with IM2 off"
+expect = """close(child_wsum(base%col_ws%endwb, 'g', filter%hydrologyc) + child_wsum(base%top_ws%from_uphill, 'g') + dtime_mod * acc(child_wsum(base%col_wf%qflx_runoff, 'g', filter%hydrologyc)), child_wsum(follow%col_ws%endwb, 'g', filter%hydrologyc) + dtime_mod * acc(child_wsum(follow%col_wf%qflx_runoff, 'g', filter%hydrologyc)), rtol=1.0e-9, atol=1.0e-9)"""
 namelist = { use_IM2_hillslope_hydrology = false }
 over = "g"

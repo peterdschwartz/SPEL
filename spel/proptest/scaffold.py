@@ -1,9 +1,4 @@
-"""`spel proptest init`: a starter `<case>.proptest.toml` for a case.
-
-It writes what can be known without judgement: the case, a domain, one scenario that takes its
-rules from the `stats` rule file, and two checks every spec should start with (finite outputs,
-identical copies). What needs a decision is left as `# TODO` lines: inputs the reference gives no
-rule for, and constants it lacks.
+"""
 
 The domain's landunit kinds follow the filters elm_drv passes the routines (`routine_landunits`):
 urban filters (`urbanl`, ...) give urban landunits, lake filters a lake, `icemecc` glacier-mec,
@@ -24,8 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from spel.proptest import spec as specmod
-from spel.proptest import stats
-from spel.proptest import tomlw
+from spel.proptest import stats, tomlw
 from spel.proptest.domain import (
     CONSTANTS_FILE,
     FILTER_COMPLEMENTS,
@@ -36,10 +30,20 @@ from spel.proptest.domain import (
     density_of,
     read_constants,
 )
-from spel.proptest.hierarchy import (Glacier, GlacierMec, Gridcell, Lake, LandunitKind, Polygon, Soil, Urban,
-                                     UrbanDensity, Wetland)
 from spel.proptest.errors import SpecError
 from spel.proptest.fexpr import ExprError, designator, parse_expr
+from spel.proptest.hierarchy import (
+    Glacier,
+    GlacierMec,
+    Gridcell,
+    Lake,
+    LandunitKind,
+    Polygon,
+    Soil,
+    Urban,
+    UrbanDensity,
+    Wetland,
+)
 from spel.proptest.inventory import Inventory
 
 MAX_PFTS = 3
@@ -173,16 +177,10 @@ def write(
             else:
                 defaulted[c.name] = d
     consts.update(defaulted)
-    for (
-        c
-    ) in (
-        inv.constants.values()
-    ):  # scalars nobody reads and the reference lacks are 0 in the domain too
+    for c in inv.constants.values():
         if c.rank == 0:
             consts.setdefault(c.name, 0)
-    live = inv.configured(
-        consts
-    )  # the variables that matter under these namelist options
+    live = inv.configured(consts)
 
     kinds = set(landunits) if landunits else routine_landunits(inv)
     vegetated = bool(kinds & VEGETATED)
@@ -234,18 +232,28 @@ def write(
     notes: list[str] = []
     if vegetated:
         if pfts:
-            notes.append(f"vegetation: one soil column with the reference's {len(pfts)} most common pfts")
+            notes.append(
+                f"vegetation: one soil column with the reference's {len(pfts)} most common pfts"
+            )
         else:
             pfts = [1]
             notes.append("vegetation: TODO choose the pfts")
             todo.append("[domain] the vegetated gridcell's pfts: choose them")
-        gridcells.append(Gridcell.of(Soil(*sorted(pfts)), copies=COPIES, name="vegetation"))
+        gridcells.append(
+            Gridcell.of(Soil(*sorted(pfts)), copies=COPIES, name="vegetation")
+        )
     if LandunitKind.URBAN in kinds:
         if not densities:
             densities = DEFAULT_DENSITIES
-            todo.append("[domain] the town's urban densities: choose them (the reference has no active urban landunit)")
-        gridcells.append(Gridcell.of(*(Urban(d) for d in densities), copies=COPIES, name="town"))
-        notes.append("town: the densities of the reference's active urban landunits, five columns each")
+            todo.append(
+                "[domain] the town's urban densities: choose them (the reference has no active urban landunit)"
+            )
+        gridcells.append(
+            Gridcell.of(*(Urban(d) for d in densities), copies=COPIES, name="town")
+        )
+        notes.append(
+            "town: the densities of the reference's active urban landunits, five columns each"
+        )
     if LandunitKind.LAKE in kinds:
         gridcells.append(Gridcell.of(Lake(), copies=COPIES, name="lake"))
     if LandunitKind.WETLAND in kinds:
@@ -253,18 +261,41 @@ def write(
     if LandunitKind.GLACIER in kinds:
         gridcells.append(Gridcell.of(Glacier(), copies=COPIES, name="glacier"))
     if LandunitKind.GLACIER_MEC in kinds:
-        gridcells.append(Gridcell.of(GlacierMec({1: 0.5, 2: 0.5}), copies=COPIES, name="ice sheet", glcmask=True))
-        notes.append("ice sheet: glacier-mec with two elevation classes in the glcmask (give each a `topo` if the "
-                     "routines read glc_topo)")
+        gridcells.append(
+            Gridcell.of(
+                GlacierMec({1: 0.5, 2: 0.5}),
+                copies=COPIES,
+                name="ice sheet",
+                glcmask=True,
+            )
+        )
+        notes.append(
+            "ice sheet: glacier-mec with two elevation classes in the glcmask (give each a `topo` if the "
+            "routines read glc_topo)"
+        )
     if LandunitKind.POLYGON in kinds:
         tundra = sorted(pfts) if pfts else [1]
-        gridcells.append(Gridcell.of(Soil(*tundra, weight=0.4), Polygon("low", *tundra, weight=0.3),
-                                     Polygon("high", *tundra, weight=0.3), copies=COPIES, name="tundra"))
+        gridcells.append(
+            Gridcell.of(
+                Soil(*tundra, weight=0.4),
+                Polygon("low", *tundra, weight=0.3),
+                Polygon("high", *tundra, weight=0.3),
+                copies=COPIES,
+                name="tundra",
+            )
+        )
     dom = DomainSpec(gridcells, nsets=2, reference=reference)
-    head = [f"landunit kinds: {takes} ({'--landunits' if landunits else 'from the filters the routines take'})",
-            "nsets = 2: relations use the two halves of the sets", *notes]
-    lines.append(tomlw.dumps({"domain": dom.to_table(Path(case_dir).parent / "input-data")},
-                             {("domain",): "\n".join(head)}).rstrip("\n"))
+    head = [
+        f"landunit kinds: {takes} ({'--landunits' if landunits else 'from the filters the routines take'})",
+        "nsets = 2: relations use the two halves of the sets",
+        *notes,
+    ]
+    lines.append(
+        tomlw.dumps(
+            {"domain": dom.to_table(Path(case_dir).parent / "input-data")},
+            {("domain",): "\n".join(head)},
+        ).rstrip("\n")
+    )
 
     # the namelist options: what the spec sets, and what the routines test with the reference's values
     options = live.options()
@@ -315,7 +346,7 @@ def write(
     lines += ["", f"[scenario.{SCENARIO}]", f'over = "{over}"']
     if rule_file is not None:
         rel = os.path.relpath(rule_file, out.parent)
-        if rel.count("..") > 2:  # a spec far from the case: the path as it is
+        if rel.count("..") > 2:
             rel = str(rule_file)
         lines.append(
             f'extends = "{rel}"   # from `spel proptest stats`: a starting point'

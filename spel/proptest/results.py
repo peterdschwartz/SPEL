@@ -213,23 +213,27 @@ def _columns(name: str, data: np.ndarray, lb: tuple[int, ...], axis: int) -> dic
     return {f"{name}[{', '.join(str(i + l) for i, l in zip(ix, rest))}]": flat[:, j] for j, ix in enumerate(idx)}
 
 
-def _aggregate(lay, values: np.ndarray, fine: str, level: str, how: str) -> np.ndarray:
+def _aggregate(lay, values: np.ndarray, fine: str, level: str, how: str,
+               include: Optional[np.ndarray] = None) -> np.ndarray:
+    """`values` (one per element of `fine`) reduced over each element of `level`; with `include`
+    (a mask over the `fine` elements), the others take no part (a filter's members only)."""
     owner = lay.ancestor_of(fine, level)
     n = lay.count(level)
+    keep = np.ones(values.shape, dtype=bool) if include is None else np.asarray(include, dtype=bool)
     if how == "wsum":  # as ELM's subgridAveMod: inactive and zero-weight children are skipped (an
         # Inf or NaN left in a weight-0 topounit does not make its gridcell's sum NaN)
         w = lay.weight(fine, level)
-        keep = lay.active(fine) & (w != 0.0)
+        keep = keep & lay.active(fine) & (w != 0.0)
         part = np.zeros(values.shape)
         part[keep] = values[keep] * w[keep]
         return np.bincount(owner, weights=part, minlength=n)
     if how == "sum":
-        return np.bincount(owner, weights=values, minlength=n)
+        return np.bincount(owner[keep], weights=values[keep], minlength=n)
     if how == "mean":
-        return np.bincount(owner, weights=values, minlength=n) / np.bincount(owner, minlength=n)
+        return np.bincount(owner[keep], weights=values[keep], minlength=n) / np.bincount(owner[keep], minlength=n)
     if how in ("min", "max"):
         out = np.full(n, np.inf if how == "min" else -np.inf)
-        (np.minimum if how == "min" else np.maximum).at(out, owner, values)
+        (np.minimum if how == "min" else np.maximum).at(out, owner[keep], values[keep])
         return out
     raise ValueError(f"aggregate: unknown reduction {how!r} (sum, wsum, mean, min, max)")
 

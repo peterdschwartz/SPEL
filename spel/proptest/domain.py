@@ -1,6 +1,6 @@
 """Synthetic subgrid domains for property-based tests.
 
-The domain is declared as gridcells with ELM's full hierarchy (`hierarchy.py`: topounits,
+The domain is declared as gridcells with ELM's full hierarchy (`hierarchy/`: topounits,
 landunits, columns, patches, weights) in `[[domain.gridcell]]` tables, laid out by
 `hierarchy.Layout`. The builder writes what `elm_init` reads (`spel-inputs0001.nc`,
 `spel-constants0001.nc`) for every variable of the inventory:
@@ -41,7 +41,7 @@ import numpy as np
 
 from spel.proptest.errors import ProptestError
 from spel.proptest.fexpr import ExprError
-from spel.proptest.hierarchy import (ISPVAL, ORDERS, TYPE_CODES, Gridcell, HierarchyError, LandunitKind, Layout,
+from spel.proptest.hierarchy import (DOWNHILL_RULES, ISPVAL, ORDERS, TYPE_CODES, Gridcell, HierarchyError, LandunitKind, Layout,
                                      Subgrid, UrbanDensity, check_type_codes, ltype_of)
 from spel.proptest.inventory import LEVELS, NC_DIM, Inventory, VarInfo
 
@@ -93,12 +93,13 @@ class DomainSpec:
     # ELM's implicit elements (hierarchy.Subgrid); None: only what is declared
     subgrid: Optional[Subgrid] = None
     order: str = "elm"  # hierarchy.ORDERS
+    downhill: str = "elm"  # hierarchy.DOWNHILL_RULES: the rule of top_pp%downhill_ti (Layout.downhill)
     # drawn domains (domains.DomainDraw): `gridcells` is then the first of them (seed 0), the
     # sample the spec is checked and built against; runner.run draws its own
     draw: Optional[Any] = None
 
     KEYS = ("gridcell", "nsets", "snow_layers", "reference", "constants", "time", "dims", "init", "subgrid",
-            "order", "draw")
+            "order", "downhill", "draw")
 
     @classmethod
     def from_table(cls, table: dict, base: Path, input_data: Optional[Path] = None) -> "DomainSpec":
@@ -115,11 +116,12 @@ class DomainSpec:
                 if cells:
                     raise DomainError("[domain]: give [[domain.gridcell]] tables or [domain.draw], not both")
                 draw = DomainDraw.from_table(table["draw"])
-                cells = [g.to_table() for g in next(draw.domains(0))]
-            if not isinstance(cells, list) or not cells:
-                raise DomainError("[domain]: declare the gridcells as [[domain.gridcell]] tables (or draw them: "
-                                  "[domain.draw])")
-            gridcells = [Gridcell.from_table(g, f"[[domain.gridcell]] {k}") for k, g in enumerate(cells)]
+                gridcells = [g.checked(f"[domain.draw] gridcell {k}") for k, g in enumerate(next(draw.domains(0)))]
+            else:
+                if not isinstance(cells, list) or not cells:
+                    raise DomainError("[domain]: declare the gridcells as [[domain.gridcell]] tables (or draw "
+                                      "them: [domain.draw])")
+                gridcells = [Gridcell.from_table(g, f"[[domain.gridcell]] {k}") for k, g in enumerate(cells)]
         except HierarchyError as exc:
             raise DomainError(str(exc)) from None
         spec = cls(
@@ -133,10 +135,13 @@ class DomainSpec:
             init=table.get("init"),
             subgrid=_subgrid(table.get("subgrid")),
             order=str(table.get("order", "elm")),
+            downhill=str(table.get("downhill", "elm")),
             draw=draw,
         )
         if spec.order not in ORDERS:
             raise DomainError(f"[domain]: order must be one of {list(ORDERS)}, not {spec.order!r}")
+        if spec.downhill not in DOWNHILL_RULES:
+            raise DomainError(f"[domain]: downhill must be one of {list(DOWNHILL_RULES)}, not {spec.downhill!r}")
         if spec.init is not None and spec.init not in INIT_MODES:
             raise DomainError(f"[domain]: init must be one of {list(INIT_MODES)}, not {spec.init!r}")
         if spec.nsets < 1:
@@ -162,6 +167,8 @@ class DomainSpec:
             out["subgrid"] = self.subgrid.to_table()
         if self.order != "elm":
             out["order"] = self.order
+        if self.downhill != "elm":
+            out["downhill"] = self.downhill
         if self.draw is not None:
             out["draw"] = self.draw.to_table()
         else:
@@ -179,7 +186,8 @@ class DomainSpec:
         try:
             if params:
                 check_type_codes(params)
-            return Layout(self.gridcells, self.nsets, subgrid=self.subgrid, order=self.order)
+            return Layout(self.gridcells, self.nsets, subgrid=self.subgrid, order=self.order,
+                          downhill=self.downhill)
         except HierarchyError as exc:
             raise DomainError(str(exc)) from None
 
@@ -249,7 +257,7 @@ def _mec(lay: Layout, level: str) -> np.ndarray:
 
 
 def _icemask(lay: Layout, level: str) -> np.ndarray:
-    return np.asarray([g.icemask for g in lay.levels["g"].decl], dtype=float)[lay.gridcell_of(level)]
+    return np.asarray([g.icemask for g in lay.gridcells], dtype=float)[lay.gridcell_of(level)]
 
 
 # The members setFilters builds from the topology alone (filterMod::setFiltersOneGroup, active

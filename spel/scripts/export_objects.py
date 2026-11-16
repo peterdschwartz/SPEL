@@ -66,9 +66,43 @@ def unpickle_unit_test(casename: str) -> FunctionalUnitTest:
     return _load_pickle(Path(scripts_dir) / f"fut_{casename}.pkl")
 
 
+def case_srcroot(case_dir: Path) -> Optional[Path]:
+    """The E3SM checkout a case's spel_meta.json names (`spel create`; `spel archive extract
+    --set-srcroot` rewrites it) when it is on this machine; None without a meta file or a
+    recorded checkout, or (with a warning) when the checkout is not here."""
+    import json
+    import warnings
+
+    from spel.scripts.config import CASE_META_FILENAME
+
+    try:
+        meta = json.loads((Path(case_dir) / CASE_META_FILENAME).read_text())
+    except (OSError, ValueError):
+        return None
+    recorded = meta.get("e3sm_srcroot") if isinstance(meta, dict) else None
+    if not recorded:
+        return None
+    root = Path(recorded).expanduser()
+    if root.is_dir():
+        return root.resolve()
+    warnings.warn(
+        f"{Path(case_dir).name} was made from {recorded}, which is not on this machine: its sources "
+        f"are read from {E3SM_SRCROOT} (`spel archive extract --set-srcroot DIR` records another checkout)",
+        stacklevel=3,
+    )
+    return None
+
+
 def unpickle_case(case_dir: Path) -> FunctionalUnitTest:
-    """Load the FunctionalUnitTest `spel create` stored in a case directory."""
-    return _load_pickle(Path(case_dir) / CASE_PICKLE)
+    """Load the FunctionalUnitTest `spel create` stored in a case directory. The case's
+    spel_meta.json decides its checkout when that is on this machine: source paths are anchored
+    there and `e3sm_srcroot` (which selects the analysis cache: step coupling, units) names it.
+    Otherwise sources come from the configured E3SM_SRCROOT and `e3sm_srcroot` stays as pickled."""
+    root = case_srcroot(case_dir)
+    fut = _load_pickle(Path(case_dir) / CASE_PICKLE, srcroot=root)
+    if root is not None:
+        fut.e3sm_srcroot = root
+    return fut
 
 
 def _load_pickle(input_path: Path, srcroot: Optional[Path] = None) -> FunctionalUnitTest:

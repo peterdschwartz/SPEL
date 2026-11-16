@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from spel.proptest import functions as fn
-from spel.proptest import spec as sp
+from spel.proptest import spec as spec
 from spel.proptest import strategies as strat
 from spel.proptest.hierarchy import Gridcell, Layout, Soil
 from spel.proptest.fexpr import Evaluator, ExprError, FArray, parse_expr
@@ -106,15 +106,15 @@ def test_parse_rejects_assignment():
 def test_spec_unknown_name(inv):
     data = _spec(inv)
     data["property"][0]["expr"] = "t_leaf(p) > 0.0"
-    with pytest.raises(sp.SpecError, match="unknown name 't_leaf'"):
-        sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+    with pytest.raises(spec.SpecError, match="unknown name 't_leaf'"):
+        spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
 
 
 def test_spec_rule_on_output_rejected(inv):
     data = _spec(inv)
     data["scenario"]["s"]["inputs"]["veg_ef%eflx_sh_veg"] = 1.0
-    with pytest.raises(sp.SpecError, match="output, not an input"):
-        sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+    with pytest.raises(spec.SpecError, match="output, not an input"):
+        spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
 
 
 def test_spec_missing_rules_and_derive_order(inv):
@@ -125,10 +125,10 @@ def test_spec_missing_rules_and_derive_order(inv):
             "top_as%thbot": "top_as%tbot(t)",
         },
     )
-    s = sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+    s = spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
     scen = s.scenarios["s"]
     assert [v for v, _ in scen.derive] == ["top_as%thbot", "top_as%rhobot"]
-    assert sp.missing_rules(scen, inv, {}) == ["top_as%pbot", "veg_es%t_veg"]
+    assert spec.missing_rules(scen, inv, {}) == ["top_as%pbot", "veg_es%t_veg"]
 
 
 def test_spec_derive_cycle(inv):
@@ -136,33 +136,33 @@ def test_spec_derive_cycle(inv):
         inv,
         derive={"top_as%pbot": "top_as%rhobot(t)", "top_as%rhobot": "top_as%pbot(t)"},
     )
-    with pytest.raises(sp.SpecError, match="circular"):
-        sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+    with pytest.raises(spec.SpecError, match="circular"):
+        spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
 
 
 # -- rules
 
 
 def test_rule_quantiles_and_pft_override():
-    rule = sp._rule("a%x", {"range": [0.0, 10.0], "pft": {"4": {"value": -1.0}}}, "t")
+    rule = spec._rule("a%x", {"range": [0.0, 10.0], "pft": {"4": {"value": -1.0}}}, "t")
     u = np.array([0.0, 0.5, 1.0])
     pft = np.array([1, 4, 1])
     np.testing.assert_allclose(
         strat.values_of(rule, u, pft, 0, "real"), [0.0, -1.0, 10.0]
     )
-    lr = sp._rule("a%y", {"log_range": [1.0, 100.0]}, "t")
+    lr = spec._rule("a%y", {"log_range": [1.0, 100.0]}, "t")
     np.testing.assert_allclose(strat.quantile(lr)(np.array([0.5])), [10.0])
-    vals = sp._rule("a%z", {"values": [1, 2, 3]}, "t")
+    vals = spec._rule("a%z", {"values": [1, 2, 3]}, "t")
     assert strat.values_of(
         vals, np.array([0.0, 0.5, 1.0]), None, None, "integer"
     ).tolist() == [1, 2, 3]
 
 
 def test_rule_validation():
-    with pytest.raises(sp.SpecError):
-        sp._rule("a%x", {"range": [2.0, 1.0]}, "t")
-    with pytest.raises(sp.SpecError):
-        sp._rule("a%x", {"dist": "lognormal", "mean": 0.0}, "t")
+    with pytest.raises(spec.SpecError):
+        spec._rule("a%x", {"range": [2.0, 1.0]}, "t")
+    with pytest.raises(spec.SpecError):
+        spec._rule("a%x", {"dist": "lognormal", "mean": 0.0}, "t")
 
 
 def test_stats_suggest():
@@ -209,7 +209,7 @@ def test_active_subspace_of_ridge_function():
 
 
 def test_pft_clip_stays_on_its_pft():
-    rule = sp._rule(
+    rule = spec._rule(
         "a%x",
         {
             "range": [0.0, 10.0],
@@ -221,7 +221,7 @@ def test_pft_clip_stays_on_its_pft():
         rule, np.array([0.0, 0.5, 1.0]), np.array([1, 4, 1]), 0, "real"
     )
     np.testing.assert_allclose(out, [0.0, 3.0, 10.0])
-    base = sp._rule(
+    base = spec._rule(
         "a%x",
         {
             "range": [0.0, 10.0],
@@ -250,24 +250,24 @@ def test_domain_keys_must_name_something(inv):
     data = _spec(inv)
     data["scenario"]["s"]["inputs"]["col_es%t_soisno"] = 280.0
     data["domain"] = {"gridcell": [{"landunits": [{"kind": "soil", "patches": [1]}]}], "time": {"jday_mod": 10}, "dims": {"nlevsno": 5}}
-    sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+    spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
     data["domain"] = {"gridcell": [{"landunits": [{"kind": "soil", "patches": [1]}]}], "time": {"jdya_mod": 10}}
     with pytest.raises(DomainError, match="jdya_mod"):
-        sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+        spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
     data["domain"] = {"gridcell": [{"landunits": [{"kind": "soil", "patches": [1]}]}], "dims": {"nlevsnoo": 5}}
     with pytest.raises(DomainError, match="nlevsnoo"):
-        sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+        spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
 
 
 def test_outputs_are_not_available_before_compute(inv):
     data = _spec(inv)
     data["scenario"]["s"]["assume"] = {"exprs": ["eflx_sh_veg(p) > 0.0"]}
     inv.aliases["eflx_sh_veg"] = "veg_ef%eflx_sh_veg"
-    with pytest.raises(sp.SpecError, match="is an output"):
-        sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+    with pytest.raises(spec.SpecError, match="is an output"):
+        spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
     data = _spec(inv, derive={"top_as%thbot": "veg_ef%eflx_sh_veg(p)"})
-    with pytest.raises(sp.SpecError, match="is an output"):
-        sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+    with pytest.raises(spec.SpecError, match="is an output"):
+        spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
 
 
 def test_driver_argument_is_an_input_that_needs_a_rule(inv):
@@ -283,12 +283,12 @@ def test_driver_argument_is_an_input_that_needs_a_rule(inv):
         driver=True,
     )
     assert inv.vars["nextsw_cday"].nc_name == "spel_drv_nextsw_cday"
-    s = sp.parse(_spec(inv), inv.case_dir / "x.toml", inv.case_dir, inv)
-    assert "nextsw_cday" in sp.missing_rules(s.scenarios["s"], inv, {})
+    s = spec.parse(_spec(inv), inv.case_dir / "x.toml", inv.case_dir, inv)
+    assert "nextsw_cday" in spec.missing_rules(s.scenarios["s"], inv, {})
     data = _spec(inv)
     data["scenario"]["s"]["inputs"]["nextsw_cday"] = {"range": [1.0, 365.0]}
-    s = sp.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
-    assert "nextsw_cday" not in sp.missing_rules(s.scenarios["s"], inv, {})
+    s = spec.parse(data, inv.case_dir / "x.toml", inv.case_dir, inv)
+    assert "nextsw_cday" not in spec.missing_rules(s.scenarios["s"], inv, {})
 
 
 def test_element_axis_comes_from_the_expression_not_the_shape():
@@ -316,7 +316,7 @@ def test_check_must_give_one_logical_per_element():
 
     assert _per_element(np.array([True, False]), (2,), "t").tolist() == [True, False]
     assert _per_element(True, (2,), "t").tolist() == [True, True]
-    with pytest.raises(sp.SpecError, match="one logical per element"):
+    with pytest.raises(spec.SpecError, match="one logical per element"):
         _per_element(np.ones((2, 5), dtype=bool), (2,), "t")
 
 
@@ -349,7 +349,7 @@ def test_canopyfluxes_example_end_to_end():
     from spel.proptest import runner
 
     _example_case()
-    s, inventory = sp.load(EXAMPLE)
+    s, inventory = spec.load(EXAMPLE)
     out = io.StringIO()
     res = runner.run(
         s,
@@ -367,15 +367,15 @@ def test_canopyfluxes_example_end_to_end():
 
 def test_canopyfluxes_inventory_follows_the_namelist():
     _example_case()
-    s, inv = sp.load(EXAMPLE)
+    s, inv = spec.load(EXAMPLE)
     scen = s.scenarios["snowfree_day"]
     c13 = "photosyns_vars%c13_psnsun_patch"
     assert inv.vars[c13].kind == "output"  # every branch counted
-    off = inv.configured(sp.constants(s, inv, scen))
+    off = inv.configured(spec.constants(s, inv, scen))
     assert off.vars[c13].kind == "unused" and "use_c13" in off.vars[c13].dead_under
-    on = inv.configured(sp.constants(s, inv, scen, {"use_c13": True}))
+    on = inv.configured(spec.constants(s, inv, scen, {"use_c13": True}))
     assert on.vars[c13].kind == "output" and on.vars["top_as%pc13o2bot"].kind == "input"
-    assert "photosyns_vars%alphapsnsun_patch" in sp.dormant_rules(scen, off)
+    assert "photosyns_vars%alphapsnsun_patch" in spec.dormant_rules(scen, off)
 
 
 def test_coverage_tells_branches_the_namelist_turns_off():

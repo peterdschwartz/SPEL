@@ -9,13 +9,13 @@ import pytest
 
 from spel.proptest import api as pt
 from spel.proptest import checks, rules, runner, tomlw
-from spel.proptest import spec as sp
+from spel.proptest import spec as spec
 from spel.proptest.api import Gridcell, Lake, Patch, Soil, Topounit, Urban
 from spel.proptest.errors import SpecError
 from spel.proptest.tests import fake
 
 pytest.importorskip("netCDF4")
-EXAMPLES = Path(sp.__file__).parent / "examples"
+EXAMPLES = Path(spec.__file__).parent / "examples"
 
 
 def _case(tmp_path):
@@ -82,7 +82,7 @@ def test_builder_writes_what_the_reader_reads(tmp_path):
     spec.property("linear", "close(y(p), 2.0 * x(p) + input%state(p))", scenarios=[base], comment="the routine")
     spec.relation("copies", "same(follow%y(p), base%y(p))", permute=True)
     text = spec.to_toml(tmp_path / "t.proptest.toml")
-    loaded, _ = sp.load(tmp_path / "t.proptest.toml", inv=inv)
+    loaded, _ = spec.load(tmp_path / "t.proptest.toml", inv=inv)
     built = spec.validate()
     assert [c.name for c in loaded.checks] == [c.name for c in built.checks] == ["linear", "copies"]
     assert loaded.scenarios["s"].inputs == built.scenarios["s"].inputs

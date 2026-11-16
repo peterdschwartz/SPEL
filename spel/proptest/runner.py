@@ -42,7 +42,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional
 
 import numpy as np
 
@@ -50,8 +50,8 @@ from spel.proptest import strategies as strat
 from spel.proptest.checks import INPUT, PREV, Check, Expr
 from spel.proptest.domain import CONSTANTS_FILE, INPUTS_FILE, Domain, build_domain
 from spel.proptest.errors import SpecError
-from spel.proptest.fexpr import (ExprError, Evaluator, FArray, FuncExpression, Namespace, children, designator,
-                                 evaluate_bound, parse_section, uses)
+from spel.proptest.fexpr import (CHILD_AGGREGATES, ExprError, Evaluator, FArray, FuncExpression, Namespace, children,
+                                 designator, evaluate_bound, keyword_of, parse_section, uses)
 from spel.proptest.inventory import LEVELS, Inventory
 from spel.proptest.paths import data_dir, slug, work_dir
 from spel.proptest.rules import KINDS as RULE_KINDS
@@ -96,6 +96,26 @@ class StepRun:
     times: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class FailureSignature:
+    """How a check failed, to tell bugs apart while shrinking a drawn domain: the routine aborted,
+    or the check was false with these terms non-finite at the first failing element (empty: a
+    finite mismatch). Terms are the expression's per-element operands: its variables, and its
+    child_* reductions as a whole (a NaN in a column outside the element's sum does not count).
+    The step is left out: a candidate domain redraws the inputs, so the first failing step moves."""
+
+    aborted: bool = False
+    nonfinite: frozenset[str] = frozenset()
+
+    def text(self) -> str:
+        if self.aborted:
+            return "the routine aborted"
+        return ("non-finite: " + ", ".join(sorted(self.nonfinite))) if self.nonfinite else "finite values"
+
+    def to_json(self) -> dict:
+        return {"aborted": self.aborted, "nonfinite": sorted(self.nonfinite)}
+
+
 @dataclass
 class Failure:
     scenario: str
@@ -103,6 +123,7 @@ class Failure:
     example: Example
     message: str
     element: Optional[int] = None  # Fortran index of the first failing element
+    signature: Optional[FailureSignature] = None
 
 
 @dataclass
@@ -342,7 +363,7 @@ class Session:
     def domain_functions(self) -> dict[str, Callable]:
         """Topounit facts from the domain declaration: `elevation(t)` (declared elevation, NaN where
         none), `lowest(t)` (the lowest topounit of its gridcell, ties included), `uphill_count(t)`
-        (other topounits whose top_pp%downhill_ti, as ELM computes it, is t), `downhill_inactive(t)`
+        (other topounits whose top_pp%downhill_ti, as the domain gives it ([domain] downhill), is t), `downhill_inactive(t)`
         (t's downhill neighbour is an inactive, weight-0 topounit: set_topounit does not skip them)."""
         if getattr(self, "_domain_fns", None) is None:
             lay = self.layout
@@ -371,8 +392,9 @@ class Session:
                                 "downhill_inactive": at(dead)}
         return self._domain_fns
 
-    def _aggregate(self, how: str, x: FArray, level: str) -> np.ndarray:
-        """`child_<how>(x, level)`: x (a variable of a finer level) reduced over each element of level."""
+    def _aggregate(self, how: str, x: FArray, level: str, member: Optional[str] = None) -> np.ndarray:
+        """`child_<how>(x, level[, filter%member])`: x (a variable of a finer level) reduced over each
+        element of level; with a filter, only over x's elements in it (the session's filter, as `over`)."""
         from spel.proptest.results import _aggregate
 
         var = self.inv.vars.get(x.name) if x.name else None
@@ -383,7 +405,16 @@ class Session:
         data = np.asarray(x.data, dtype=float)
         if data.ndim != 1:
             raise ExprError(f"child_{how}: {x.name} has more than one value per element")
-        return _aggregate(self.layout, data, var.level, level, how)
+        include = None
+        if member is not None:
+            if member not in self.inv.filters:
+                raise ExprError(f"child_{how}: filter%{member} is not a filter of the case")
+            idx = self.elements((var.level, member))
+            if idx.size and (idx.min() < 1 or idx.max() > data.size):
+                raise ExprError(f"child_{how}: filter%{member} holds elements of another level than {x.name}")
+            include = np.zeros(data.size, dtype=bool)
+            include[idx - 1] = True
+        return _aggregate(self.layout, data, var.level, level, how, include)
 
     def elements(self, over: tuple[str, Optional[str]]) -> np.ndarray:
         """Fortran indices of the elements `over` selects."""
@@ -669,7 +700,7 @@ class Session:
         example's seed), each with everything under it: follow-up gridcell k then holds what
         gridcell `permutation[k]` held. Recorded in `ex.extra`."""
         half = self.half_count("g")
-        labels = [g.label for g in self.layout.levels["g"].decl[:half]]
+        labels = [g.label for g in self.layout.gridcells[:half]]
         rng = np.random.default_rng(ex.seed + 1)
         perm = np.arange(half)
         for label in sorted(set(labels)):
@@ -909,7 +940,7 @@ class Session:
         verdict, ctx = self._evaluate(scenario, check, ex, elems, mask, over[0])
         if verdict.aborted:
             msg = f"{check.name}: the routine aborted\n{verdict.aborted}"
-            self.last_failure = Failure(scenario.name, check.name, ex, msg)
+            self.last_failure = Failure(scenario.name, check.name, ex, msg, signature=FailureSignature(aborted=True))
             raise PropertyFailure(msg)
         bad = np.flatnonzero(mask & ~verdict.ok)
         if bad.size:
@@ -918,7 +949,9 @@ class Session:
             if scenario.steps > 1:
                 head, _, rest = msg.partition("\n")
                 msg = f"{head}\n  after step {verdict.step} of {scenario.steps}\n{rest}"
-            self.last_failure = Failure(scenario.name, check.name, ex, msg, int(elems[bad[0]]))
+            one = {v: (np.asarray(x)[bad[:1]] if isinstance(x, np.ndarray) else x) for v, x in local.items()}
+            self.last_failure = Failure(scenario.name, check.name, ex, msg, int(elems[bad[0]]),
+                                        self.signature(check, node, ev, one))
             raise PropertyFailure(msg)
 
     def evaluate(self, scenario: Scenario, check: Check, ex: Example) -> "Verdict":
@@ -1150,6 +1183,52 @@ class Session:
             lines.append(f"    {name} = {_fmt(val)}")
         return "\n".join(lines)
 
+    def terms(self, check: Check, node) -> Iterator[tuple[str, Any]]:
+        """The per-element operands of a check expression (label, node): child_* calls as a whole,
+        and the variables it names (x(p), a namespace's base%x(c), bare names); not functions,
+        element variables or literals."""
+
+        def variable(path: list[str]) -> Optional[str]:
+            """The canonical label of a variable (with its namespace), or None."""
+            if path[0] in (*check.names, INPUT, PREV):
+                name = self.canonical(tuple(path[1:])) if len(path) > 1 else None
+                return f"{path[0]}%{name}" if name else None
+            return self.canonical(tuple(path))
+
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if (kw := keyword_of(n)) is not None:
+                stack.append(kw[1])
+                continue
+            if isinstance(n, FuncExpression):
+                path = designator(n.function)
+                if path is not None and len(path) == 1 and path[0] in CHILD_AGGREGATES:
+                    yield str(n), n
+                elif path is not None and (label := variable(path)):
+                    yield label, n
+                else:
+                    stack.extend(reversed(n.args))
+                continue
+            path = designator(n)
+            if path is not None:
+                if label := variable(path):
+                    yield label, n
+                continue
+            stack.extend(reversed(children(n)))
+
+    def signature(self, check: Check, node, ev: Evaluator, one: dict) -> FailureSignature:
+        """The FailureSignature of a failure: the terms non-finite at the element `one` binds."""
+        bad = set()
+        for label, sub in self.terms(check, node):
+            try:
+                v = np.asarray(ev(sub, one, 1), dtype=float)
+            except (ExprError, TypeError, ValueError):
+                continue
+            if v.size and not np.all(np.isfinite(v)):
+                bad.add(label)
+        return FailureSignature(nonfinite=frozenset(bad))
+
     def describe_element(self, k: int, level: str = "p") -> str:
         return f"element {k} ({self.layout.describe(level, k)})"
 
@@ -1174,6 +1253,7 @@ class Session:
         meta = {
             "spec": str(self.spec.path), "case": self.case_dir.name, "scenario": f.scenario, "check": f.check,
             "element": f.element, "message": f.message, "seed": f.example.seed,
+            "signature": f.signature.to_json() if f.signature is not None else None,
             "modes": {k: strat.MODES[v] for k, v in sorted(f.example.modes.items())},
             "extra": f.example.extra, "inputs": sorted(f.example.inputs), "namelist": self.options,
         }
@@ -1431,6 +1511,7 @@ class Outcome:
     seconds: float = 0.0
     failure: str = ""  # directory of the saved failing example
     domain: str = ""  # drawn domains: which one
+    signature: Optional[FailureSignature] = None  # how it failed (PropertyFailure only)
 
 
 def run(spec: Spec, inv: Inventory, scenarios: Optional[list[str]] = None, checks: Optional[list[str]] = None,
@@ -1477,11 +1558,15 @@ def _shrink(spec: Spec, inv: Inventory, cells, failed: list[Outcome], settings: 
     """Shrink a drawn domain on which `failed` checks failed (their outcomes are updated).
 
     First the domain is shrunk for all of them together: a candidate is kept when every one
-    still fails on it (one session per candidate runs them all). Then each check alone, from
+    still fails on it, and fails the same way (its FailureSignature: aborted, or which terms are
+    non-finite), so the shrinking does not slip to another bug that trips the same check; a
+    candidate whose quick run happens to fail differently is passed over, which may leave the
+    domain less reduced (one session per candidate runs them all). Then each check alone, from
     there, on what is left of the budget (different bugs may need different domains). Candidate
     runs are quick: at most 2 examples and no input shrinking, so a failure that needs rare inputs
     may stop the shrinking early (the domain is then only less reduced). Each check then runs once more, fully, on its final
-    domain, which saves its failure with shrunk inputs."""
+    domain, which saves its failure with shrunk inputs; when that failure's signature differs from
+    the drawn domain's (input shrinking slipped), the outcome's message says so."""
     from spel.proptest import domains as dmod
 
     quick = {**settings, "max_examples": min(2, int({**spec.settings, **settings}.get("max_examples", 100))),
@@ -1489,12 +1574,18 @@ def _shrink(spec: Spec, inv: Inventory, cells, failed: list[Outcome], settings: 
     tried = 0
     t0 = time.monotonic()
 
+    want = {(o.scenario, o.check): o.signature for o in failed}
+
+    def same(o: Outcome) -> bool:
+        w = want.get((o.scenario, o.check))
+        return w is None or o.signature == w
+
     def fails(cand, keys: list[tuple[str, str]]) -> set[tuple[str, str]]:
         nonlocal tried
         tried += 1
         r = _run_domain(_drawn(spec, cand), inv, sorted({sc for sc, _ in keys}), sorted({c for _, c in keys}), quick,
                         out=io.StringIO(), tag=(tag + ", shrinking", suffix), **kw)
-        return {(o.scenario, o.check) for o in r if not o.passed and o.failure} & set(keys)
+        return {(o.scenario, o.check) for o in r if not o.passed and o.failure and same(o)} & set(keys)
 
     def descend(start, keys):
         best = start
@@ -1524,15 +1615,25 @@ def _shrink(spec: Spec, inv: Inventory, cells, failed: list[Outcome], settings: 
         t1 = time.monotonic()  # (on the drawn domain itself too, when nothing smaller fails: shrunk inputs)
         r = _run_domain(_drawn(spec, dom), inv, sorted({sc for sc, _ in ks}), sorted({c for _, c in ks}), settings,
                         out=io.StringIO(), tag=(tag + ", shrunk", suffix), **kw)
+        notes = []
         for o in r:
             orig = by_key.get((o.scenario, o.check))
             if orig is None or o.passed or not o.failure:
                 continue
+            w = want.get((o.scenario, o.check))
             orig.message, orig.failure = o.message, o.failure
+            if w is not None and o.signature is not None and o.signature != w:
+                orig.message += (f"\n  note: the drawn domain failed differently ({w.text()}); "
+                                 f"this shrunk example: {o.signature.text()}")
+                notes.append(f"  note: {o.check!r} failed differently after shrinking: {w.text()} -> "
+                             f"{o.signature.text()}")
+            orig.signature = o.signature
             if dom is not cells:
                 orig.domain = f"{tag}, shrunk from {dmod.size(cells)} to {dmod.size(dom)} elements"
         print(f"  shrunk ({tried} domains tried) for {', '.join(repr(c) for _, c in ks)}: {_domain_summary(dom)}"
               f" (full run there: {time.monotonic() - t1:.0f} s)", file=out, flush=True)
+        for line in notes:
+            print(line, file=out, flush=True)
         for _, c in ks:
             o = next((x for x in failed if x.check == c), None)
             if o is not None and o.failure:
@@ -1586,7 +1687,7 @@ def _run_domain(spec: Spec, inv: Inventory, scenarios: Optional[list[str]] = Non
                 except PropertyFailure as exc:
                     saved = s.save_failure()
                     outcomes.append(Outcome(name, c.name, False, str(exc), c.table, time.monotonic() - start,
-                                            str(saved or "")))
+                                            str(saved or ""), signature=getattr(s.last_failure, "signature", None)))
                     print(f"  FAIL\n{_indent(str(exc))}", file=out, flush=True)
                     if saved:
                         print(f"  saved: {saved}  (spel proptest replay {saved})", file=out, flush=True)
