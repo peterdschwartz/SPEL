@@ -28,7 +28,10 @@ with the reader's code as it is added, so a spec written in Python, its TOML fil
 
 ## From TOML to a verdict
 
-Flow-diagram here
+![From TOML to a verdict: spec and inventory, a Session (build, domain, worker), then per example draw, prepare, run and judge; a failure is shrunk by Hypothesis, saved, and reported as an Outcome](pipeline.svg)
+
+<!-- Source: pipeline.mmd (Mermaid). After editing it, regenerate the image:
+     npx -p @mermaid-js/mermaid-cli mmdc -i pipeline.mmd -o pipeline.svg -b white -->
 
 A relation or scenario with its own `namelist` runs in `Session.sibling`, a second worker on the
 same library; a differential check runs the other case or build in `Session.other`.

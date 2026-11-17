@@ -1,0 +1,47 @@
+%% From TOML to a verdict: how `spel proptest run` judges a spec (OVERVIEW.md).
+%% Regenerate pipeline.svg after editing (first run downloads mermaid-cli and a headless Chromium):
+%%   npx -p @mermaid-js/mermaid-cli mmdc -i pipeline.mmd -o pipeline.svg -b white
+%%{init: {"flowchart": {"wrappingWidth": 600, "curve": "basis"}, "theme":'base','themeVariables':{'fontSize': '22px'}}}%%
+flowchart TD
+    toml[".proptest.toml"] -->|spec.load| spec["spec.Spec"]
+    api["api.Spec<br/>(Python builder)"] -->|validate| spec
+    pkl["fut.pkl"] -->|Inventory.load| inv["Inventory"]
+    spec --> run
+    inv --> run
+    run["<b>orchestration.run</b>"] --> session
+
+    subgraph session ["<b>Session</b>: one per configuration (one per domain when drawn)"]
+        direction LR
+        build["<b>1 build</b><br/>build.py, shim.py:<br/>libspelcase.so when stale"]
+        domain["<b>2 domain</b><br/>domain.build_domain:<br/>the synthetic domain (SynthDomain)"]
+        worker["<b>3 worker</b><br/>worker.Worker:<br/>a subprocess that loads the library"]
+        build --> domain --> worker
+    end
+
+    session --> hyp["<b>Session.hypothesis_test</b><br/>each scenario × check, Hypothesis @given"]
+
+    subgraph example ["<b>per example</b>"]
+        direction LR
+        draw["<b>4 draw</b><br/>Drawing.draw_example:<br/>a seed and a mode per input,<br/>rule quantiles → values,<br/>then derive"]
+        prepare["<b>5 prepare</b><br/>Check.prepare:<br/>e.g. a relation fills<br/>the follow-up half"]
+        compute["<b>6 run</b><br/>Stepping.compute:<br/>the worker's run<br/>(run_steps if multi-step)"]
+        judge["<b>7 judge</b><br/>Session.judge:<br/>the expression per element<br/>(Evaluation, fexpr.py)"]
+        draw --> prepare --> compute --> judge
+    end
+
+    hyp --> example
+    judge -->|holds: next example| draw
+    example -->|"7 fails: PropertyFailure(Failure)<br/>with the report (reporting.py)"| shrink["Hypothesis shrinks the inputs<br/>and re-raises the shrunk example's failure"]
+    shrink -.->|candidates| example
+    shrink --> save["<b>8 save</b><br/>Session.save_failure → FailureStore.save:<br/>failures/&lt;scenario&gt;__&lt;check&gt;/"]
+    save --> outcome["Outcome<br/>(passed, message, saved failure)"]
+    hyp -->|every example held| outcome
+    outcome -->|drawn domain failed| dshrink["<b>9 orchestration._shrink</b><br/>smaller candidate domains,<br/>one Session each"]
+    save -.->|spel proptest replay| replay["orchestration.replay"]
+
+    classDef io fill:#eef3fb,stroke:#5b7bb2,color:#1d2b45
+    classDef stage fill:#ffffff,stroke:#444,color:#111
+    classDef fail fill:#fdf0ef,stroke:#b5534a,color:#4a1c18
+    class toml,api,pkl,spec,inv,outcome io
+    class build,domain,worker,draw,prepare,compute,judge,hyp,run stage
+    class shrink,save,dshrink,replay fail
