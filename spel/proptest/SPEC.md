@@ -1,5 +1,7 @@
 # `<name>.proptest.toml`: the spec format
 
+New to proptest? Start with [OVERVIEW.md](docs/OVERVIEW.md).
+
 A spec describes property-based tests of one SPEL unit-test case: a synthetic domain, one or more
 *scenarios* (how the inputs are drawn) and *checks* (what must hold after the routine ran).
 `spel proptest init CASE` writes a starter.

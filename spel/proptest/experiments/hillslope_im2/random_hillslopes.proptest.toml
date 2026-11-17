@@ -31,7 +31,7 @@ use_IM2_hillslope_hydrology = true
 # 0.7-7 mm/h of rain on the ground for 6 of 12 steps; stores start empty
 [scenario.storm]
 over = "c in hydrologyc"
-extends = """/lcrc/globalscratch/ac.schwartzpd/spel-unit-tests/proptest-data/hs_season/stats/hs_season.inputs.toml"""
+extends = """/home/me/climate-projects/SPEL/unit-tests/proptest-data/hs_season/stats/hs_season.inputs.toml"""
 steps = 12
 keep = [
   "aerosol_vars%mss_bcphi_col",

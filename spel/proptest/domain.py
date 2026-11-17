@@ -305,7 +305,7 @@ def density_of(ltype: int) -> Optional[UrbanDensity]:
 
 
 @dataclass
-class Domain:
+class SynthDomain:
     spec: DomainSpec
     layout: Layout
     directory: Path
@@ -513,7 +513,7 @@ def _reference_value(var: VarInfo, ref, extents) -> tuple[Optional[np.ndarray], 
     return data, ""
 
 
-def build_domain(inv: Inventory, spec: DomainSpec, directory: Path) -> Domain:
+def build_domain(inv: Inventory, spec: DomainSpec, directory: Path) -> SynthDomain:
     import netCDF4
 
     directory = Path(directory)
@@ -668,7 +668,7 @@ def build_domain(inv: Inventory, spec: DomainSpec, directory: Path) -> Domain:
         skipped[name] = (
             "constant not in the reference: written as 0 (the routines do not read it)"
         )
-    return Domain(
+    return SynthDomain(
         spec=spec,
         layout=layout,
         directory=directory,
