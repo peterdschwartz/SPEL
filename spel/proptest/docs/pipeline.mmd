@@ -1,6 +1,6 @@
 %% From TOML to a verdict: how `spel proptest run` judges a spec (OVERVIEW.md).
-%% Regenerate pipeline.svg after editing (first run downloads mermaid-cli and a headless Chromium):
-%%   npx -p @mermaid-js/mermaid-cli mmdc -i pipeline.mmd -o pipeline.svg -b white
+%% Regenerate pipeline.svg after editing: ./render_diagrams.sh (pinned mermaid-cli, opaque background;
+%% the first run downloads mermaid-cli and a headless Chromium)
 %%{init: {"flowchart": {"wrappingWidth": 600, "curve": "basis"}, "theme":'base','themeVariables':{'fontSize': '22px'}}}%%
 flowchart TD
     toml[".proptest.toml"] -->|spec.load| spec["spec.Spec"]

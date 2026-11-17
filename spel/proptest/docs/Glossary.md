@@ -3,7 +3,7 @@
 New to proptest? Start with [OVERVIEW.md](OVERVIEW.md).
 
 Terms used by `spel proptest`, grouped by where they come from. The format itself is specified in
-[`SPEC.md`](../SPEC.md)
+[`SPEC.md`](SPEC.md)
 
 ## ELM Terms
 

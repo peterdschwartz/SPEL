@@ -4,7 +4,7 @@
 function: you state what must hold, it draws many inputs on a synthetic domain, runs the compiled
 routine on them, and shrinks any failure to a small example it saves for replay.
 
-Read this first; then [SPEC.md](../SPEC.md) (the format), [Glossary.md](Glossary.md) (terms), the
+Read this first; then [SPEC.md](SPEC.md) (the format), [Glossary.md](Glossary.md) (terms), the
 tutorial notebook (`examples/canopyfluxes_tutorial.ipynb`) and a worked bug hunt
 (`experiments/hillslope_im2/`).
 
@@ -30,8 +30,8 @@ with the reader's code as it is added, so a spec written in Python, its TOML fil
 
 ![From TOML to a verdict: spec and inventory, a Session (build, domain, worker), then per example draw, prepare, run and judge; a failure is shrunk by Hypothesis, saved, and reported as an Outcome](pipeline.svg)
 
-<!-- Source: pipeline.mmd (Mermaid). After editing it, regenerate the image:
-     npx -p @mermaid-js/mermaid-cli mmdc -i pipeline.mmd -o pipeline.svg -b white -->
+<!-- Source: pipeline.mmd (Mermaid). After editing it, regenerate the image with
+     ./render_diagrams.sh (in this directory). -->
 
 A relation or scenario with its own `namelist` runs in `Session.sibling`, a second worker on the
 same library; a differential check runs the other case or build in `Session.other`.
