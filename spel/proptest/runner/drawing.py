@@ -20,7 +20,7 @@ from spel.proptest.runner.evaluation import Evaluation, _per_element
 from spel.proptest.spec import INPUT_KINDS, Relation, Scenario, Spec
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Example:
     inputs: dict[str, np.ndarray]  # inst%field -> Fortran-shaped array
     u: dict[str, np.ndarray] = field(default_factory=dict)
@@ -89,7 +89,7 @@ class Drawing:
         """The example with every ruled input at quantile `u` of its rule, then `derive`.
         u: one number for everything, a callable `shape -> array` (e.g. `rng.random`), or a
         dict input -> array (inputs it lacks: 0.5)."""
-        ex = Example({})
+        ex = Example(inputs={})
         for name in sorted(scenario.inputs):
             rule = scenario.inputs[name]
             var = self.inv.vars[name]
@@ -242,11 +242,11 @@ class Drawing:
     def follow_up(self, scenario: Scenario, rel: Relation, ex: Example) -> Example:
         """Sets nsets/2.. become a copy of the base sets, then the relation's transforms."""
         out = Example(
-            {k: v.copy() for k, v in ex.inputs.items()},
-            ex.u,
-            ex.modes,
-            ex.seed,
-            dict(ex.extra),
+            inputs={k: v.copy() for k, v in ex.inputs.items()},
+            u=ex.u,
+            modes=ex.modes,
+            seed=ex.seed,
+            extra=dict(ex.extra),
         )
         out.forcing = {k: v.copy() for k, v in ex.forcing.items()}
         for name, arr in out.inputs.items():
@@ -303,7 +303,7 @@ class Drawing:
         this case under other options): a copy of the example, the `follow` transforms over every element (each
         an expression of the base inputs), then the target's `derive`."""
         out = Example(
-            {k: v.copy() for k, v in ex.inputs.items()}, ex.u, ex.modes, ex.seed
+            inputs={k: v.copy() for k, v in ex.inputs.items()}, u=ex.u, modes=ex.modes, seed=ex.seed
         )
         target.fill_missing(scenario, out)
         ev = self.evaluation.evaluator(self.space.farrays(ex.inputs))

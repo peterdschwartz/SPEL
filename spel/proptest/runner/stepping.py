@@ -20,7 +20,7 @@ from spel.proptest.spec import INPUT_KINDS, STEP_NAME, Scenario, Spec
 from spel.proptest.worker import FortranAbort
 
 
-@dataclass
+@dataclass(kw_only=True)
 class StepRun:
     """A multi-step run of an example: after each step, every value it set or fetched (the state the
     checks see), and the time scalars of the step."""
@@ -223,7 +223,7 @@ class Stepping:
             states.append(after)
             times.append(dict(time))
             before = after
-        self._run = StepRun(ex, scenario.name, states, times)
+        self._run = StepRun(example=ex, scenario=scenario.name, states=states, times=times)
         return self._run
 
     def step_assign(

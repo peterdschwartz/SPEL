@@ -10,7 +10,8 @@ evaluated over the elements the check selects. A kind decides
 - `namespaces`: the extra names its expression may use (`base%x`, `follow%x`, `ref%x`, `dev%x`).
 
 The runner (`runner.Session.judge`) knows only this interface, so a new kind is a class here
-with `@register`; nothing else changes.
+with `@register`; nothing else changes. A kind is a dataclass with the common fields `name`,
+`scenarios`, `over` and `steps`, read by `Check._common`.
 """
 
 from __future__ import annotations
@@ -60,12 +61,13 @@ def live_names(expr: Expr, inv, spaces: dict[str, Any], where: str, scenario: st
 class Check:
     table: ClassVar[str] = ""  # the TOML table name, also what reports call the check
     names: ClassVar[tuple[str, ...]] = ()  # namespaces its expression may use
-    keys: ClassVar[set[str]] = set()  # keys of its table besides name, scenarios and over
+    keys: ClassVar[set[str]] = set()  # keys of its table besides name, scenarios, over and steps
 
+    # the common fields, each kind's dataclass fields (`_common` reads them)
     name: str
     scenarios: list[str]
     over: Over
-    steps: Any = "all"  # in a multi-step run: "all", "last", a step, or [first, last] (1-based)
+    steps: Any  # in a multi-step run: "all", "last", a step, or [first, last] (1-based)
 
     @classmethod
     def from_table(cls, t: dict, names) -> "Check":
@@ -84,7 +86,7 @@ class Check:
 
     @classmethod
     def _common(cls, t: dict, names) -> tuple[str, dict]:
-        """Checks of the table's keys; (where, the name/scenarios/over arguments)."""
+        """Checks of the table's keys; (where, the common fields: name, scenarios, over, steps)."""
         where = f"[[{cls.table}]] {t.get('name', '?')!r}"
         extra = set(t) - cls.keys - {"name", "scenarios", "over", "steps"}
         if extra:
@@ -92,7 +94,8 @@ class Check:
         if "name" not in t:
             raise SpecError(f"{where}: `name` is required")
         return where, {"name": t["name"], "scenarios": list(t.get("scenarios", ["*"])),
-                       "over": names.over(t.get("over"), where)}
+                       "over": names.over(t.get("over"), where),
+                       "steps": parse_steps(t["steps"], where) if "steps" in t else "all"}
 
     @property
     def judged(self) -> Expr:
@@ -149,17 +152,9 @@ def parse_steps(value: Any, where: str) -> Any:
 
 
 def register(cls: type[Check]) -> type[Check]:
+    """A check kind, under its TOML table name."""
     if not cls.table:
         raise ValueError(f"{cls.__name__}: a check kind needs a table name")
-    read = cls.from_table.__func__
-
-    def from_table(klass, t: dict, names) -> Check:  # every kind takes `steps` (multi-step runs)
-        obj = read(klass, t, names)
-        if "steps" in t:
-            obj.steps = parse_steps(t["steps"], f"[[{klass.table}]] {t.get('name', '?')!r}")
-        return obj
-
-    cls.from_table = classmethod(from_table)
     KINDS[cls.table] = cls
     return cls
 
@@ -173,6 +168,7 @@ class Property(Check):
     scenarios: list[str]
     expr: Expr
     over: Over = None
+    steps: Any = "all"  # multi-step runs: the steps it is judged after (Check.judged_steps)
 
     table: ClassVar[str] = "property"
     keys: ClassVar[set[str]] = {"expr"}
@@ -213,6 +209,7 @@ class Relation(Check):
     over: Over = None
     permute: bool = False
     namelist: dict[str, Any] = field(default_factory=dict)
+    steps: Any = "all"  # multi-step runs: the steps it is judged after (Check.judged_steps)
 
     table: ClassVar[str] = "relation"
     names: ClassVar[tuple[str, ...]] = ("base", "follow")
@@ -311,6 +308,7 @@ class Differential(Check):
     over: Over = None
     all_outputs: bool = False  # outputs = "all": the list is made per configuration (`expr_for`)
     tolerance: str = ""  # ", rtol=..., atol=..." of the generated comparison
+    steps: Any = "all"  # multi-step runs: the steps it is judged after (Check.judged_steps)
 
     table: ClassVar[str] = "differential"
     names: ClassVar[tuple[str, ...]] = ("ref", "dev")

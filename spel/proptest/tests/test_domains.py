@@ -133,11 +133,11 @@ def test_shrinking_keeps_only_candidates_that_fail_the_same_way(tmp_path, monkey
             sig = nan_x  # the drawn domain's bug lives in gridcell "a"
         else:
             sig = other  # "b" alone fails too, but another way
-        return [runner.Outcome("s", "c", False, "msg", "property", failure="dir", signature=sig)]
+        return [runner.Outcome(scenario="s", check="c", passed=False, message="msg", kind="property", failure="dir", signature=sig)]
 
     monkeypatch.setattr(runner.orchestration, "_run_domain", fake_run)  # where run and _shrink look it up
     cells = [Gridcell.of(Soil(1), name="a"), Gridcell.of(Soil(1), name="b")]
-    failed = [runner.Outcome("s", "c", False, "msg", "property", failure="dir", signature=nan_x)]
+    failed = [runner.Outcome(scenario="s", check="c", passed=False, message="msg", kind="property", failure="dir", signature=nan_x)]
     out = io.StringIO()
     runner._shrink(s, inv, cells, failed, {"seed": 0}, 40, "domain 1/1", "__d1", out, {})
     text = out.getvalue()
@@ -145,7 +145,7 @@ def test_shrinking_keeps_only_candidates_that_fail_the_same_way(tmp_path, monkey
     assert "failed differently" not in failed[0].message
 
     final_sig["value"] = other  # the full run's input shrinking slipped
-    failed = [runner.Outcome("s", "c", False, "msg", "property", failure="dir", signature=nan_x)]
+    failed = [runner.Outcome(scenario="s", check="c", passed=False, message="msg", kind="property", failure="dir", signature=nan_x)]
     out = io.StringIO()
     runner._shrink(s, inv, cells, failed, {"seed": 0}, 40, "domain 1/1", "__d1", out, {})
     assert "the drawn domain failed differently (non-finite: a%x); this shrunk example: non-finite: b%y" \

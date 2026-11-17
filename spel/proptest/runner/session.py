@@ -200,7 +200,6 @@ class Session:
         # expressions a check builds for this configuration
         self.exprs: dict[tuple, Expr] = {}
         self._built = None  # results.BuiltDomain, on first use
-        self.last_failure: Optional[Failure] = None
         self.failure_suffix = ""  # drawn domains: failures/<scenario>__<check><suffix>
         # drawn domains: which one this session runs (saved with its failures)
         self.drawn = ""
@@ -328,8 +327,8 @@ class Session:
     def judge(
         self, scenario: Scenario, check: Check, ex: Example, hypothesis: bool = True
     ) -> None:
-        """Run a prepared example and evaluate the check per element: PropertyFailure with a
-        report when an element fails or the routine aborts. hypothesis=False: outside a
+        """Run a prepared example and evaluate the check per element: PropertyFailure carrying the
+        `Failure` (with its report) when an element fails or the routine aborts. hypothesis=False: outside a
         Hypothesis test (replay), an example without an element to judge is an error."""
         over = check.over or (scenario.level, scenario.filter)
         elems = check.elements(self, ex, self.space.elements(over), over[0])
@@ -345,15 +344,15 @@ class Session:
             )
         verdict, ctx = self._evaluate(scenario, check, ex, elems, mask, over[0])
         if verdict.aborted:
-            msg = f"{check.name}: the routine aborted\n{verdict.aborted}"
-            self.last_failure = Failure(
-                scenario.name,
-                check.name,
-                ex,
-                msg,
-                signature=FailureSignature(aborted=True),
+            raise PropertyFailure(
+                Failure(
+                    scenario=scenario.name,
+                    check=check.name,
+                    example=ex,
+                    message=f"{check.name}: the routine aborted\n{verdict.aborted}",
+                    signature=FailureSignature(aborted=True),
+                )
             )
-            raise PropertyFailure(msg)
         bad = np.flatnonzero(mask & ~verdict.ok)
         if bad.size:
             text, node, ev, local = ctx
@@ -367,15 +366,16 @@ class Session:
                 v: (np.asarray(x)[bad[:1]] if isinstance(x, np.ndarray) else x)
                 for v, x in local.items()
             }
-            self.last_failure = Failure(
-                scenario.name,
-                check.name,
-                ex,
-                msg,
-                int(elems[bad[0]]),
-                signature(self.space, check, node, ev, one),
+            raise PropertyFailure(
+                Failure(
+                    scenario=scenario.name,
+                    check=check.name,
+                    example=ex,
+                    message=msg,
+                    element=int(elems[bad[0]]),
+                    signature=signature(self.space, check, node, ev, one),
+                )
             )
-            raise PropertyFailure(msg)
 
     def evaluate(self, scenario: Scenario, check: Check, ex: Example) -> "Verdict":
         """The check on a prepared example, per element, without raising (results.Verdict)."""
@@ -474,7 +474,9 @@ class Session:
             prev_spaces[PREV] = self.evaluation.state_namespace(PREV, prev)
         except FortranAbort as exc:
             return (
-                Verdict(check.name, level, elems, mask, None, aborted=str(exc), step=k),
+                Verdict(
+                    check=check.name, level=level, elements=elems, mask=mask, ok=None, aborted=str(exc), step=k
+                ),
                 None,
             )
         ev = self.evaluation.evaluator(
@@ -492,7 +494,7 @@ class Session:
             )
         except ExprError as exc:
             raise SpecError(f"{check.name!r}: {text!r}: {exc}") from None
-        return Verdict(check.name, level, elems, mask, ok, step=k), (
+        return Verdict(check=check.name, level=level, elements=elems, mask=mask, ok=ok, step=k), (
             text,
             node,
             ev,
@@ -515,15 +517,15 @@ class Session:
         if scen.steps > 1:
             run = self.stepping.run_steps(scen, ex)
             return Result(
-                self,
-                scen,
-                ex,
-                self.space.arrays(ex, run.states[-1]),
+                session=self,
+                scenario=scen,
+                example=ex,
+                arrays=self.space.arrays(ex, run.states[-1]),
                 steps=run.states,
                 times=run.times,
             )
         state = self.stepping.compute(scen, ex, list(names))
-        return Result(self, scen, ex, self.space.arrays(ex, state))
+        return Result(session=self, scenario=scen, example=ex, arrays=self.space.arrays(ex, state))
 
     def built(self) -> "BuiltDomain":
         """The domain as the case built it at init, with `check()` against the declaration."""
@@ -728,13 +730,10 @@ class Session:
         self.judged = self.stepping.judged = judged
 
     # -- saved failures
-    def save_failure(self, failure: Optional[Failure] = None) -> Optional[Path]:
-        """Write a failing example (default: the last one, which after a Hypothesis run is the
-        shrunk one); FailureStore.save. `replay` runs it again."""
-        f = failure or self.last_failure
-        if f is None:
-            return None
-        return self.failures.save(f, self.drawn, self.failure_suffix, lambda nl: self.sibling(nl).failures)
+    def save_failure(self, failure: Failure) -> Path:
+        """Write a failing example (`PropertyFailure.failure`; after a Hypothesis run, the shrunk
+        one); FailureStore.save. `replay` runs it again."""
+        return self.failures.save(failure, self.drawn, self.failure_suffix, lambda nl: self.sibling(nl).failures)
 
     def load_failure(self, directory: Path) -> tuple[dict, Example]:
         """A saved failure: its `example.json` and the example with the saved inputs; FailureStore.load."""

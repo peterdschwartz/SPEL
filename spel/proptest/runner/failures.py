@@ -148,7 +148,7 @@ class FailureStore:
         except OSError as exc:
             raise SpecError(f"{directory / EXAMPLE_FILE}: {exc.strerror}") from None
         ex = Example(
-            self.read_example(directory, meta["inputs"]),
+            inputs=self.read_example(directory, meta["inputs"]),
             seed=int(meta.get("seed", 0)),
             extra=dict(meta.get("extra", {})),
         )
@@ -160,7 +160,7 @@ class FailureStore:
         if meta.get("follow_inputs"):
             store = sibling(ex.extra.get("namelist", {}))
             ex.follow = Example(
-                store.read_example(directory / "follow", meta["follow_inputs"]),
+                inputs=store.read_example(directory / "follow", meta["follow_inputs"]),
                 seed=ex.seed,
             )
         return meta, ex

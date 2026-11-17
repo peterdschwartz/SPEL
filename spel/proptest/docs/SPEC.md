@@ -70,21 +70,21 @@ SPEL's parser and evaluated with numpy for all elements at once.
 
 Functions besides the intrinsics:
 
-| Function | Value |
-|---|---|
-| `finite(x)` | finite and not ELM's fill value (`abs(x) < 1e35`); for `x(p, :)`, every layer |
-| `between(x, lo, hi)` | `lo <= x <= hi` (both ends included) |
-| `close(a, b, rtol=1e-12, atol=0)` | `abs(a - b) <= atol + rtol * abs(b)`; NaN is never close |
-| `agree(a, b, rtol=0, atol=0)`, `same(a, b)` | equal within the tolerances (default: identical), or both NaN |
-| `implies(a, b)` | `.not. a .or. b` |
-| `integral(x, dz)` | `sum(x * dz)` over the last dimension |
-| `cumsum(x)` | running sum along the last dimension |
-| `rel_change(new, old)` | `(new - old) / max(abs(old), 1e-30)` |
-| `tend(x)` | x after the step minus x before it (`x - prev%x`; one call: `x - input%x`); any expression of the state, e.g. `tend(child_sum(col_ws%h2osfc, 't'))` |
-| `acc(x)` | x summed over the steps so far (each step's value in its own state; one call: x), e.g. `acc(child_wsum(col_wf%qflx_runoff, 'g'))` |
-| `elevation(t)`, `lowest(t)`, `uphill_count(t)`, `downhill_inactive(t)` | from the domain declaration: a topounit's declared elevation (NaN without one), whether it is the lowest of its gridcell (ties included), how many other topounits point to it with the domain's `top_pp%downhill_ti`, whether its downhill neighbour is an inactive (weight-0) topounit (set_topounit does not skip them) |
-| `child_sum(x, 't')`, `child_wsum`, `child_mean`, `child_min`, `child_max` | the whole variable x of a finer level reduced over the descendants of each element of level `'g'`, `'t'`, `'l'` or `'c'`; `child_sum(x, 'g', filter%hydrologyc)` only over those in a filter of x's level (the session's filter, as `over` uses it), e.g. the columns the routines compute (a lake's `qflx_runoff` the case never sets is NaN) (`wsum`: weighted by their weights relative to that level, as ELM's p2c/c2l; like them it skips inactive and weight-0 descendants, so an Inf or NaN left in a weight-0 topounit does not reach its gridcell); the level's element variable must be bound (a check over that level or a finer one) |
-| `active_dir(p, "<output>", k=1)` | coordinate of the element's drawn inputs along direction `k` of the saved active subspace of that output (run `spel proptest subspace` first) |
+| Function                                                                  | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `finite(x)`                                                               | finite and not ELM's fill value (`abs(x) < 1e35`); for `x(p, :)`, every layer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `between(x, lo, hi)`                                                      | `lo <= x <= hi` (both ends included)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `close(a, b, rtol=1e-12, atol=0)`                                         | `abs(a - b) <= atol + rtol * abs(b)`; NaN is never close                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `agree(a, b, rtol=0, atol=0)`, `same(a, b)`                               | equal within the tolerances (default: identical), or both NaN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `implies(a, b)`                                                           | `.not. a .or. b`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `integral(x, dz)`                                                         | `sum(x * dz)` over the last dimension                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `cumsum(x)`                                                               | running sum along the last dimension                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `rel_change(new, old)`                                                    | `(new - old) / max(abs(old), 1e-30)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `tend(x)`                                                                 | x after the step minus x before it (`x - prev%x`; one call: `x - input%x`); any expression of the state, e.g. `tend(child_sum(col_ws%h2osfc, 't'))`                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `acc(x)`                                                                  | x summed over the steps so far (each step's value in its own state; one call: x), e.g. `acc(child_wsum(col_wf%qflx_runoff, 'g'))`                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `elevation(t)`, `lowest(t)`, `uphill_count(t)`, `downhill_inactive(t)`    | from the domain declaration: a topounit's declared elevation (NaN without one), whether it is the lowest of its gridcell (ties included), how many other topounits point to it with the domain's `top_pp%downhill_ti`, whether its downhill neighbour is an inactive (weight-0) topounit (set_topounit does not skip them)                                                                                                                                                                                                                                                         |
+| `child_sum(x, 't')`, `child_wsum`, `child_mean`, `child_min`, `child_max` | the whole variable x of a finer level reduced over the descendants of each element of level `'g'`, `'t'`, `'l'` or `'c'`.<br><br>`child_sum(x, 'g', filter%hydrologyc)` only over those in a filter of x's level (the session's filter, as `over` uses it),<br>e.g. the columns the routines compute (a lake's `qflx_runoff` the case never sets is NaN) <br><br>`wsum`: weighted by their weights relative to that level, as ELM's p2c/c2l.   Skips inactive and weight-0 descendants.<br><br>The level's element variable must be bound (a check over that level or a finer one) |
+| `active_dir(p, "<output>", k=1)`                                          | coordinate of the element's drawn inputs along direction `k` of the saved active subspace of that output (run `spel proptest subspace` first)                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 ## `[case]`
 
@@ -152,23 +152,18 @@ A topounit holds at most one landunit of each type (one polygon of each type), a
 them. Gridcells also take `glcmask = true` (glacier-mec columns of every class exist and are
 active: the ice-sheet coupling's mask) and `icemask = x` (`do_smb_c`).
 
-- **Weights.** A missing weight shares what the given ones leave; the children of every element
-  must sum to 1. `wtgcell`, `wttopounit`, `wtlunit`, `wtcol` are the products up the tree.
+- **Weights.** A missing weight shares what the given ones leave; the children of every element must sum to 1. `wtgcell`, `wttopounit`, `wtlunit`, `wtcol` are the products up the tree.
 - **Activity** follows subgridWeightsMod's `is_active_l/c/p` (`all_active` off): a topounit is
   active when its weight is > 0; a landunit when its topounit is and its weight is > 0, or it is
   glacier-mec in a glcmask gridcell, or it is istsoil (soil, polygon) on a topounit that is not all
-  plain glacier (ELM's virtual natural-vegetation landunit: weight 0 and active); a column when
-  its landunit is active and its weight is > 0, or it is glacier-mec in the glcmask, or its
+  plain glacier (ELM's virtual natural-vegetation landunit: weight 0 and active). A column when  its landunit is active and its weight is > 0, or it is glacier-mec in the glcmask, or its
   landunit is urban (all five run); a patch when its column is active and its weight is > 0.
-  `setFilters` skips inactive elements. Checked against every gridcell of a full ELM run's restart (types, weights, activity,
-  order: `experiments/tools/elm_layout_oracle.py`).
+  `setFilters` skips inactive elements. Checked against every gridcell of a full ELM run's restart (types, weights, activity,  order: `experiments/tools/elm_layout_oracle.py`).
 - **Layout** (`order`): `"elm"` (default) lays a set out as initGridCellsMod lays out a clump:
   gridcells and topounits in order, then the landunits in one pass per type over all topounits
   (soil with each topounit's polygons, crop, urban tbd/hd/md, lake, wetland, glacier,
-  glacier-mec), columns and patches after their landunit. A topounit's landunits are therefore
-  not contiguous, and ELM leaves `top_pp`/`grc_pp` `lndi/lndf/coli/colf/pfti/pftf/n*` at `ispval`
-  (so does the domain). `"depth"` keeps every element's descendants contiguous (the layout before
-  2026-11-12). Set k of every level is a contiguous range either way.
+  glacier-mec), columns and patches after their landunit. A topounit's landunits are therefore  not contiguous, and ELM leaves `top_pp`/grc_pp``lndi/lndf/coli/colf/pfti/pftf/n*` at `ispval`
+  (so does the domain). `"depth"` keeps every element's descendants contiguous. Set k of every level is a contiguous range either way.
 - **ELM's implicit elements** (`subgrid`): ELM creates a soil landunit on every topounit with
   every natural pft as a patch, a crop landunit with every CFT column (create_crop_landunit), and
   every glacier class in glcmask gridcells, most of them with weight 0. With
@@ -192,8 +187,7 @@ active: the ice-sheet coupling's mask) and `icemask = x` (`do_smb_c`).
   every topounit the highest of the lower topounits instead (-1 when none is lower): the topology
   an ELM with set_topounit fixed builds.
 - **Index fields** (`*_pp%gridcell/topounit/landunit/column`, `topi/topf`, `lndi/lndf`, `coli/colf`,
-  `pfti/pftf`, `ntopounits` ... `npfts`, `grc_pp/top_pp%landunit_indices`) come from the layout;
-  `spel proptest show SPEC` prints the gridcells and the element counts, and
+  `pfti/pftf`, `ntopounits` ... `npfts`, `grc_pp/top_pp%landunit_indices`) come from the layout.  `spel proptest show SPEC` prints the gridcells and the element counts, and
   `Session.built().check()` compares what the case built with the declaration.
 
 | Key | Default | Meaning |
@@ -239,25 +233,20 @@ Other keys: `zero_patch` (a drawn pft, CFT or class of weight 0), `max_pfts`, `c
 - Every draw is a domain ELM could build: every topounit has a soil landunit (weight 0 where soil
   was not drawn: the virtual one), lake/wetland/glacier landunits never have weight 0, and
   weight-0 siblings have siblings of weight > 0.
-- The spec is checked and `show`n on the first domain of seed 0. Domain k of a seed does not
-  depend on `count`.
+- The spec is checked and `show`n on the first domain of seed 0. Domain k of a seed does not depend on `count`.
 - Each domain has its own session (the shim cannot reallocate a worker's state), so a drawn
   run costs `count` times a declared one. The inputs are still Hypothesis'.
 - A failure is shrunk: the runner tries smaller domains (one gridcell, topounit, landunit or
   pft fewer; equal weights where they were > 0; zeros kept) while the check still fails, up to
   the `shrink` setting (candidate domains, default 40; 0: off). The failure is saved under
-  `failures/<scenario>__<check>__d<k>/` with `domain.toml`, the shrunk domain, which `replay`
-  uses.
-- Python: `pt.Domain(draw=pt.DomainDraw(...))`; `Domain.domains(seed)` shows the domains a run
-  draws.
+  `failures/<scenario>__<check>__d<k>/` with `domain.toml`, the shrunk domain, which `replay` uses.
+- Python: `pt.Domain(draw=pt.DomainDraw(...))`.`Domain.domains(seed)` shows the domains a run  draws.
 
 What is not given:
 
 - A constant the routines read that neither the reference nor `constants` has stops the build.
-- A parameter the routines read that the reference lacks (or has with another shape) stops the
-  run, unless the scenario gives it a rule.
-- Per-step scalars not in `time` take the defaults of `domain.TIME_DEFAULTS` (noon on 1 July 2000,
-  step 1, 1800 s), then the constants file, then 0. `spel proptest show SPEC` lists them.
+- A parameter the routines read that the reference lacks (or has with another shape) stops the  run, unless the scenario gives it a rule.
+- Per-step scalars not in `time` take the defaults of `domain.TIME_DEFAULTS` (noon on 1 July 2000,  step 1, 1800 s), then the constants file, then 0. `spel proptest show SPEC` lists them.
 - A subgrid structure field the builder has no rule for stops the build
   (`domain.topology_value`).
 
@@ -270,8 +259,7 @@ use_c13 = false
 ```
 
 The namelist options of the runs. An entry is a namelist variable the routines test in an `if`
-(`show` lists them), or another scalar switch they read (`soil_stress_method`, which ELM sets in
-code). The options are ordinary constants of the case, so a run can change them without a
+(`show` lists them), or another scalar switch they read (`soil_stress_method`, which ELM sets incode). The options are ordinary constants of the case, so a run can change them without a
 rebuild. The value of an option is, in order: the reference's constants file,
 `[domain.constants]`, `[namelist]`, the scenario's `namelist`, and for the follow-up of a
 relation its `namelist`.
@@ -281,24 +269,17 @@ The spec is read under these options:
 - A variable that is only used in branches the options turn off is `unused`: it needs no rule,
   and `init`, `probe`, `stats` and `outputs = "all"` leave it out. With `use_c13` off, the
   twelve C13/C14 fields of CanopyFluxes are gone from the spec.
-- Naming such a variable in `derive`, `assume` or a check is an error when the spec loads, and
-  the message names the options: "c13_psnsun_patch has no value in scenario snowfree_day: it is
-  only used under other namelist options (here use_c13 = .false., use_cn = .true.)". Restrict
-  the check to scenarios where it is live (`scenarios = [...]`), or use `follow%` in a relation
-  that turns the option on.
+- Naming such a variable in `derive`, `assume` or a check is an error when the spec loads, and  the message names the options: "c13_psnsun_patch has no value in scenario snowfree_day: it is  only used under other namelist options (here use_c13 = .false., use_cn = .true.)". Restrict  the check to scenarios where it is live (`scenarios = [...]`), or use `follow%` in a relation that turns the option on.
 - A *rule* for an input that is not read under a scenario's options is allowed and dormant
   there: its value is drawn but not set. `show SPEC` lists dormant rules. This is how the
   follow-up of a namelist relation gets the inputs only it reads.
 
-A scenario runs under other options with `namelist = { use_hydrstress = true }` in its table, and
-a relation compares two settings with [`namelist`](#relation). Each distinct set of options is
+A scenario runs under other options with `namelist = { use_hydrstress = true }` in its table, and a relation compares two settings with [`namelist`](#relation). Each distinct set of options is
 its own worker process on the same library.
 
 Only namelist variables remove variables from a spec. A switch that is not a namelist variable
-(`soil_stress_method`) can be set and compared the same way, but the branches it selects count
-as ordinary `if`s. An option that is on in no capture may need inputs or parameters the
-reference never recorded: the run then says which rules, `[domain.dims]` entries or parameter
-values are missing.
+(`soil_stress_method`) can be set and compared the same way, but the branches it selects count as ordinary `if`s. An option that is on in no capture may need inputs or parameters the
+reference never recorded: the run then says which rules, `[domain.dims]` entries or parameter values are missing.
 
 ## `[units]`
 
@@ -307,8 +288,7 @@ values are missing.
 "canopystate_vars%elai_patch" = "m2/m2"
 ```
 
-Units are documentation (`show`, the `stats` report). They come from ELM's history and restart
-registrations; this table adds or replaces them.
+Units are documentation (`show`, the `stats` report). They come from ELM's history and restart registrations. This table adds or replaces them.
 
 ## `[functions]`
 
@@ -328,8 +308,7 @@ def qsat(t, p):
     return 0.622 * es / (p - 0.378 * es)
 ```
 
-`qsat(forc_t(t), forc_pbot(t))` then works in every expression of that spec. Arguments arrive as
-numpy arrays (one value per element, or elements x layers).
+`qsat(forc_t(t), forc_pbot(t))` then works in every expression of that spec. Arguments arrive as numpy arrays (one value per element, or elements x layers).
 
 ## `[scenario.<name>]`
 
@@ -352,8 +331,7 @@ trap_fpe = false                             # halt on invalid, divide by zero, 
 the case. A check may have its own `over`.
 
 Every input the routines read under the scenario's namelist options must have a rule or a
-`derive` expression, from the scenario or the files it `extends`. `spel proptest show SPEC` lists the ones
-without. A rule in `inputs` replaces the one from a rule file.
+`derive` expression, from the scenario or the files it `extends`. `spel proptest show SPEC` lists the ones without. A rule in `inputs` replaces the one from a rule file.
 
 ### Rules
 
@@ -370,16 +348,14 @@ Any rule may add:
 
 - `clip = [lo, hi]`;
 - `pft = { 13 = { range = [0.3, 1.0] } }`: another rule for the elements of a pft;
-- `levels = { "1" = 0.0, "2:nlevsoi" = { range = [0.1, 0.4] } }`: another rule for a section of
-  the first dimension that is not the subgrid one (Fortran indices).
+- `levels = { "1" = 0.0, "2:nlevsoi" = { range = [0.1, 0.4] } }`: another rule for a section of  the first dimension that is not the subgrid one (Fortran indices).
 
 An override without a `clip` of its own keeps the base rule's. 
 Parameters take `range`, `values`, `scale` or a value.
 
 For each input Hypothesis draws a *mode*: one value for all elements; independent values for
-every entry; edge values (each entry at the low or high end); or, for layered inputs,
-independent per element with one value down the layers. Shrinking moves towards the first, so a
-minimal failing example has as many constant inputs as possible.
+every entry. Edge values (each entry at the low or high end) or, for layered inputs,
+independent per element with one value down the layers. Shrinking moves towards the first, so a minimal failing example has as many constant inputs as possible.
 
 ### `derive`
 
@@ -395,10 +371,8 @@ follow-up half of a relation, except to the variables its `follow` sets.
 
 ### `assume`
 
-A list of logical expressions of the inputs. Elements where one is false are not checked; an
-example with no element left is discarded. (The older form `[scenario.x.assume] exprs = [...]`
-still loads.) `derive`, `assume` and `follow` run before the routine, so they cannot use its
-outputs.
+A list of logical expressions of the inputs. Elements where one is false are not checked. An
+example with no element left is discarded. (The older form `[scenario.x.assume] exprs = [...]` still loads.) `derive`, `assume` and `follow` run before the routine, so they cannot use its outputs.
 
 ## `[[property]]`
 
@@ -427,8 +401,7 @@ a copy, changed by `follow`: input = an expression of the base inputs. One call 
 
 - Without `follow` the halves are copies. `same(follow%x(p), base%x(p))` then checks that a
   result does not depend on where the element sits.
-- `permute = true` also reorders the follow-up gridcells among those of the same declaration,
-  each with everything under it.
+- `permute = true` also reorders the follow-up gridcells among those of the same declaration,  each with everything under it.
   `follow%x(p)` is still the follow-up of base element `p`. This finds a result that depends on
   a neighbouring element, which identical halves hide.
 - A variable without a subgrid dimension is shared by both halves and cannot be in `follow`.
@@ -444,15 +417,13 @@ expect = """same(follow%t_veg(p), base%t_veg(p))
 ```
 
 - Options are module scalars, so the two runs cannot share a call: the follow-up runs in a
-  second process on the same library. `base%x` and `follow%x` are the two whole runs, so `nsets`
-  need not be even. `follow` transforms may be given too; `permute` may not.
+  second process on the same library. `base%x` and `follow%x` are the two whole runs, so `nsets`  need not be even. `follow` transforms may be given too; `permute` may not.
 - `follow%x` is checked against the follow-up's options, `base%x` and bare names against the
   scenario's. Above, `c13_psnsun_patch` exists only in the follow-up.
 - Inputs only the follow-up reads need rules in the scenario, where they are dormant for the
   base run.
 - Typical relations: an option that should not matter for these outputs (`same`), two settings
-  that select the same code, an invariant that must hold under either setting, a known direction
-  of change.
+  that select the same code, an invariant that must hold under either setting, a known direction  of change.
 
 ## `[compare]` and `[[differential]]`
 
@@ -487,31 +458,30 @@ ELM's no-leap calendar (`timestep.py`: what elm_drv sets each step, `nstep_mod`,
 [scenario.season]
 over = "c in hydrologyc"
 extends = "hs_season.inputs.toml"
-steps = 96                                   # default 1: one call
+steps = 96   # default 1: one call
 time = { mon_curr = 7, day_curr = 1, secs_curr = 1800, jday_mod = 182, thiscalday_mod = 182.02 }  # step 1
-keep = ["col_es%t_soisno", "col_ws%*"]       # boundary variables left to the process
+keep = ["col_es%t_soisno", "col_ws%*"]    # boundary variables left to the process
 
-[scenario.season.inputs]                     # drawn once: the state before step 1
+[scenario.season.inputs]                   # drawn once: the state before step 1
 "top_ws%from_uphill" = 0.0
 
-[scenario.season.forcing]                    # set before every step
-"top_af%rain" = { range = [0.0, 5e-3] }      # a rule: drawn for every step (modes below)
-"top_af%snow" = "0.0"                        # or an expression of the state before the step
+[scenario.season.forcing]                  # set before every step
+"top_af%rain" = { range = [0.0, 5e-3] }    # a rule: drawn for every step (modes below)
+"top_af%snow" = "0.0"    # or an expression of the state before the step
 
-[scenario.season.between]                    # after every step, in this order, on the state after it
+[scenario.season.between]  # after every step, in this order, on the state after it
 "top_ws%from_uphill" = "max(0.0, top_ws%from_uphill(t) - dtime_mod * child_sum(col_wf%qflx_from_uphill, 't'))"
 
-[scenario.season.carry]                      # outputs not set to NaN between steps; value before step 1
-"col_wf%qflx_from_uphill" = 0.0              # ELM's cold start (ColumnDataType InitCold)
+[scenario.season.carry] # outputs not set to NaN between steps; value before step 1
+"col_wf%qflx_from_uphill" = 0.0  # ELM's cold start (ColumnDataType InitCold)
 ```
 
 **The boundary.** Between two calls ELM runs the rest of its step, and some of those routines
-write variables the case's routines read: CanopyHydrology writes `h2osoi_liq`, ColWaterBalanceCheck
-drains `top_ws%from_uphill`, and so on. SPEL finds them in the static trace of the whole step
+write variables the case's routines read: 
+	CanopyHydrology writes `h2osoi_liq`, `ColWaterBalanceCheck` drains `top_ws%from_uphill`, and so on. 
+SPEL finds them in the static trace of the whole step
 (`coupling.py`: elm_drv's trace on the full analysis, as the database's call-tree view uses; the
-writes outside the case's routines that run under the scenario's namelist options, on filters that
-can share an element with the case's own accesses). Every such variable the routines read (an
-input or inout) must be declared, in one of:
+writes outside the case's routines that run under the scenario's namelist options, on filters that can share an element with the case's own accesses). Every such variable the routines read (an input or inout) must be declared, in one of:
 
 | Table | Meaning |
 |---|---|
@@ -520,43 +490,32 @@ input or inout) must be declared, in one of:
 | (all three) | a `forcing` or `between` entry whose target is not read under a run's namelist options is dormant there, like a rule (the follow-up of a relation with IM2 off skips the IM2 store's drain) |
 | `keep` | left as the process leaves it: an inout is carried, an input keeps its value (fnmatch patterns, e.g. `"col_ws%*"`); the missing writers are assumed absent |
 
-A run with an undeclared boundary variable stops before its first example, with the variable and
-its writers (routine, file:line, before/after the case, conditional). `spel proptest show SPEC`
-lists the boundary variables of every multi-step scenario and how they are declared. This is the
-point of a multi-step scenario: it states what the rest of ELM does between the steps instead of
-leaving it to chance. Variables nothing else writes are carried (inouts) or keep their drawn
-value (inputs); outputs are set to NaN before every step, as before one call, except those in
-`carry`. Finding the boundary needs the case's E3SM checkout analyzed (`spel analyze --srcroot`);
-it is cached per case.
+A run with an undeclared boundary variable stops before its first example, with the variable and its writers (routine, file:line, before/after the case, conditional). 
+`spel proptest show SPEC`
+lists the boundary variables of every multi-step scenario and how they are declared. 
+This is the point of a multi-step scenario: it states what the rest of ELM does between the steps instead of leaving it to chance. Variables nothing else writes are carried (inouts) or keep their drawn value (inputs). 
+Outputs are set to NaN before every step, as before one call, except those in`carry`. 
+Finding the boundary needs the case's E3SM checkout analyzed (`spel analyze --srcroot`) -it is cached per case.
 
 **Carried outputs.** An output is written before it is read on every path the routines take, but
 often only on a filter: SurfaceRunoff writes `qflx_from_uphill` on `hydrologyc` columns, and
-ColWaterBalanceCheck reads it on every column. In ELM the other columns hold what they held (the
-cold start's 0); here they would be NaN, and a `between` or check reading them would see a NaN
-ELM never has. `carry` gives such an output its value before step 1 (a rule, drawn like an input;
-not a relative one: an output has no captured value) and keeps, from step to step, what the
-previous step left where a step does not write it. The routines see nothing different (they write
-before they read); `input%x`, `prev%x` and saved failures include it. Only outputs, and only with
-`steps` > 1.
+ColWaterBalanceCheck reads it on every column. In ELM the other columns hold what they held (the cold start's 0). Here they would be NaN, and a `between` or check reading them would see a NaN ELM never has. `carry` gives such an output its value before step 1 (a rule, drawn like an input.
 
-**Forcing draws.** A forcing rule draws over `(step, element, ...)` with the input modes: one value
-for every step and element, independent values per step and element, edges, or one value per
-element (and layer) held over the steps.
+**Forcing draws.** A forcing rule draws over `(step, element, ...)` with the input modes: one value for every step and element, independent values per step and element, edges, or one value per element (and layer) held over the steps.
 
 **Checks.** A check is judged after every step (`steps = "all"`, the default), `"last"`, one step
-(`steps = 3`) or a range (`[2, 10]`); the first failing step is reported (`after step 3 of 96`).
+(`steps = 3`) or a range (`[2, 10]`). The first failing step is reported (`after step 3 of 96`).
 `prev%x` is x before the judged step, `input%x` before step 1, `step` the step number, `tend(x)`
-`x - prev%x`, `acc(x)` its sum over steps 1..k. Inside `tend` and `acc`, `base%`/`follow%` are the
-halves (or runs) of the step concerned; before step 1 they are not available (`tend(follow%x)` needs
-`steps = [2, N]`). A relation compares its two halves (or its two runs, under `namelist`) step by step;
-a differential runs the same steps in both cases.
+`x - prev%x`, `acc(x)` its sum over steps 1..k. 
+Inside `tend` and `acc`, `base%`/`follow%` are the halves (or runs) of the step concerned. Before step 1 they are not available (`tend(follow%x)` needs `steps = [2, N]`). 
+A relation compares its two halves (or its two runs, under `namelist`) step by step.
+A differential runs the same steps in both cases.
 
 **Python.** `Session.execute` keeps every step: `res.series("top_ws%from_uphill")` (step axis
 first), `res.at(k)` (the result after step k, e.g. `res.at(k).frame("t")`), `res.times[k - 1]`.
 A saved failure keeps the forcing values (`forcing.npz`), and `replay` runs the steps again.
 
-Multi-step runs need an `ACC = "OFF"` build for now (the time scalars are not copied to the device
-between steps).
+Multi-step runs need an `ACC = "OFF"` build for now (the time scalars are not copied to the device between steps).
 
 ## Commands, files and exit codes
 
@@ -572,8 +531,7 @@ between steps).
 | `spel proptest coverage SPEC [-s SCENARIO] [-n N] [--all]` | `if` branches of the routines' call tree the scenario could reach and never entered; those its namelist options turn off are counted (`--all` lists them) |
 | `spel proptest subspace SPEC --scenario S --output EXPR [--input NAME] [--parameters]` | active subspace of an output |
 
-`run` exits with 0 when every check passes, 1 when one fails, 2 when the spec or the command
-has a problem or no check is selected. `-s` and `-k` take a name or a glob.
+`run` exits with 0 when every check passes, 1 when one fails, 2 when the spec or the command has a problem or no check is selected. `-s` and `-k` take a name or a glob.
 
 Files:
 
@@ -591,8 +549,8 @@ with the end of its output.
 
 ## Python API
 
-`spel.proptest.api` builds the same spec in Python and writes it as TOML; every piece goes
-through the reader's checks when it is added (a bad name fails at once, with the TOML message):
+`spel.proptest.api` builds the same spec in Python and writes it as TOML. Every piece goes
+through the reader's checks when it is added.
 
 ```python
 from spel.proptest import api as pt
@@ -624,19 +582,14 @@ spec.to_toml("urbval.proptest.toml")          # pt.Spec.from_toml(path) reads on
 | `s.sample(scenario, seed)` | an example drawn like a test run's (same modes), from a seed |
 | `s.execute(scenario, ex)` | a `Result`: `frame(level, names=, aggregate={"x": "wsum"})` (ancestors joined, descendants reduced), `verdict(check)` (per element, without raising) |
 
-Scripts that open a session need an `if __name__ == "__main__":` guard (the worker is a spawned
-process).
+Scripts that open a session need an `if __name__ == "__main__":` guard (the worker is a spawned process).
 
 ## Limits
 
-- Every landunit kind ELM builds can be declared or drawn; `all_active` and FATES (`is_fates`,
-  its patch weights) are not modelled. The reference capture must have the parameters the
-  routines read on the landunits a domain holds (a soil-only reference may lack lake or
-  glacier parameters: give them rules).
+- `all_active` and FATES (`is_fates`,  its patch weights) are not modelled. The reference capture must have the parameters the  routines read on the landunits a domain holds (a soil-only reference may lack lake or  glacier parameters: give them rules).
 - Per-pft rule overrides (`pft = {...}`) apply to patch variables only (a column holds several
-  pfts); there are no overrides per urban column type yet (use `derive` with
-  `merge(..., col_pp%itype(c) == 71)`).
-- Multi-step runs: CPU builds only (`ACC = "OFF"`); `between`/`forcing` are expressions of the
+  pfts). There are no overrides per urban column type yet (use `derive` with  `merge(..., col_pp%itype(c) == 71)`).
+- Multi-step runs: CPU builds only (`ACC = "OFF"`). `between`/`forcing` are expressions of the
   state, not ELM code (a scenario states what the rest of the step does).
 - Type-bound routines cannot be called by the shim yet.
 - `coverage` needs gfortran and its gcov.
@@ -648,7 +601,7 @@ process).
 | To add | Write | Where |
 |---|---|---|
 | a rule kind | a `RuleKind` subclass with `@register` (its table check and quantile map) | `rules.py` |
-| a check kind | a `Check` subclass with `@register` (its table, `prepare`, `elements`, `mask`, `namespaces`) | `checks.py` |
+| a check kind | a `Check` dataclass with `@register`: the common fields `name`, `scenarios`, `over`, `steps` (read by `Check._common`), its table, `prepare`, `elements`, `mask`, `namespaces` | `checks.py` |
 | a function | a function with `@register` in a `[functions]` module, or an entry of `FUNCTIONS` | `functions.py` |
 | a topology field | an entry of the `TOPOLOGY_*` sets or a case in `topology_value` | `domain.py` |
 | another way to run the routine | an object with `get`, `run`, `stop` (and `begin`, `step` for multi-step runs) passed as `Session(..., backend=...)` | `runner/session.py` |

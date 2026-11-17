@@ -102,7 +102,7 @@ def built(session: "Session") -> BuiltDomain:
     )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Verdict:
     """A check's outcome on one example: per judged element whether it holds."""
 
@@ -138,7 +138,7 @@ class Verdict:
         return pd.DataFrame(rows, index=pd.Index(self.elements, name=LEVEL_NAMES[self.level]))
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Result:
     """One run of an example: the inputs it set and the state it fetched afterwards."""
 
@@ -155,7 +155,8 @@ class Result:
             if step != 1:
                 raise ValueError("a one-call result has step 1 only")
             return self
-        return Result(self.session, self.scenario, self.example, {**self.arrays, **self.steps[step - 1]})
+        return Result(session=self.session, scenario=self.scenario, example=self.example,
+                      arrays={**self.arrays, **self.steps[step - 1]})
 
     def series(self, name: str) -> np.ndarray:
         """A variable after every step, the step axis first (a one-call result: one step)."""

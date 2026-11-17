@@ -22,12 +22,14 @@ from spel.proptest.runner.session import Session
 from spel.proptest.spec import Spec
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Outcome:
+    """One check of one scenario after a run (`run`, `replay`)."""
+
     scenario: str
     check: str
     passed: bool
-    message: str = ""
+    message: str = ""  # the failure report, or the error
     kind: str = ""  # property | relation | differential
     seconds: float = 0.0
     failure: str = ""  # directory of the saved failing example
@@ -305,22 +307,21 @@ def _run_domain(
             s.preflight(scen, selected)
             for c in selected:
                 print(f"[{name}] {c.table} {c.name!r} ...", file=out, flush=True)
-                s.last_failure = None
                 start = time.monotonic()
                 try:
                     s.hypothesis_test(scen, c, settings)()
-                except PropertyFailure as exc:
-                    saved = s.save_failure()
+                except PropertyFailure as exc:  # the shrunk example's: Hypothesis re-raises it
+                    saved = s.save_failure(exc.failure)
                     outcomes.append(
                         Outcome(
-                            name,
-                            c.name,
-                            False,
-                            str(exc),
-                            c.table,
-                            time.monotonic() - start,
-                            str(saved or ""),
-                            signature=getattr(s.last_failure, "signature", None),
+                            scenario=name,
+                            check=c.name,
+                            passed=False,
+                            message=exc.failure.message,
+                            kind=c.table,
+                            seconds=time.monotonic() - start,
+                            failure=str(saved),
+                            signature=exc.failure.signature,
                         )
                     )
                     print(f"  FAIL\n{_indent(str(exc))}", file=out, flush=True)
@@ -334,12 +335,12 @@ def _run_domain(
                 except SpecError as exc:
                     outcomes.append(
                         Outcome(
-                            name,
-                            c.name,
-                            False,
-                            str(exc),
-                            c.table,
-                            time.monotonic() - start,
+                            scenario=name,
+                            check=c.name,
+                            passed=False,
+                            message=str(exc),
+                            kind=c.table,
+                            seconds=time.monotonic() - start,
                         )
                     )
                     print(f"  FAIL\n{_indent(str(exc))}", file=out, flush=True)
@@ -347,18 +348,24 @@ def _run_domain(
                 except Exception as exc:  # Hypothesis' own errors (e.g. Unsatisfiable)
                     outcomes.append(
                         Outcome(
-                            name,
-                            c.name,
-                            False,
-                            f"{type(exc).__name__}: {exc}",
-                            c.table,
-                            time.monotonic() - start,
+                            scenario=name,
+                            check=c.name,
+                            passed=False,
+                            message=f"{type(exc).__name__}: {exc}",
+                            kind=c.table,
+                            seconds=time.monotonic() - start,
                         )
                     )
                     print(f"  ERROR {type(exc).__name__}: {exc}", file=out, flush=True)
                     continue
                 outcomes.append(
-                    Outcome(name, c.name, True, "", c.table, time.monotonic() - start)
+                    Outcome(
+                        scenario=name,
+                        check=c.name,
+                        passed=True,
+                        kind=c.table,
+                        seconds=time.monotonic() - start,
+                    )
                 )
                 print("  ok", file=out, flush=True)
     finally:
@@ -412,26 +419,25 @@ def replay(
                 file=out,
             )
             return Outcome(
-                scen.name,
-                check.name,
-                False,
-                str(exc),
-                check.table,
-                time.monotonic() - start,
-                str(directory),
+                scenario=scen.name,
+                check=check.name,
+                passed=False,
+                message=exc.failure.message,
+                kind=check.table,
+                seconds=time.monotonic() - start,
+                failure=str(directory),
             )
     print(
         f"[{scen.name}] {check.table} {check.name!r}: ok (the saved example passes now)",
         file=out,
     )
     return Outcome(
-        scen.name,
-        check.name,
-        True,
-        "",
-        check.table,
-        time.monotonic() - start,
-        str(directory),
+        scenario=scen.name,
+        check=check.name,
+        passed=True,
+        kind=check.table,
+        seconds=time.monotonic() - start,
+        failure=str(directory),
     )
 
 

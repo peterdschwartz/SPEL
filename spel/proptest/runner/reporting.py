@@ -1,6 +1,7 @@
-"""How a failing check is reported: `PropertyFailure` (its message is the report), the `Failure`
-kept for saving, the `FailureSignature` that tells bugs apart while shrinking a drawn domain, and
-the report itself (the failing element, the values the expression used, the drawn inputs)."""
+"""How a failing check is reported: the `Failure` (what failed, where, the report), raised as a
+`PropertyFailure` that carries it; the `FailureSignature` that tells bugs apart while shrinking a
+drawn domain; and the report itself (the failing element, the values the expression used, the
+drawn inputs)."""
 
 from __future__ import annotations
 
@@ -29,10 +30,6 @@ if TYPE_CHECKING:
     from spel.proptest.runner.drawing import Example
 
 
-class PropertyFailure(AssertionError):
-    pass
-
-
 @dataclass(frozen=True)
 class FailureSignature:
     """How a check failed, to tell bugs apart while shrinking a drawn domain: the routine aborted,
@@ -58,14 +55,29 @@ class FailureSignature:
         return {"aborted": self.aborted, "nonfinite": sorted(self.nonfinite)}
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Failure:
+    """A check that failed on an example: what `Session.judge` found, saved by `FailureStore.save`."""
+
     scenario: str
     check: str
     example: Example
-    message: str
+    message: str  # the report
     element: Optional[int] = None  # Fortran index of the first failing element
     signature: Optional[FailureSignature] = None
+
+
+class PropertyFailure(AssertionError):
+    """A check failed on an example (`Session.judge`): `failure` says how, and the message is its
+    report. It is an exception because Hypothesis needs one to see a failing example; it re-raises
+    the shrunk example's own, so `orchestration.run` saves `exc.failure`."""
+
+    def __init__(self, failure: Failure):
+        super().__init__(failure.message)
+        self.failure = failure
+
+    def __reduce__(self):
+        return PropertyFailure, (self.failure,)
 
 
 def report(

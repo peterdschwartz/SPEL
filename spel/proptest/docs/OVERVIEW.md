@@ -28,27 +28,7 @@ with the reader's code as it is added, so a spec written in Python, its TOML fil
 
 ## From TOML to a verdict
 
-```
- .proptest.toml ─spec.load─► spec.Spec ─┐            (api.Spec.validate() gives the same object)
- fut.pkl ──Inventory.load──► Inventory ─┤
-                                        ▼
- runner.run ──► Session (one per configuration; one per domain if drawn)       runner/session.py
-                 1. build    build.py: libspelcase.so with the shim (shim.py) when stale
-                 2. domain   domain.build_domain: the synthetic domain on disk (SynthDomain)
-                 3. worker   worker.Worker: a subprocess that loads the library (runtime.py, ctypes)
-                ──► per scenario x check: Session.hypothesis_test  (Hypothesis @given)
-                       per example:
-                 4. draw     Drawing.draw_example: a seed + one mode per input (strategies.py),
-                             rule quantiles -> values (rules.py), then `derive`
-                 5. prepare  Check.prepare: e.g. a relation fills the follow-up half of the sets
-                 6. run      Stepping.compute -> the worker's run (Stepping.run_steps if multi-step)
-                 7. judge    Session.judge -> _evaluate_at: the expression per element (Evaluation,
-                             fexpr.py) in the namespaces the check provides; failure ->
-                             reporting.report, raised as PropertyFailure
-                ──► Hypothesis shrinks the inputs; runner.run turns the result into an Outcome
-                 8. save     FailureStore.save: failures/<scenario>__<check>/ (spel proptest replay)
-                 9. drawn domains only: runner._shrink shrinks the domain, one Session per candidate
-```
+Flow-diagram here
 
 A relation or scenario with its own `namelist` runs in `Session.sibling`, a second worker on the
 same library; a differential check runs the other case or build in `Session.other`.
