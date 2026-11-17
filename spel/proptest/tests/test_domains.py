@@ -135,7 +135,7 @@ def test_shrinking_keeps_only_candidates_that_fail_the_same_way(tmp_path, monkey
             sig = other  # "b" alone fails too, but another way
         return [runner.Outcome("s", "c", False, "msg", "property", failure="dir", signature=sig)]
 
-    monkeypatch.setattr(runner, "_run_domain", fake_run)
+    monkeypatch.setattr(runner.orchestration, "_run_domain", fake_run)  # where run and _shrink look it up
     cells = [Gridcell.of(Soil(1), name="a"), Gridcell.of(Soil(1), name="b")]
     failed = [runner.Outcome("s", "c", False, "msg", "property", failure="dir", signature=nan_x)]
     out = io.StringIO()

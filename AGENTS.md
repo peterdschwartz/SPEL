@@ -388,18 +388,23 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
     `domains.py`: drawn domains and their shrinking;
   - `domain.py`: the synthetic domain under `<case>/proptest/domain-<hash>`: the constants file,
     and either an inputs file (`[domain] init = "files"`) or, by default for cases made with
-    spel_varMod, `Domain.direct` (bounds + non-fill values), which the worker allocates through the
+    spel_varMod, `SynthDomain.direct` (bounds + non-fill values), which the worker allocates through the
     shim's descriptors (`spel_py_set_bounds`/`spel_py_allocate`/`spel_py_setup`, runtime.Case.init).
     Both give bit-identical state and outputs (checked on canflux 2026-11-10; the snow/lake filters
     `setFilters` doesn't build hold uninitialized memory either way). Saved failures are written
-    as captures (`Session.capture_dir` writes the files domain once when needed);
+    as captures (`FailureStore.capture_dir` writes the files domain once when needed);
   - `runtime.py`/`worker.py`: ctypes, in a spawned subprocess;
   - `fexpr.py`: Fortran expressions through `spel_parser`, evaluated with numpy;
   - `spec.py`: loads the TOML; `rules.py` (rule kinds), `checks.py` (check kinds) and
     `functions.py` have a registry each (`@register`), and the spec reader and runner know only
-    the interfaces. Add a kind there, not as a branch in `spec.py`/`runner.py`;
-  - `strategies.py`, `runner.py`: Hypothesis; `Session` runs the routine through a backend
-    (`get`/`run`/`stop`, `begin`/`step`: a `Worker`, or a test's fake);
+    the interfaces. Add a kind there, not as a branch in `spec.py`/`runner/`;
+  - `strategies.py`, `runner/`: Hypothesis; `Session` (`runner/session.py`) runs the routine through
+    a backend (`get`/`run`/`stop`, `begin`/`step`: a `Worker`, or a test's fake) and judges checks;
+    it composes `ElementSpace` (elements.py), `Evaluation` (evaluation.py), `Drawing` (drawing.py),
+    `Stepping` (stepping.py) and `FailureStore` (failures.py), each built from explicit inputs and
+    using only those before it, and keeps one-line forwards for what other modules call on a
+    session (add a forward only for such a use). `run`/`_shrink`/`replay`: orchestration.py; the
+    failure report: reporting.py;
   - `coupling.py`, `timestep.py`: multi-step runs (the boundary, the calendar);
   - `api.py` (Python builder of specs), `tomlw.py` (TOML writer), `results.py` (inspection);
   - `scaffold.py` (`init`), `stats.py`, `subspace.py`, `coverage.py`: design aids; `paths.py`: where files go.
@@ -499,7 +504,7 @@ Keep SPEC.md in step with the code: it is the only reference of the format.
   restricts the statistics. Kinds, urban densities and polygon types are enums (`LandunitKind`,
   `UrbanDensity`, `PolygonType`).
 - Multi-step runs (SPEC.md "Multi-step runs"): worker ops `begin`/`step` (no reset between steps;
-  `run` = one call, unchanged), `Session.run_steps` (cached per example; `compute` returns the
+  `run` = one call, unchanged), `Stepping.run_steps` (cached per example; `compute` returns the
   state of the step being judged, `_step` is shared with siblings and `other`, so relations and
   differentials compare the same step), `timestep.advance` (ELM's no-leap calendar). The boundary
   (`coupling.py`: elm_drv's StaticTrace over the full analysis, writers of case variables outside

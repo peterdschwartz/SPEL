@@ -651,5 +651,5 @@ process).
 | a check kind | a `Check` subclass with `@register` (its table, `prepare`, `elements`, `mask`, `namespaces`) | `checks.py` |
 | a function | a function with `@register` in a `[functions]` module, or an entry of `FUNCTIONS` | `functions.py` |
 | a topology field | an entry of the `TOPOLOGY_*` sets or a case in `topology_value` | `domain.py` |
-| another way to run the routine | an object with `get`, `run`, `stop` (and `begin`, `step` for multi-step runs) passed as `Session(..., backend=...)` | `runner.py` |
+| another way to run the routine | an object with `get`, `run`, `stop` (and `begin`, `step` for multi-step runs) passed as `Session(..., backend=...)` | `runner/session.py` |
 | a landunit kind or an ELM subgrid rule | the kind, its constructor and TOML table, its flags and layout pass | a `Landunit` subclass in `hierarchy/decl.py`, flags in `hierarchy/codes.py` (and `domain.EXPECTED_FILTERS`, `domains.py`) |

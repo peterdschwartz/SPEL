@@ -32,26 +32,32 @@ with the reader's code as it is added, so a spec written in Python, its TOML fil
  .proptest.toml ─spec.load─► spec.Spec ─┐            (api.Spec.validate() gives the same object)
  fut.pkl ──Inventory.load──► Inventory ─┤
                                         ▼
- runner.run ──► Session (one per configuration; one per domain if drawn)
+ runner.run ──► Session (one per configuration; one per domain if drawn)       runner/session.py
                  1. build    build.py: libspelcase.so with the shim (shim.py) when stale
                  2. domain   domain.build_domain: the synthetic domain on disk (SynthDomain)
                  3. worker   worker.Worker: a subprocess that loads the library (runtime.py, ctypes)
                 ──► per scenario x check: Session.hypothesis_test  (Hypothesis @given)
                        per example:
-                 4. draw     Session.draw_example: a seed + one mode per input (strategies.py),
+                 4. draw     Drawing.draw_example: a seed + one mode per input (strategies.py),
                              rule quantiles -> values (rules.py), then `derive`
                  5. prepare  Check.prepare: e.g. a relation fills the follow-up half of the sets
-                 6. run      Session.compute -> the worker's run (Session.run_steps if multi-step)
-                 7. judge    Session.judge -> _evaluate_at: the expression per element (fexpr.py)
-                             in the namespaces the check provides; failure -> Session.report,
-                             raised as PropertyFailure
+                 6. run      Stepping.compute -> the worker's run (Stepping.run_steps if multi-step)
+                 7. judge    Session.judge -> _evaluate_at: the expression per element (Evaluation,
+                             fexpr.py) in the namespaces the check provides; failure ->
+                             reporting.report, raised as PropertyFailure
                 ──► Hypothesis shrinks the inputs; runner.run turns the result into an Outcome
-                 8. save     Session.save_failure: failures/<scenario>__<check>/ (spel proptest replay)
+                 8. save     FailureStore.save: failures/<scenario>__<check>/ (spel proptest replay)
                  9. drawn domains only: runner._shrink shrinks the domain, one Session per candidate
 ```
 
 A relation or scenario with its own `namelist` runs in `Session.sibling`, a second worker on the
 same library; a differential check runs the other case or build in `Session.other`.
+
+`runner/` is a package: `Session` (session.py) composes `ElementSpace` (elements.py: elements,
+shapes, fixed values), `Evaluation` (evaluation.py: expressions, namespaces), `Drawing`
+(drawing.py: examples), `Stepping` (stepping.py: running the routines) and `FailureStore`
+(failures.py); `run`, `_shrink` and `replay` are in orchestration.py, the failure report in
+reporting.py. `Session` keeps the methods other modules call as one-line forwards.
 
 Where to look for:
 
@@ -59,12 +65,12 @@ Where to look for:
 |---|---|
 | which variables are inputs/outputs, and under which options | `inventory.py` (`Inventory.configured`) |
 | how a TOML table is read and checked | `spec.py`, `rules.parse`, `checks.<Kind>.from_table` |
-| how values are drawn | `Session.draw_example`, `Session.inputs_at`, `strategies.py`, `rules.py` |
+| how values are drawn | `runner/drawing.py` (`Drawing.draw_example`, `inputs_at`), `strategies.py`, `rules.py` |
 | how ELM's hierarchy and filters are laid out | `hierarchy/` (`Layout`), `domain.py` |
 | how the routine is called | `shim.py` (Fortran side), `worker.py`/`runtime.py` (Python side) |
-| how a failure message is written | `Session.report` |
-| multi-step runs: what the rest of ELM's step does | `coupling.py`, `Session.run_steps`, scenario `forcing`/`between`/`keep`/`carry` |
-| drawn domains and their shrinking | `domains.py`, `runner.run`, `runner._shrink` |
+| how a failure message is written | `runner/reporting.py` (`report`) |
+| multi-step runs: what the rest of ELM's step does | `coupling.py`, `runner/stepping.py` (`Stepping.run_steps`), scenario `forcing`/`between`/`keep`/`carry` |
+| drawn domains and their shrinking | `domains.py`, `runner/orchestration.py` (`run`, `_shrink`) |
 
 ## Names in expressions
 
